@@ -110,11 +110,7 @@ SIN_UNITY       EQU     $8A41           ; 65 flags: |sin| rounds up to 1.0
 ATANEXP         EQU     $8A82           ; 256 x u16: the angle for a log2 bucket
 ANGTOX          EQU     $8C82           ; 257 x u8: screen column for a view angle
 ; per-frame products i*sin_mag and i*cos_mag, as byte planes
-TSLO            EQU     $8E00
-TSHI            EQU     $8F00
-TCLO            EQU     $9000
-TCHI            EQU     $9100
-CODE_BASE       EQU     $9200
+CODE_BASE       EQU     $8E00
 
 ; Screen-space y inside the clipper is carried as a byte biased by Y_BIAS,
 ; so the visible rows [0, 159] land at [48, 207].  Anything a boundary line

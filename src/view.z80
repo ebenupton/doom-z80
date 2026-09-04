@@ -67,28 +67,6 @@ sc_notunity:
                 ret
 
 ; ---------------------------------------------------------------------------
-; build_prod : fill a pair of product planes with i*mag.
-; in : A = magnitude, D = low plane page (high plane is the next page)
-; ---------------------------------------------------------------------------
-build_prod:
-                ld      e,a
-                ld      d,0                     ; DE = mag
-                ld      hl,0                    ; running product
-bp_page:        ld      b,TSLO>>8               ; patched by the caller
-                ld      c,0
-bp_loop:
-                ld      a,l
-                ld      (bc),a
-                inc     b
-                ld      a,h
-                ld      (bc),a
-                dec     b
-                add     hl,de
-                inc     c
-                jr      nz,bp_loop
-                ret
-
-; ---------------------------------------------------------------------------
 ; view_setup : rebuild the per-frame view state.
 ; Reads pl_x/pl_xf/pl_y/pl_yf/pl_ang/vs_vz, writes the trig state, the product
 ; tables and vs_rx/vs_ry.
@@ -135,36 +113,27 @@ vs_rebuild:
                 ld      (vs_cunity),a
 
                 ; product tables
-                ld      a,TSLO>>8
-                ld      (bp_page+1),a
-                ld      a,(vs_smag)
-                call    build_prod
-                ld      a,TCLO>>8
-                ld      (bp_page+1),a
-                ld      a,(vs_cmag)
-                call    build_prod
-
                 ; patch the rotation dispatchers
-                ld      hl,rot_sin_tab
+                ld      hl,rot_sin_gen
                 ld      a,(vs_sunity)
                 or      a
                 jr      z,vs_s1
                 ld      hl,rot_sin_unity
 vs_s1:          ld      (rs_k+1),hl
                 ld      a,(vs_smag)
-                ld      (rsm2+1),a
+                ld      (rsm1+1),a
                 ld      hl,rsn
                 ld      a,(vs_sneg)
                 call    patch_sign
 
-                ld      hl,rot_cos_tab
+                ld      hl,rot_cos_gen
                 ld      a,(vs_cunity)
                 or      a
                 jr      z,vs_c1
                 ld      hl,rot_cos_unity
 vs_c1:          ld      (rc_k+1),hl
                 ld      a,(vs_cmag)
-                ld      (rcm2+1),a
+                ld      (rcm1+1),a
                 ld      hl,rcn
                 ld      a,(vs_cneg)
                 call    patch_sign
@@ -289,12 +258,11 @@ fterm_sin:
                 ld      a,(vs_sunity)
                 or      a
                 jr      nz,ft_unity_s
-                ld      h,TSLO>>8
-                ld      l,e
-                ld      e,(hl)
-                inc     h
-                ld      d,(hl)                  ; DE = lo*mag
-                ld      hl,128
+                ld      a,(vs_smag)
+                ld      l,a
+                ld      h,e
+                call    mul_u8                  ; HL = lo*mag
+                ld      de,128
                 add     hl,de
                 ld      l,h
                 ld      h,0                     ; HL = (lo*mag + 128) >> 8
@@ -310,12 +278,11 @@ fterm_cos:
                 ld      a,(vs_cunity)
                 or      a
                 jr      nz,ft_unity_c
-                ld      h,TCLO>>8
-                ld      l,e
-                ld      e,(hl)
-                inc     h
-                ld      d,(hl)
-                ld      hl,128
+                ld      a,(vs_cmag)
+                ld      l,a
+                ld      h,e
+                call    mul_u8
+                ld      de,128
                 add     hl,de
                 ld      l,h
                 ld      h,0
@@ -339,66 +306,24 @@ ft_sign:
 ; The dispatch target, the magnitude and the sign step are patched per frame.
 ; ---------------------------------------------------------------------------
 rot_sin:
-rs_k:           jp      rot_sin_tab
-rot_sin_tab:
-                ld      a,d
-                ld      h,TSLO>>8
-                ld      l,e
-                ld      c,(hl)
-                inc     h
-                ld      b,(hl)                  ; BC = lo * mag
-                dec     h
-                ld      l,a
-                ld      e,(hl)
-                inc     h
-                ld      d,(hl)                  ; DE = hi_unsigned * mag
-                or      a
-                jp      p,rst_pos
-                ld      a,d
-rsm2:           sub     0                       ; hi was negative: -= mag<<8
-                ld      d,a
-rst_pos:
-                ld      l,c
-                ld      a,b
-                add     a,e
-                ld      h,a
-                ld      a,d
-                adc     a,0
-rsn:            ret
+rs_k:           jp      rot_sin_gen             ; patched: _gen, _unity
+rot_sin_gen:
+rsm1:           ld      a,0                     ; the magnitude, patched
+                call    mul_s16_u8
+rsn:            ret                             ; or JP neg_ahl, patched
                 nop
                 nop
 rot_sin_unity:
                 ld      l,0
                 ld      h,e
-                ld      a,d                     ; A:HL = d << 8
+                ld      a,d                     ; A:HL = w << 8
                 jp      rsn
 
 rot_cos:
-rc_k:           jp      rot_cos_tab
-rot_cos_tab:
-                ld      a,d
-                ld      h,TCLO>>8
-                ld      l,e
-                ld      c,(hl)
-                inc     h
-                ld      b,(hl)
-                dec     h
-                ld      l,a
-                ld      e,(hl)
-                inc     h
-                ld      d,(hl)
-                or      a
-                jp      p,rct_pos
-                ld      a,d
-rcm2:           sub     0
-                ld      d,a
-rct_pos:
-                ld      l,c
-                ld      a,b
-                add     a,e
-                ld      h,a
-                ld      a,d
-                adc     a,0
+rc_k:           jp      rot_cos_gen
+rot_cos_gen:
+rcm1:           ld      a,0
+                call    mul_s16_u8
 rcn:            ret
                 nop
                 nop

@@ -42,7 +42,7 @@
                 INCBIN  "../build/tables.bin"
 
                 include "cold.z80"
-                ASSERT  $ <= TSLO, "cold code has run into the product tables"
+                ASSERT  $ <= CODE_BASE, "cold code has run into the code"
                 ; $8E00..$91FF holds the per-frame product tables, built at
                 ; run time; pad so the image loads contiguously from $8800.
                 DS      ORG_ADDR-$, 0
