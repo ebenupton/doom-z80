@@ -75,12 +75,16 @@ RECIP_M8        EQU     $8800           ; normalised reciprocal mantissa - 256
 RECIP_S         EQU     $8900           ; its binade, (idx-1).bit_length()
 SIN_MAG         EQU     $8A00           ; 65 entries, one quadrant, 0.8 unsigned
 SIN_UNITY       EQU     $8A41           ; 65 flags: |sin| rounds up to 1.0
+ATANTAB         EQU     $8B00           ; 257 x u16: atan(t/256) as a 16-bit angle
+ANGTOX          EQU     $8D10           ; 257 x u8: screen column for a view angle
 ; per-frame products i*sin_mag and i*cos_mag, as byte planes
-TSLO            EQU     $8B00
-TSHI            EQU     $8C00
-TCLO            EQU     $8D00
-TCHI            EQU     $8E00
-CODE_BASE       EQU     $8F00
+TSLO            EQU     $8F00
+TSHI            EQU     $9000
+TCLO            EQU     $9100
+TCHI            EQU     $9200
+CODE_BASE       EQU     $9300
+
+CLIPANGLE       EQU     8192            ; 45 degrees in 16-bit angle units
 ORG_ADDR        EQU     CODE_BASE
 
 ; The span pool lives in bank 2 rather than with the other scratch: it is the
@@ -322,7 +326,7 @@ bb_hi16         EQU     VARS_BASE+462
 bb_pa           EQU     VARS_BASE+464
 bb_pb           EQU     VARS_BASE+466
 bb_ay           EQU     VARS_BASE+468
-bb_by           EQU     VARS_BASE+470
+bb_byv          EQU     VARS_BASE+470
 bb_ac           EQU     VARS_BASE+472
 bb_bc           EQU     VARS_BASE+473
 bb_cx           EQU     VARS_BASE+474
@@ -363,14 +367,63 @@ mv_cunity       EQU     VARS_BASE+523
 vs_lastang      EQU     VARS_BASE+524   ; angle the product tables were built for
 vs_haveang      EQU     VARS_BASE+525
 
+; --- line clipper ----------------------------------------------------------
+cl_lfn          EQU     VARS_BASE+526   ; the line as (slope 8.8, intercept)
+ct_xa           EQU     VARS_BASE+530   ; clipped column range, bytes
+ct_xb           EQU     VARS_BASE+531
+ct_ya           EQU     VARS_BASE+532
+ct_yb           EQU     VARS_BASE+534
+nw_va           EQU     VARS_BASE+536
+nw_vb           EQU     VARS_BASE+538
+nw_xc           EQU     VARS_BASE+540
+cy_col          EQU     VARS_BASE+542
+cy_val          EQU     VARS_BASE+544
+bb_bx           EQU     VARS_BASE+546
+bb_boxy         EQU     VARS_BASE+547
+bb_cc           EQU     VARS_BASE+548
+pa_dx           EQU     VARS_BASE+562
+pa_dy           EQU     VARS_BASE+564
+pa_num          EQU     VARS_BASE+566
+pa_den          EQU     VARS_BASE+568
+pa_oct          EQU     VARS_BASE+570
+bb_a1           EQU     VARS_BASE+572
+bb_a2           EQU     VARS_BASE+574
+bb_span         EQU     VARS_BASE+576
+bb_sx1          EQU     VARS_BASE+578
+; --- batched sloped-edge drawing ------------------------------------------
+SQ_MAX          EQU     6
+sq_n            EQU     VARS_BASE+579
+sq_y            EQU     VARS_BASE+580   ; SQ_MAX x (y1, y2)
+sq_fn           EQU     VARS_BASE+604   ; SQ_MAX x (slope, intercept)
+fe_x1           EQU     VARS_BASE+628
+fe_x2           EQU     VARS_BASE+630
+fe_yp           EQU     VARS_BASE+632
+fe_fp           EQU     VARS_BASE+634
+fe_i            EQU     VARS_BASE+636
+ct_xa0          EQU     VARS_BASE+637
+ct_xb0          EQU     VARS_BASE+638
+ct_ta0          EQU     VARS_BASE+640
+ct_ba0          EQU     VARS_BASE+642
+ct_tb0          EQU     VARS_BASE+644
+ct_bb0          EQU     VARS_BASE+646
+cl_lfnp         EQU     VARS_BASE+648
+qe_y1           EQU     VARS_BASE+650
+qe_y2           EQU     VARS_BASE+652
+lf_absx         EQU     VARS_BASE+550
+ds_cx1          EQU     VARS_BASE+551
+ds_cx2          EQU     VARS_BASE+552
+ct_col          EQU     VARS_BASE+553
+ct_ta           EQU     VARS_BASE+554
+ct_ba           EQU     VARS_BASE+556
+ct_tb           EQU     VARS_BASE+558
+ct_bb           EQU     VARS_BASE+560   ; pointer into CHECKCOORD
+
 STEP_WALK       EQU     $0500           ; 5 prescaled units = 40 world units
 STEP_RUN        EQU     $0A00
 TURN_WALK       EQU     3
 TURN_RUN        EQU     5
 
-; --- IM2 vector table and handler ------------------------------------------
-IM2_TABLE       EQU     $B600           ; 257 bytes of $B5
-IM2_HANDLER     EQU     $B5B5
+; (no IM 2 vector table: the engine runs in IM 1 - see setup_int)
 
 ; --- bank 0 ($C000-$FFFF): geometry ----------------------------------------
 GEO_BASE        EQU     $C000

@@ -201,7 +201,6 @@ ms8_1:
 ;         -> HL = y (s16).  Flat boundaries skip the multiply.
 ; ---------------------------------------------------------------------------
 ev_at:
-                ld      (ev_col_x),a
                 ld      e,(hl)
                 inc     hl
                 ld      d,(hl)
@@ -209,6 +208,7 @@ ev_at:
                 ld      c,(hl)
                 inc     hl
                 ld      b,(hl)                  ; DE = slope, BC = intercept
+                ld      l,a                     ; L = column
                 ld      a,d
                 or      e
                 jr      nz,ev_slope
@@ -216,12 +216,38 @@ ev_at:
                 ld      l,c
                 ret
 ev_slope:
-                ld      (ev_tmp),bc
-                ld      a,(ev_col_x)
-                call    mul_s16_u8              ; A:HL = slope * x
+                ; (slope*col) >> 8 == shi*col + ((slo*col) >> 8); the high
+                ; byte is 0 or -1 for any gradient under one pixel a column,
+                ; which is most of them, so that term usually vanishes.
+                push    bc                      ; intercept
+                ld      b,d                     ; B = slope high byte
+                ld      c,l                     ; C = column
+                push    bc
+                ld      h,e
+                MUL_U8_BODY                     ; HL = slo * col
                 ld      l,h
-                ld      h,a                     ; arithmetic >> 8
-                ld      de,(ev_tmp)
+                ld      h,0
+                pop     bc
+                ld      a,b
+                or      a
+                jr      z,ev_fin
+                inc     a
+                jr      nz,ev_gen
+                ld      e,c
+                ld      d,0
+                or      a
+                sbc     hl,de
+                jr      ev_fin
+ev_gen:
+                dec     a
+                push    hl
+                ld      h,a
+                ld      l,c
+                call    mul_s8_u8
+                pop     de
+                add     hl,de
+ev_fin:
+                pop     de
                 add     hl,de
                 ret
 
@@ -288,8 +314,35 @@ lf_use2:
 lf_calc:
                 ld      (lf_y),hl
                 ex      de,hl                   ; HL = x
+                ; (slope * x) >> 8.  Screen columns are almost always inside
+                ; +/-255, which turns the wide product into one 16x8.
+                ld      a,h
+                or      a
+                jr      z,lf_narrow
+                inc     a
+                jr      nz,lf_wide
+                ; x is negative and fits a byte.  The product must be negated
+                ; before the shift: floor(-p/256) is not -floor(p/256).
+                ld      a,l
+                neg
+                ld      (lf_absx),a
+                ld      de,(lf_slope_v)
+                ld      a,(lf_absx)
+                call    mul_s16_u8
+                call    neg_ahl
+                ld      l,h
+                ld      h,a
+                jr      lf_haveprod
+lf_narrow:
+                ld      a,l
+                ld      (lf_absx),a
+                ld      de,(lf_slope_v)
+                call    lf_mulcol
+                jr      lf_haveprod
+lf_wide:
                 ld      de,(lf_slope_v)
                 call    fpmul8                  ; HL = (slope * x) >> 8
+lf_haveprod:
                 ex      de,hl
                 ld      hl,(lf_y)
                 or      a
@@ -304,6 +357,14 @@ lf_calc:
                 ld      (hl),e
                 inc     hl
                 ld      (hl),d
+                ret
+
+; lf_mulcol : DE = slope, (lf_absx) = column 0..255 -> HL = (slope*col) >> 8
+lf_mulcol:
+                ld      a,(lf_absx)
+                call    mul_s16_u8
+                ld      l,h
+                ld      h,a
                 ret
 
 abs_hl:
@@ -1261,248 +1322,509 @@ dv_b1:          ld      (dv_b),hl
                 jp      dl_emit
 
 ; ---------------------------------------------------------------------------
-; sp_draws : sloped segment (ln_x1, ln_y1) - (ln_x2, ln_y2), x1 < x2.
-; Cyrus-Beck clipped against every span it overlaps.
+; queue_edge : remember one sloped edge of the current seg.  HL = y at sx1,
+; DE = y at sx2; every edge of a seg shares the same x endpoints.
 ; ---------------------------------------------------------------------------
-sp_draws:
-                ld      a,(sp_count)
+queue_edge:
+                ld      (qe_y1),hl
+                ld      (qe_y2),de
+                ld      a,(sq_n)
+                cp      SQ_MAX
+                ret     nc
+                ld      c,a
+                inc     a
+                ld      (sq_n),a
+                ld      a,c
+                add     a,a
+                add     a,a
+                ld      l,a
+                ld      h,0
+                ld      de,sq_y
+                add     hl,de
+                ld      de,(qe_y1)
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                inc     hl
+                ld      de,(qe_y2)
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                ret
+
+; ---------------------------------------------------------------------------
+; flush_edges : clip and emit every queued edge, span-major.
+;
+; The edges of a seg share an x range, so a span's trapezoid boundaries are
+; evaluated once and reused by all of them; only the line itself is evaluated
+; per edge.  That turns six evaluations per edge per span into four per span
+; plus two per edge.
+; ---------------------------------------------------------------------------
+flush_edges:
+                ld      a,(sq_n)
                 or      a
                 ret     z
+                ld      a,(sp_count)
+                or      a
+                jp      z,fe_clear
+                ld      hl,(sg_sx1)
+                ld      de,(sg_sx2)
+                call    cmp_s16
+                jr      c,fe_ord
+                ld      hl,(sg_sx2)
+                ld      (fe_x1),hl
+                ld      hl,(sg_sx1)
+                ld      (fe_x2),hl
+                call    fe_swapy
+                jr      fe_have
+fe_ord:
+                ld      hl,(sg_sx1)
+                ld      (fe_x1),hl
+                ld      hl,(sg_sx2)
+                ld      (fe_x2),hl
+fe_have:
+                ld      hl,(fe_x2)
+                bit     7,h
+                jp      nz,fe_clear             ; wholly left of the screen
+                ld      hl,(fe_x1)
+                bit     7,h
+                jr      nz,fe_on
+                ld      a,h
+                or      a
+                jp      nz,fe_clear             ; wholly right of it
+fe_on:
+                ld      hl,(fe_x1)
+                call    clamp_col
+                ld      (ds_cx1),a
+                ld      hl,(fe_x2)
+                call    clamp_col
+                ld      (ds_cx2),a
+                ld      hl,(fe_x1)
+                ld      (cl_lx1),hl
+                ld      hl,(fe_x2)
+                ld      (cl_lx2),hl
+                ld      hl,sq_y
+                ld      (fe_yp),hl
+                ld      hl,sq_fn
+                ld      (fe_fp),hl
+                ld      a,(sq_n)
+                ld      (fe_i),a
+fe_fl:
+                ld      hl,(fe_yp)
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                inc     hl
+                ld      (cl_ly1),de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                inc     hl
+                ld      (cl_ly2),de
+                ld      (fe_yp),hl
+                ld      hl,(fe_fp)
+                call    linfn
+                ld      hl,(fe_fp)
+                ld      de,4
+                add     hl,de
+                ld      (fe_fp),hl
+                ld      a,(fe_i)
+                dec     a
+                ld      (fe_i),a
+                jr      nz,fe_fl
+
+                ld      a,(sp_count)
                 ld      (sp_n),a
-                ld      hl,(ln_x2)
-                ld      de,(ln_x1)
-                or      a
-                sbc     hl,de
-                ld      (cl_dx),hl
-                ld      hl,(ln_y2)
-                ld      de,(ln_y1)
-                or      a
-                sbc     hl,de
-                ld      (cl_dy),hl
                 ld      hl,(sp_head)
-ds_loop:
+fe_sloop:
                 ld      (cl_span),hl
-                ; skip spans that cannot overlap [x1, x2]
-                ld      a,(hl)
-                ld      e,a
-                ld      d,0
-                ld      hl,(ln_x2)
-                or      a
-                sbc     hl,de
-                jp      m,ds_done               ; xlo > x2 -> sorted, stop
-                ld      hl,(cl_span)
+                ld      a,(ds_cx2)
+                cp      (hl)
+                jr      c,fe_clear              ; xlo > x2: the list is sorted
                 inc     hl
                 ld      a,(hl)
-                ld      e,a
-                ld      d,0
-                ld      hl,(ln_x1)
-                or      a
-                sbc     hl,de                   ; x1 - xlast
-                jr      z,ds_clip
-                jp      p,ds_next               ; x1 > xlast: no overlap
-ds_clip:
-                call    clip_to_trap
-ds_next:
+                ld      b,a
+                ld      a,(ds_cx1)
+                cp      b
+                jr      z,fe_span
+                jr      nc,fe_next
+fe_span:
+                call    ct_span
+                ld      hl,sq_fn
+                ld      (fe_fp),hl
+                ld      a,(sq_n)
+                ld      (fe_i),a
+fe_eloop:
+                ld      hl,(fe_fp)
+                call    ct_edge
+                ld      hl,(fe_fp)
+                ld      de,4
+                add     hl,de
+                ld      (fe_fp),hl
+                ld      a,(fe_i)
+                dec     a
+                ld      (fe_i),a
+                jr      nz,fe_eloop
+fe_next:
                 ld      hl,(cl_span)
                 ld      bc,SPAN_SIZE
                 add     hl,bc
                 ld      a,(sp_n)
                 dec     a
                 ld      (sp_n),a
-                jp      nz,ds_loop
-ds_done:
+                jp      nz,fe_sloop
+fe_clear:
+                xor     a
+                ld      (sq_n),a
+                ret
+
+; fe_swapy : the seg's x endpoints were the wrong way round, so swap every
+; queued edge's y pair to match.
+fe_swapy:
+                ld      hl,sq_y
+                ld      a,(sq_n)
+                ld      b,a
+fs_l:
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                inc     hl
+                ld      c,(hl)
+                ld      (hl),e
+                inc     hl
+                ld      a,(hl)
+                ld      (hl),d
+                inc     hl
+                ld      d,a
+                ld      e,c
+                dec     hl
+                dec     hl
+                dec     hl
+                dec     hl
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                inc     hl
+                inc     hl
+                inc     hl
+                djnz    fs_l
+                ret
+
+; clamp_col : HL (s16) -> A, clamped to 0..255
+clamp_col:
+                bit     7,h
+                jr      nz,cc_zero
+                ld      a,h
+                or      a
+                jr      nz,cc_max
+                ld      a,l
+                ret
+cc_max:         ld      a,255
+                ret
+cc_zero:        xor     a
                 ret
 
 ; ---------------------------------------------------------------------------
-; clip_to_trap : clip the staged line to the span at cl_span and emit it.
+; ct_span : the part of the clip that is the same for every edge - the
+; overlapping column range and the trapezoid boundaries at its two ends.
 ; ---------------------------------------------------------------------------
-clip_to_trap:
-                ld      hl,0
-                ld      (cl_t0),hl
-                ld      hl,256
-                ld      (cl_t1),hl
-                ; stage the trapezoid
+ct_span:
                 ld      hl,(cl_span)
                 ld      a,(hl)
-                ld      (cl_xlo),a
-                xor     a
-                ld      (cl_xlo+1),a
-                ld      hl,(cl_span)
+                ld      (ct_xa0),a
                 inc     hl
                 ld      a,(hl)
-                ld      (cl_xhi),a
-                xor     a
-                ld      (cl_xhi+1),a
+                ld      (ct_xb0),a
+                ld      a,(ds_cx1)
+                ld      b,a
+                ld      a,(ct_xa0)
+                cp      b
+                jr      nc,cts_a
+                ld      a,b
+                ld      (ct_xa0),a
+cts_a:
+                ld      a,(ds_cx2)
+                ld      b,a
+                ld      a,(ct_xb0)
+                cp      b
+                jr      c,cts_b
+                ld      a,b
+                ld      (ct_xb0),a
+cts_b:
                 ld      hl,(cl_span)
                 ld      de,SP_TA
                 add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (cl_ta),de
-                inc     hl
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (cl_tb),de
+                ld      a,(ct_xa0)
+                call    ev_at
+                ld      (ct_ta0),hl
                 ld      hl,(cl_span)
                 ld      de,SP_BA
                 add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (cl_ba),de
-                inc     hl
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (cl_bb),de
-
-                ; 1: x >= xlo    p = -dx, q = x1 - xlo
-                ld      hl,0
-                ld      de,(cl_dx)
-                or      a
-                sbc     hl,de
-                ld      (cl_p),hl
-                ld      hl,(ln_x1)
-                ld      de,(cl_xlo)
-                or      a
-                sbc     hl,de
-                ld      (cl_q),hl
-                call    cl_apply
-                ret     c
-                ; 2: x <= xlast  p = dx, q = xlast - x1
-                ld      hl,(cl_dx)
-                ld      (cl_p),hl
-                ld      hl,(cl_xhi)
-                ld      de,(ln_x1)
-                or      a
-                sbc     hl,de
-                ld      (cl_q),hl
-                call    cl_apply
-                ret     c
-                ; 3: y >= top(x)   p = ta*dx - dy, q = y1 - ta*x1 - tb
-                ld      de,(cl_ta)
-                ld      a,d
-                or      e
-                jr      nz,ct_tslope
-                ld      hl,0
-                ld      de,(cl_dy)
-                or      a
-                sbc     hl,de
-                ld      (cl_p),hl
-                ld      hl,(ln_y1)
-                ld      de,(cl_tb)
-                or      a
-                sbc     hl,de
-                ld      (cl_q),hl
-                jr      ct_t3
-ct_tslope:
-                ld      hl,(cl_dx)
-                ld      de,(cl_ta)
-                call    fpmul8
-                ld      de,(cl_dy)
-                or      a
-                sbc     hl,de
-                ld      (cl_p),hl
-                ld      hl,(ln_x1)
-                ld      de,(cl_ta)
-                call    fpmul8
-                ex      de,hl
-                ld      hl,(ln_y1)
-                or      a
-                sbc     hl,de
-                ld      de,(cl_tb)
-                or      a
-                sbc     hl,de
-                ld      (cl_q),hl
-ct_t3:
-                call    cl_apply
-                ret     c
-                ; 4: y <= bot(x)   p = dy - ba*dx, q = ba*x1 + bb - y1
-                ld      de,(cl_ba)
-                ld      a,d
-                or      e
-                jr      nz,ct_bslope
-                ld      hl,(cl_dy)
-                ld      (cl_p),hl
-                ld      hl,(cl_bb)
-                ld      de,(ln_y1)
-                or      a
-                sbc     hl,de
-                ld      (cl_q),hl
-                jr      ct_t4
-ct_bslope:
-                ld      hl,(cl_dx)
-                ld      de,(cl_ba)
-                call    fpmul8
-                ex      de,hl
-                ld      hl,(cl_dy)
-                or      a
-                sbc     hl,de
-                ld      (cl_p),hl
-                ld      hl,(ln_x1)
-                ld      de,(cl_ba)
-                call    fpmul8
-                ld      de,(cl_bb)
+                ld      a,(ct_xa0)
+                call    ev_at
+                ld      (ct_ba0),hl
+                ld      hl,(cl_span)
+                ld      de,SP_TA
                 add     hl,de
-                ld      de,(ln_y1)
-                or      a
-                sbc     hl,de
-                ld      (cl_q),hl
-ct_t4:
-                call    cl_apply
-                ret     c
-                ; t0 <= t1 ?
-                ld      hl,(cl_t1)
-                ld      de,(cl_t0)
-                or      a
-                sbc     hl,de
-                ret     c
-                ; endpoints
-                ld      hl,(cl_t0)
-                call    cl_at
-                ld      (cl_ax),hl
-                ld      (cl_ay),de
-                ld      hl,(cl_t1)
-                call    cl_at
-                ld      (cl_bx),hl
-                ld      (cl_by),de
-                ; clamp x into the span and order the endpoints
-                ld      hl,cl_ax
-                call    cl_clampx
-                ld      hl,cl_bx
-                call    cl_clampx
-                ld      hl,(cl_bx)
-                ld      de,(cl_ax)
-                or      a
-                sbc     hl,de
-                jr      nc,ct_ord
-                ld      hl,(cl_ax)
-                ld      de,(cl_bx)
-                ld      (cl_ax),de
-                ld      (cl_bx),hl
-                ld      hl,(cl_ay)
-                ld      de,(cl_by)
-                ld      (cl_ay),de
-                ld      (cl_by),hl
-ct_ord:
-                ; clamp y into the aperture at each endpoint
-                ld      hl,cl_ax
-                call    cl_clampy
-                ld      hl,cl_bx
-                call    cl_clampy
-                ld      a,(cl_ax)
-                ld      c,a
-                ld      a,(cl_ay)
+                ld      a,(ct_xb0)
+                call    ev_at
+                ld      (ct_tb0),hl
+                ld      hl,(cl_span)
+                ld      de,SP_BA
+                add     hl,de
+                ld      a,(ct_xb0)
+                call    ev_at
+                ld      (ct_bb0),hl
+                ret
+
+; ---------------------------------------------------------------------------
+; ct_edge : clip one edge (HL = its line function) to the staged span.
+; ---------------------------------------------------------------------------
+ct_edge:
+                ld      (cl_lfnp),hl
+                ld      a,(ct_xa0)
+                ld      (ct_xa),a
+                ld      a,(ct_xb0)
+                ld      (ct_xb),a
+                ld      hl,(ct_ta0)
+                ld      (ct_ta),hl
+                ld      hl,(ct_ba0)
+                ld      (ct_ba),hl
+                ld      hl,(ct_tb0)
+                ld      (ct_tb),hl
+                ld      hl,(ct_bb0)
+                ld      (ct_bb),hl
+                ld      hl,(cl_lfnp)
+                ld      a,(ct_xa)
+                call    ev_at
+                ld      (ct_ya),hl
+                ld      hl,(cl_lfnp)
+                ld      a,(ct_xb)
+                call    ev_at
+                ld      (ct_yb),hl
+
+                ; --- y >= top(x) ---------------------------------------
+                ld      hl,(ct_ya)
+                ld      de,(ct_ta)
+                call    cmp_s16
+                jr      c,ct_topcross
+                ld      hl,(ct_yb)
+                ld      de,(ct_tb)
+                call    cmp_s16
+                jr      nc,ct_bot
+                call    ct_topdiff
+                call    cross_col
+                ret     nc
+                ld      (ct_xb),a
+                call    ct_eval_b
+                jr      ct_order
+ct_topcross:
+                ld      hl,(ct_yb)
+                ld      de,(ct_tb)
+                call    cmp_s16
+                ret     c                       ; both ends above the top
+                call    ct_topdiff
+                call    cross_col
+                ret     nc
+                ld      (ct_xa),a
+                call    ct_eval
+ct_order:
+                ld      a,(ct_xa)
                 ld      b,a
-                ld      a,(cl_bx)
-                ld      e,a
-                ld      a,(cl_by)
+                ld      a,(ct_xb)
+                cp      b
+                ret     c
+
+                ; --- y <= bot(x) ---------------------------------------
+ct_bot:
+                ld      hl,(ct_ba)
+                ld      de,(ct_ya)
+                call    cmp_s16
+                jr      c,ct_botcross
+                ld      hl,(ct_bb)
+                ld      de,(ct_yb)
+                call    cmp_s16
+                jr      nc,ct_emit
+                call    ct_botdiff
+                call    cross_col
+                ret     nc
+                ld      (ct_xb),a
+                call    ct_eval_b
+                jr      ct_order2
+ct_botcross:
+                ld      hl,(ct_bb)
+                ld      de,(ct_yb)
+                call    cmp_s16
+                ret     c                       ; both ends below the bottom
+                call    ct_botdiff
+                call    cross_col
+                ret     nc
+                ld      (ct_xa),a
+                call    ct_eval
+ct_order2:
+                ld      a,(ct_xa)
+                ld      b,a
+                ld      a,(ct_xb)
+                cp      b
+                ret     c
+
+ct_emit:
+                ld      hl,(ct_ya)
+                ld      de,(ct_ta)
+                call    cmp_s16
+                jr      nc,ct_e1
+                ld      hl,(ct_ta)
+                jr      ct_e2
+ct_e1:          ld      de,(ct_ba)
+                call    cmp_s16
+                jr      c,ct_e2
+                ld      hl,(ct_ba)
+ct_e2:          ld      a,l
+                ld      (ct_ya),a
+                ld      hl,(ct_yb)
+                ld      de,(ct_tb)
+                call    cmp_s16
+                jr      nc,ct_e3
+                ld      hl,(ct_tb)
+                jr      ct_e4
+ct_e3:          ld      de,(ct_bb)
+                call    cmp_s16
+                jr      c,ct_e4
+                ld      hl,(ct_bb)
+ct_e4:          ld      a,l
                 ld      d,a
-                ld      a,c
-                ld      c,e
+                ld      a,(ct_ya)
+                ld      b,a
+                ld      a,(ct_xb)
+                ld      c,a
+                ld      a,(ct_xa)
                 jp      dl_emit
+
+; ct_eval / ct_eval_b : re-evaluate line, top and bottom after a crossing
+; moved one end of the range.
+ct_eval:
+                ld      (ct_col),a
+                ld      hl,(cl_lfnp)
+                call    ev_at
+                ld      (ct_ya),hl
+                ld      hl,(cl_span)
+                ld      de,SP_TA
+                add     hl,de
+                ld      a,(ct_col)
+                call    ev_at
+                ld      (ct_ta),hl
+                ld      hl,(cl_span)
+                ld      de,SP_BA
+                add     hl,de
+                ld      a,(ct_col)
+                call    ev_at
+                ld      (ct_ba),hl
+                ret
+ct_eval_b:
+                ld      (ct_col),a
+                ld      hl,(cl_lfnp)
+                call    ev_at
+                ld      (ct_yb),hl
+                ld      hl,(cl_span)
+                ld      de,SP_TA
+                add     hl,de
+                ld      a,(ct_col)
+                call    ev_at
+                ld      (ct_tb),hl
+                ld      hl,(cl_span)
+                ld      de,SP_BA
+                add     hl,de
+                ld      a,(ct_col)
+                call    ev_at
+                ld      (ct_bb),hl
+                ret
+
+ct_topdiff:
+                ld      hl,(cl_span)
+                ld      de,SP_TA
+                add     hl,de
+                ld      (pw_g),hl
+                ld      hl,(cl_lfnp)
+                ld      (pw_f),hl
+                jp      pw_diff
+ct_botdiff:
+                ld      hl,(cl_span)
+                ld      de,SP_BA
+                add     hl,de
+                ld      (pw_f),hl
+                ld      hl,(cl_lfnp)
+                ld      (pw_g),hl
+                jp      pw_diff
+
+; ---------------------------------------------------------------------------
+; cross_col : first column in [ct_xa, ct_xb] where the staged difference
+; function is non-negative.  Carry set and A = that column on success.
+; ---------------------------------------------------------------------------
+cross_col:
+                ld      de,(pw_da)
+                ld      a,d
+                or      e
+                jr      z,cc_fail
+                ld      hl,(pw_db)
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ex      de,hl
+                ld      bc,(pw_da)
+                call    divs
+                ld      a,(ct_xa)
+                ld      e,a
+                ld      d,0
+                call    cmp_s16
+                jr      nc,cc_1
+                ex      de,hl
+cc_1:
+                ld      a,(ct_xb)
+                ld      e,a
+                ld      d,0
+                call    cmp_s16
+                jr      c,cc_2
+                ex      de,hl
+cc_2:
+                ld      a,l
+                ld      (nw_xc),a
+                call    pw_evd
+                bit     7,h
+                jr      z,cc_have
+                ld      de,(pw_da)
+                bit     7,d
+                jr      nz,cc_down
+                ld      a,(nw_xc)
+                inc     a
+                jr      z,cc_fail
+                ld      b,a
+                ld      a,(ct_xb)
+                cp      b
+                jr      c,cc_fail
+                ld      a,b
+                ld      (nw_xc),a
+                jr      cc_have
+cc_down:
+                ld      a,(nw_xc)
+                or      a
+                jr      z,cc_fail
+                dec     a
+                ld      b,a
+                ld      a,(ct_xa)
+                cp      b
+                jr      z,cc_dok
+                jr      nc,cc_fail
+cc_dok:
+                ld      a,b
+                ld      (nw_xc),a
+cc_have:
+                ld      a,(nw_xc)
+                scf
+                ret
+cc_fail:
+                or      a
+                ret
 
 ; cl_apply : narrow [t0, t1] by the constraint p*t + q >= 0.  Carry = reject.
 cl_apply:

@@ -211,13 +211,39 @@ class Spans:
     # -- drawing ----------------------------------------------------------
 
     def draw(self, lines):
+        """Draw one seg's edges.
+
+        The sloped ones all share an x range, so they are clipped span-major:
+        each span's boundaries are evaluated once and reused by every edge,
+        instead of six evaluations per edge per span.
+        """
+        sloped, verts = [], []
         for (x1, y1, x2, y2) in lines:
             if x1 == x2:
-                self._draw_vertical(x1, y1, y2)
+                verts.append((x1, y1, y2))
             else:
                 if x1 > x2:
                     x1, y1, x2, y2 = x2, y2, x1, y1
-                self._draw_sloped(x1, y1, x2, y2)
+                sloped.append((linfn(y1, y2, x1, x2), x1, x2))
+        if sloped:
+            self._draw_sloped_batch(sloped)
+        for (x, ya, yb) in verts:
+            self._draw_vertical(x, ya, yb)
+
+    def _draw_sloped_batch(self, fns):
+        lo = min(f[1] for f in fns)
+        hi = max(f[2] for f in fns)
+        for xlo, xlast, tfn, bfn in self.spans:
+            if xlo > hi:
+                break
+            if xlast < lo:
+                continue
+            for (fn, x1, x2) in fns:
+                if xlo > x2 or xlast < x1:
+                    continue
+                c = clip_to_trap(fn, x1, x2, xlo, xlast, tfn, bfn)
+                if c:
+                    self.out.append(c)
 
     def _draw_vertical(self, x, ya, yb):
         if x < 0 or x >= W:
@@ -238,16 +264,6 @@ class Spans:
             if a <= b:
                 self.out.append((x, a, x, b))
             return
-
-    def _draw_sloped(self, x1, y1, x2, y2):
-        for xlo, xlast, tfn, bfn in self.spans:
-            if xlo > x2:
-                break
-            if xlast < x1:
-                continue
-            c = clip_to_trap(x1, y1, x2, y2, xlo, xlast, tfn, bfn)
-            if c:
-                self.out.append(c)
 
     # -- occlusion updates -------------------------------------------------
 
@@ -337,58 +353,77 @@ def pw(f, g, x0, x1, want_max):
     return [(x0, cx - 1, g), (cx, x1, f)]
 
 
-def clip_to_trap(x1, y1, x2, y2, xlo, xlast, tfn, bfn):
-    """Cyrus-Beck clip of a sloped line to one trapezoid. Integer, x1 < x2.
+def cross_col(d, xa, xb):
+    """First column in [xa, xb] on the side where the linear d(x) >= 0.
 
-    Parametric t is kept as a 0.8 fraction; endpoints are recovered with
-    round-to-nearest and then clamped back inside the trapezoid, because
-    the divide's truncation can otherwise place them a pixel outside.
+    Only reached when d disagrees in sign at the two ends, so exactly one
+    divide settles it; the column is then verified rather than trusted.
     """
-    dx, dy = x2 - x1, y2 - y1
-    ta, tb = tfn
-    ba, bb = bfn
-    t0, t1 = 0, 256      # 0.8 parametric range, inclusive of 256
-
-    cons = (
-        (-dx, x1 - xlo),
-        (dx, xlast - x1),
-        (fp_mul8(ta, dx) - dy if ta else -dy,
-         y1 - (fp_mul8(ta, x1) if ta else 0) - tb),
-        (dy - (fp_mul8(ba, dx) if ba else 0),
-         (fp_mul8(ba, x1) if ba else 0) + bb - y1),
-    )
-    for p, q in cons:
-        if p == 0:
-            if q < 0:
-                return None
-            continue
-        # t = q / p in 0.8
-        t = div8s(q, p)
-        if p < 0:
-            if t > t1: return None
-            if t > t0: t0 = t
-        else:
-            if t < t0: return None
-            if t < t1: t1 = t
-    if t0 > t1:
+    if d[0] == 0:
         return None
+    xc = div8s(-d[1], d[0])
+    xc = max(xa, min(xb, xc))
+    if evd(d, xc) < 0:
+        if d[0] > 0:
+            xc += 1
+            if xc > xb:
+                return None
+        else:
+            xc -= 1
+            if xc < xa:
+                return None
+    return xc
 
-    def at(t):
-        if t == 0: return x1, y1
-        if t == 256: return x2, y2
-        return (x1 + ((t * dx + 128) >> 8), y1 + ((t * dy + 128) >> 8))
 
-    ax, ay = at(t0)
-    bx, by = at(t1)
-    ax = max(xlo, min(xlast, ax))
-    bx = max(xlo, min(xlast, bx))
-    if ax > bx:
-        ax, ay, bx, by = bx, by, ax, ay
-    # Clamp Y into the aperture at each endpoint.
-    for _ in range(1):
-        ay = max(ev(tfn, ax), min(ev(bfn, ax), ay))
-        by = max(ev(tfn, bx), min(ev(bfn, bx), by))
-    return (ax, ay, bx, by)
+def clip_to_trap(fn, x1, x2, xlo, xlast, tfn, bfn):
+    """Clip the line y = fn to the trapezoid, in column space.
+
+    The line and both boundaries are evaluated at the two ends of the
+    overlapping column range. Evaluating the boundaries directly rather than
+    as differences from the line keeps the flat-boundary short circuit - well
+    over a third of them are flat - and leaves the exact aperture in hand, so
+    the endpoint clamp costs nothing extra.
+    """
+    xa = xlo if x1 < xlo else x1
+    xb = xlast if x2 > xlast else x2
+    if xa > xb:
+        return None
+    ya, ta_, ba_ = ev(fn, xa), ev(tfn, xa), ev(bfn, xa)
+    yb, tb_, bb_ = ev(fn, xb), ev(tfn, xb), ev(bfn, xb)
+
+    if ya < ta_ or yb < tb_:                       # y >= top(x)
+        if ya < ta_ and yb < tb_:
+            return None
+        xc = cross_col((fn[0] - tfn[0], fn[1] - tfn[1]), xa, xb)
+        if xc is None:
+            return None
+        if ya < ta_:
+            xa = xc
+            ya, ta_, ba_ = ev(fn, xa), ev(tfn, xa), ev(bfn, xa)
+        else:
+            xb = xc
+            yb, tb_, bb_ = ev(fn, xb), ev(tfn, xb), ev(bfn, xb)
+        if xa > xb:
+            return None
+
+    if ya > ba_ or yb > bb_:                       # y <= bot(x)
+        if ya > ba_ and yb > bb_:
+            return None
+        xc = cross_col((bfn[0] - fn[0], bfn[1] - fn[1]), xa, xb)
+        if xc is None:
+            return None
+        if ya > ba_:
+            xa = xc
+            ya, ta_, ba_ = ev(fn, xa), ev(tfn, xa), ev(bfn, xa)
+        else:
+            xb = xc
+            yb, tb_, bb_ = ev(fn, xb), ev(tfn, xb), ev(bfn, xb)
+        if xa > xb:
+            return None
+
+    ya = ta_ if ya < ta_ else (ba_ if ya > ba_ else ya)
+    yb = tb_ if yb < tb_ else (bb_ if yb > bb_ else yb)
+    return (xa, ya, xb, yb)
 
 
 # ---------------------------------------------------------------------------
@@ -396,7 +431,7 @@ def clip_to_trap(x1, y1, x2, y2, xlo, xlast, tfn, bfn):
 # ---------------------------------------------------------------------------
 
 class ViewCtx:
-    __slots__ = ("sc", "rx", "ry", "px_int", "py_int", "px88", "py88", "vz")
+    __slots__ = ("sc", "rx", "ry", "px_int", "py_int", "px88", "py88", "vz", "ang")
 
 
 def view_context(px88, py88, angle, vz):
@@ -422,6 +457,7 @@ def view_context(px88, py88, angle, vz):
     ctx.py_int = py88 >> 8
     ctx.px88, ctx.py88 = px88, py88
     ctx.vz = vz
+    ctx.ang = angle & 0xff
     return ctx
 
 
@@ -455,6 +491,87 @@ def recip_for(tvy):
 # ---------------------------------------------------------------------------
 
 NEAR = T16_NEAR_VERDICT      # 16 counts = 0.5 prescaled units
+
+# DOOM's R_CheckBBox corner table: for each of the nine positions the viewer
+# can occupy relative to a box, which two corners are its angular extremes.
+# Indices are into (top, bottom, left, right); entry 5 means "inside".
+CHECKCOORD = [
+    (3, 0, 2, 1), (3, 0, 2, 0), (3, 1, 2, 0), None,
+    (2, 0, 2, 1), None,         (3, 1, 3, 0), None,
+    (2, 0, 3, 1), (2, 1, 3, 1), (2, 1, 3, 0),
+]
+
+
+# The same tables the engine gets baked into ROM.
+_ATAN = [int(round(math.atan(t / 256.0) * 65536 / (2 * math.pi))) for t in range(257)]
+_ANGTOX = [max(0, min(255, int(round(128.0 - 128.0 * math.tan(
+    ((k << 6) - 8192) * 2 * math.pi / 65536))))) for k in range(257)]
+
+
+def slope_t(num, den):
+    """num/den as a 0.8 fraction, 0 <= num <= den.
+
+    Only the divisor is shifted down to fit a byte; the numerator is shifted
+    up by the complement, which keeps full precision and still leaves an
+    eight-iteration 16-by-8 divide for the Z80.
+    """
+    k = 0
+    while den > 255:
+        den >>= 1
+        k += 1
+    if den == 0:
+        return 256
+    n = num << (8 - k)
+    if (n >> 8) >= den:
+        return 256
+    return n // den
+
+
+def point_to_angle16(dx, dy):
+    """atan2(dy, dx) as a 16-bit angle, folded through the first octant."""
+    if dx == 0 and dy == 0:
+        return 0
+    if dx >= 0:
+        if dy >= 0:
+            if dx > dy:
+                return _ATAN[slope_t(dy, dx)]
+            return 16384 - _ATAN[slope_t(dx, dy)]
+        dy = -dy
+        if dx > dy:
+            return (-_ATAN[slope_t(dy, dx)]) & 0xffff
+        return (49152 + _ATAN[slope_t(dx, dy)]) & 0xffff
+    dx = -dx
+    if dy >= 0:
+        if dx > dy:
+            return 32768 - _ATAN[slope_t(dy, dx)]
+        return 16384 + _ATAN[slope_t(dx, dy)]
+    dy = -dy
+    if dx > dy:
+        return 32768 + _ATAN[slope_t(dy, dx)]
+    return 49152 - _ATAN[slope_t(dx, dy)]
+
+
+def silhouette(bb, px, py):
+    """The two corners of a bbox that bound its angular extent, or None when
+    the viewpoint is inside it."""
+    top, bot, left, right = bb
+    if px <= left:
+        bx = 0
+    elif px < right:
+        bx = 1
+    else:
+        bx = 2
+    if py >= top:
+        by = 0
+    elif py > bot:
+        by = 1
+    else:
+        by = 2
+    c = CHECKCOORD[(by << 2) + bx]
+    if c is None:
+        return None
+    v = (top, bot, left, right)
+    return (v[c[0]], v[c[1]]), (v[c[2]], v[c[3]])
 
 
 class Renderer:
@@ -505,11 +622,48 @@ class Renderer:
     def bbox_range(self, bb):
         """Screen-X range [lo, hi] of a prescaled bbox, or None if invisible.
 
-        Corners in front of the near plane are projected once each; an edge
-        that straddles the plane contributes its crossing point as well, so a
-        box containing the camera still yields a tight range. A straddling
-        edge always has a valid crossing, since one endpoint is in front.
+        Worked in angle space, as DOOM does: the two angular extremes of the
+        box are turned into view-relative angles, clipped against the 45-degree
+        field of view, and mapped to columns through a tangent table. Nothing
+        is transformed or projected, so a box straddling the near plane - the
+        case that costs a Cartesian bbox test four transforms and an edge walk
+        - is no harder than any other.
         """
+        px, py = self.ctx.px_int, self.ctx.py_int
+        sil = silhouette(bb, px, py)
+        if sil is None:
+            return 0, W - 1                     # viewpoint inside the box
+        va = (self.ctx.ang << 8) & 0xffff
+        a1 = (point_to_angle16(sil[0][0] - px, sil[0][1] - py) - va) & 0xffff
+        a2 = (point_to_angle16(sil[1][0] - px, sil[1][1] - py) - va) & 0xffff
+        span = (a1 - a2) & 0xffff
+        if span >= 32768:
+            return 0, W - 1                     # more than 180 degrees across
+        C = 8192
+        t = (a1 + C) & 0xffff
+        if t > 2 * C:
+            t = (t - 2 * C) & 0xffff
+            if t >= span:
+                return None                     # wholly off the left
+            a1 = C
+        t = (C - a2) & 0xffff
+        if t > 2 * C:
+            t = (t - 2 * C) & 0xffff
+            if t >= span:
+                return None                     # wholly off the right
+            a2 = (-C) & 0xffff
+        sx1 = _ANGTOX[((a1 + C) & 0xffff) >> 6]
+        sx2 = _ANGTOX[((a2 + C) & 0xffff) >> 6]
+        if sx1 > sx2:
+            sx1, sx2 = sx2, sx1
+        # One column of slack each side absorbs the table's quantisation, so
+        # the range can only ever be too wide.
+        sx1 = 0 if sx1 == 0 else sx1 - 1
+        sx2 = W - 1 if sx2 >= W - 1 else sx2 + 1
+        return sx1, sx2
+
+    def bbox_range_near(self, bb):
+        """Slow path: the box straddles the near plane."""
         top, bot, left, right = bb
         pts = [to_view(wx, wy, self.ctx)
                for (wx, wy) in ((left, top), (right, top), (right, bot), (left, bot))]

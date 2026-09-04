@@ -322,16 +322,11 @@ ph_last:
 ; ---------------------------------------------------------------------------
 plot_shallow:
                 ld      a,(ln_dy)
-                ld      (ps_dy+1),a
+                ld      (psd_dy+1),a
+                ld      (psu_dy+1),a
                 ld      a,(ln_dx)
-                ld      (ps_dx+1),a
-                ld      a,(ln_sy)
-                inc     a
-                ld      hl,ps_step_down
-                jr      nz,ps_setstep
-                ld      hl,ps_step_up
-ps_setstep:
-                ld      (ps_call+1),hl
+                ld      (psd_dx+1),a
+                ld      (psu_dx+1),a
                 call    addr_of                 ; HL = byte, A = mask
                 ld      c,a
                 ld      a,(ln_dx)
@@ -340,72 +335,83 @@ ps_setstep:
                 ld      e,a                     ; E = err = dx >> 1
                 inc     d
                 ld      b,d                     ; B = dx + 1 pixels
-ps_loop:
+                ld      a,(ln_sy)
+                inc     a
+                jr      z,ps_loop_u
+; Two copies of the loop, one per vertical direction, with the scanline step
+; written out inline: a CALL/RET per pixel was costing more than the plot.
+ps_loop_d:
                 ld      a,(hl)
                 or      c
                 ld      (hl),a
                 dec     b
                 ret     z
                 rrc     c
-                jr      nc,ps_nox
+                jr      nc,psd_nox
                 inc     l
-ps_nox:
+psd_nox:
                 ld      a,e
-ps_dy:          sub     0
+psd_dy:         sub     0
                 ld      e,a
-                jr      nc,ps_loop
-ps_dx:          add     a,0
+                jr      nc,ps_loop_d
+psd_dx:         add     a,0
                 ld      e,a
-ps_call:        call    ps_step_down
-                jr      ps_loop
-
-ps_step_down:
                 inc     h
                 ld      a,h
                 and     7
-                ret     nz
+                jr      nz,ps_loop_d
                 ld      a,l
                 add     a,32
                 ld      l,a
-                ret     c
+                jr      c,ps_loop_d
                 ld      a,h
                 sub     8
                 ld      h,a
-                ret
-ps_step_up:
+                jr      ps_loop_d
+ps_loop_u:
+                ld      a,(hl)
+                or      c
+                ld      (hl),a
+                dec     b
+                ret     z
+                rrc     c
+                jr      nc,psu_nox
+                inc     l
+psu_nox:
+                ld      a,e
+psu_dy:         sub     0
+                ld      e,a
+                jr      nc,ps_loop_u
+psu_dx:         add     a,0
+                ld      e,a
                 ld      a,h
                 and     7
-                jr      z,psu_cross
+                jr      z,psu_up2
                 dec     h
-                ret
-psu_cross:
+                jr      ps_loop_u
+psu_up2:
                 ld      a,h
                 add     a,7
                 ld      h,a
                 ld      a,l
                 sub     32
                 ld      l,a
-                ret     nc
+                jr      nc,ps_loop_u
                 ld      a,h
                 sub     8
                 ld      h,a
-                ret
+                jr      ps_loop_u
 
 ; ---------------------------------------------------------------------------
 ; plot_steep : |dy| >= dx >= 1.  C = x1, B = y1.
 ; ---------------------------------------------------------------------------
 plot_steep:
                 ld      a,(ln_dx)
-                ld      (pt_dx+1),a
+                ld      (ptd_dx+1),a
+                ld      (ptu_dx+1),a
                 ld      a,(ln_dy)
-                ld      (pt_dy+1),a
-                ld      a,(ln_sy)
-                inc     a
-                ld      hl,ps_step_down
-                jr      nz,pt_setstep
-                ld      hl,ps_step_up
-pt_setstep:
-                ld      (pt_call+1),hl
+                ld      (ptd_dy+1),a
+                ld      (ptu_dy+1),a
                 call    addr_of
                 ld      c,a
                 ld      a,(ln_dy)
@@ -414,24 +420,70 @@ pt_setstep:
                 ld      e,a                     ; err = dy >> 1
                 inc     d
                 ld      b,d                     ; B = dy + 1 pixels
-pt_loop:
+                ld      a,(ln_sy)
+                inc     a
+                jr      z,pt_loop_u
+pt_loop_d:
                 ld      a,(hl)
                 or      c
                 ld      (hl),a
                 dec     b
                 ret     z
                 ld      a,e
-pt_dx:          sub     0
+ptd_dx:         sub     0
                 ld      e,a
-                jr      nc,pt_noy
-pt_dy:          add     a,0
+                jr      nc,ptd_noy
+ptd_dy:         add     a,0
                 ld      e,a
                 rrc     c
-                jr      nc,pt_noy
+                jr      nc,ptd_noy
                 inc     l
-pt_noy:
-pt_call:        call    ps_step_down
-                jr      pt_loop
+ptd_noy:
+                inc     h
+                ld      a,h
+                and     7
+                jr      nz,pt_loop_d
+                ld      a,l
+                add     a,32
+                ld      l,a
+                jr      c,pt_loop_d
+                ld      a,h
+                sub     8
+                ld      h,a
+                jr      pt_loop_d
+pt_loop_u:
+                ld      a,(hl)
+                or      c
+                ld      (hl),a
+                dec     b
+                ret     z
+                ld      a,e
+ptu_dx:         sub     0
+                ld      e,a
+                jr      nc,ptu_noy
+ptu_dy:         add     a,0
+                ld      e,a
+                rrc     c
+                jr      nc,ptu_noy
+                inc     l
+ptu_noy:
+                ld      a,h
+                and     7
+                jr      z,ptu_up2
+                dec     h
+                jr      pt_loop_u
+ptu_up2:
+                ld      a,h
+                add     a,7
+                ld      h,a
+                ld      a,l
+                sub     32
+                ld      l,a
+                jr      nc,pt_loop_u
+                ld      a,h
+                sub     8
+                ld      h,a
+                jr      pt_loop_u
 
 ; ---------------------------------------------------------------------------
 ; Pixel mask tables.

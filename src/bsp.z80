@@ -307,134 +307,142 @@ bb_s0:
                 call    sx4
                 ld      (bb_right),hl
 
-                ; transform the four corners
-                ld      hl,(bb_left)
-                ld      (tv_wx),hl
-                ld      hl,(bb_top)
-                ld      (tv_wy),hl
-                call    to_view
-                ld      hl,(tv_tvx)
-                ld      (bb_pts),hl
-                ld      hl,(tv_tvy)
-                ld      (bb_pts+2),hl
-                ld      hl,(bb_right)
-                ld      (tv_wx),hl
-                call    to_view
-                ld      hl,(tv_tvx)
-                ld      (bb_pts+4),hl
-                ld      hl,(tv_tvy)
-                ld      (bb_pts+6),hl
-                ld      hl,(bb_bot)
-                ld      (tv_wy),hl
-                call    to_view
-                ld      hl,(tv_tvx)
-                ld      (bb_pts+8),hl
-                ld      hl,(tv_tvy)
-                ld      (bb_pts+10),hl
-                ld      hl,(bb_left)
-                ld      (tv_wx),hl
-                call    to_view
-                ld      hl,(tv_tvx)
-                ld      (bb_pts+12),hl
-                ld      hl,(tv_tvy)
-                ld      (bb_pts+14),hl
-
-                ; --- fold the corners in front of the near plane -------
-                ld      hl,$7fff
-                ld      (bb_lo16),hl
-                ld      hl,$8000
-                ld      (bb_hi16),hl
-                xor     a
-                ld      (bb_any),a
-                ld      (bb_n),a
-bb_cloop:
-                ld      a,(bb_n)
-                add     a,a
-                add     a,a
-                ld      e,a
-                ld      d,0
-                ld      hl,bb_pts
-                add     hl,de
-                ld      (bb_pa),hl
-                inc     hl
-                inc     hl
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)                  ; DE = tvy
-                bit     7,d
-                jr      nz,bb_cnext             ; behind the camera
-                ld      a,d
-                or      a
-                jr      nz,bb_cfront
-                ld      a,e
-                cp      NEAR_VERDICT
-                jr      c,bb_cnext
-bb_cfront:
-                ld      hl,(bb_pa)
-                call    bb_project
-bb_cnext:
-                ld      a,(bb_n)
-                inc     a
-                ld      (bb_n),a
-                cp      4
-                jr      c,bb_cloop
-                ld      a,(bb_any)
-                or      a
-                jp      z,bb_invisible
-
-                ; --- fold the near-plane crossing of every straddling edge --
-                xor     a
-                ld      (bb_n),a
-bb_eloop:
-                ld      a,(bb_n)
-                add     a,a
-                add     a,a
-                ld      e,a
-                ld      d,0
-                ld      hl,bb_pts
-                add     hl,de
-                ld      (bb_pa),hl
-                ld      a,(bb_n)
-                inc     a
-                and     3
-                add     a,a
-                add     a,a
-                ld      e,a
-                ld      d,0
-                ld      hl,bb_pts
-                add     hl,de
-                ld      (bb_pb),hl
-                call    bb_edge
-                ld      a,(bb_n)
-                inc     a
-                ld      (bb_n),a
-                cp      4
-                jr      c,bb_eloop
-
-                ; clamp and reject if wholly off-screen
-                ld      hl,(bb_hi16)
-                bit     7,h
-                jp      nz,bb_invisible         ; hi < 0
-                ld      hl,(bb_lo16)
-                ld      de,RENDER_W
+                ; --- where does the viewer sit relative to the box? -------
+                ld      hl,(pl_x)
+                ld      de,(bb_left)
                 call    cmp_s16
-                jr      nc,bb_invisible         ; lo >= 256
-                ld      hl,(bb_lo16)
-                bit     7,h
-                jr      z,bb_lok
-                ld      hl,0
-bb_lok:
-                ld      a,l
+                jr      c,bb_bx0
+                jr      z,bb_bx0                ; px <= left
+                ld      hl,(pl_x)
+                ld      de,(bb_right)
+                call    cmp_s16
+                ld      a,1
+                jr      c,bb_bxd                ; px < right
+                inc     a
+                jr      bb_bxd
+bb_bx0:         xor     a
+bb_bxd:         ld      (bb_bx),a
+                ld      hl,(pl_y)
+                ld      de,(bb_top)
+                call    cmp_s16
+                jr      nc,bb_by0               ; py >= top
+                ld      hl,(pl_y)
+                ld      de,(bb_bot)
+                call    cmp_s16
+                ld      a,2
+                jr      c,bb_byd                ; py < bot
+                jr      z,bb_byd                ; py == bot
+                dec     a                       ; py > bot
+                jr      bb_byd
+bb_by0:         xor     a
+bb_byd:
+                add     a,a
+                add     a,a
+                ld      b,a
+                ld      a,(bb_bx)
+                add     a,b                     ; boxpos = by*4 + bx
+                cp      5
+                jr      nz,bb_notin
+                ; viewpoint inside the box: it spans the whole screen
+                xor     a
                 ld      (bb_lo),a
-                ld      hl,(bb_hi16)
-                ld      de,RENDER_W-1
+                ld      a,RENDER_W-1
+                ld      (bb_hi),a
+                scf
+                ret
+bb_notin:
+                add     a,a
+                add     a,a                     ; * 4 bytes per entry
+                ld      e,a
+                ld      d,0
+                ld      hl,CHECKCOORD
+                add     hl,de
+                ld      (bb_cc),hl
+
+                ; --- angles of the two extremes -------------------------
+                ld      hl,(bb_cc)
+                call    bb_corner_angle
+                ld      (bb_a1),hl
+                ld      hl,(bb_cc)
+                inc     hl
+                inc     hl
+                call    bb_corner_angle
+                ld      (bb_a2),hl
+
+                ld      de,(bb_a2)
+                ld      hl,(bb_a1)
                 or      a
                 sbc     hl,de
-                ld      hl,(bb_hi16)            ; SBC left the difference in HL
-                jr      c,bb_hok
-                ld      hl,RENDER_W-1
-bb_hok:
-                ld      a,l
+                ld      (bb_span),hl
+                bit     7,h
+                jp      nz,bb_full              ; more than 180 degrees across
+
+                ; clip the left edge to the field of view
+                ld      hl,(bb_a1)
+                ld      de,CLIPANGLE
+                add     hl,de
+                ld      de,2*CLIPANGLE
+                or      a
+                sbc     hl,de
+                jr      c,bb_c1ok
+                jr      z,bb_c1ok
+                ld      de,(bb_span)            ; HL = tspan - 2*CLIP
+                or      a
+                sbc     hl,de
+                jp      nc,bb_invisible
+                ld      hl,CLIPANGLE
+                ld      (bb_a1),hl
+bb_c1ok:
+                ; clip the right edge
+                ld      hl,CLIPANGLE
+                ld      de,(bb_a2)
+                or      a
+                sbc     hl,de
+                ld      de,2*CLIPANGLE
+                or      a
+                sbc     hl,de
+                jr      c,bb_c2ok
+                jr      z,bb_c2ok
+                ld      de,(bb_span)
+                or      a
+                sbc     hl,de
+                jp      nc,bb_invisible
+                ld      hl,-CLIPANGLE
+                ld      (bb_a2),hl
+bb_c2ok:
+                ld      hl,(bb_a1)
+                call    bb_angtox               ; the lookup uses B as a counter
+                ld      (bb_sx1),a
+                ld      hl,(bb_a2)
+                call    bb_angtox
+                ld      c,a
+                ld      a,(bb_sx1)
+                ld      b,a
+                ; order, then widen a column each side to absorb the table's
+                ; quantisation - the range may only ever be too wide
+                ld      a,b
+                cp      c
+                jr      c,bb_ord
+                ld      a,c
+                ld      c,b
+                ld      b,a
+bb_ord:
+                ld      a,b
+                or      a
+                jr      z,bb_lo0
+                dec     a
+bb_lo0:         ld      (bb_lo),a
+                ld      a,c
+                cp      RENDER_W-1
+                jr      nc,bb_hi0
+                inc     a
+bb_hi0:         ld      (bb_hi),a
+                scf
+                ret
+bb_full:
+                xor     a
+                ld      (bb_lo),a
+                ld      a,RENDER_W-1
                 ld      (bb_hi),a
                 scf
                 ret
@@ -442,7 +450,8 @@ bb_invisible:
                 or      a
                 ret
 
-; sx4 : HL = sign-extended A, multiplied by 4
+; sx4 : HL = A sign-extended, multiplied by four (bounds are stored in
+; quarter-prescale bytes).
 sx4:
                 ld      l,a
                 rla
@@ -452,115 +461,209 @@ sx4:
                 add     hl,hl
                 ret
 
-; bb_edge : if this edge straddles the near plane, project its crossing.
-bb_edge:
-                ld      hl,(bb_pa)
-                ld      de,2
+; bb_angtox : HL = view-relative angle -> A = screen column
+bb_angtox:
+                ld      de,CLIPANGLE
                 add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      hl,NEAR_VERDICT
-                ex      de,hl
-                call    cmp_s16
-                ld      a,0
-                jr      nc,bb_a_ok
-                inc     a
-bb_a_ok:        ld      (bb_ac),a
-                ld      hl,(bb_pb)
-                ld      de,2
+                ld      b,6
+ba_sh:          srl     h
+                rr      l
+                djnz    ba_sh
+                ld      de,ANGTOX
                 add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      hl,NEAR_VERDICT
-                ex      de,hl
-                call    cmp_s16
-                ld      a,0
-                jr      nc,bb_b_ok
-                inc     a
-bb_b_ok:        ld      (bb_bc),a
-                ld      a,(bb_ac)
-                ld      b,a
-                ld      a,(bb_bc)
-                cp      b
-                ret     z                       ; both sides agree: not straddling
-                or      a
-                jr      nz,bb_b_clip
-bb_a_clip:
-                ld      hl,(bb_pa)
-                ld      de,(bb_pb)
-                call    bb_cross_pt
-                ret     nc
-                jp      bb_project_cx
-bb_b_clip:
-                ld      hl,(bb_pb)
-                ld      de,(bb_pa)
-                call    bb_cross_pt
-                ret     nc
-                jp      bb_project_cx
-
-; bb_project : HL = pointer to (tvx, tvy); project and fold into the range.
-bb_project:
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (bb_cx),de
-                inc     hl
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ex      de,hl
-bb_project2:
-                call    recip
-                ld      hl,(bb_cx)
-                call    project_x
-bb_fold:
-                ld      de,(bb_lo16)
-                call    cmp_s16
-                jr      nc,bb_f2
-                ld      (bb_lo16),hl
-bb_f2:
-                ld      de,(bb_hi16)
-                call    cmp_s16
-                jr      c,bb_f3
-                ld      (bb_hi16),hl
-bb_f3:
-                ld      a,1
-                ld      (bb_any),a
+                ld      a,(hl)
                 ret
 
-; bb_project_cx : project the crossing point already staged in bb_cx.
-bb_project_cx:
-                ld      hl,NEAR_CROSS
-                jr      bb_project2
+; bb_corner_angle : HL -> a CHECKCOORD pair; returns the corner's angle
+; relative to the view direction.
+bb_corner_angle:
+                ld      a,(hl)
+                inc     hl
+                ld      c,(hl)
+                push    bc
+                ld      l,a
+                ld      h,0
+                ld      de,bb_top
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      hl,(pl_x)
+                ex      de,hl
+                or      a
+                sbc     hl,de
+                ld      (pa_dx),hl
+                pop     bc
+                ld      l,c
+                ld      h,0
+                ld      de,bb_top
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      hl,(pl_y)
+                ex      de,hl
+                or      a
+                sbc     hl,de
+                ld      (pa_dy),hl
+                call    ptoa
+                ld      a,(pl_ang)
+                ld      d,a
+                ld      a,h
+                sub     d
+                ld      h,a                     ; the view angle is a whole byte
+                ret
 
-; bb_cross_pt : near-plane crossing of the edge from the clipped endpoint at
-; HL toward the endpoint at DE.  Carry set and bb_cx valid on success.
-bb_cross_pt:
-                ld      (cr_p1),hl
-                ld      (cr_p2),de
-                ld      hl,(cr_p1)
+; ---------------------------------------------------------------------------
+; ptoa : (pa_dx, pa_dy) -> HL = 16-bit angle, atan2 folded through the first
+; octant.  No multiplies: one 8-bit divide and a table lookup.
+; ---------------------------------------------------------------------------
+ptoa:
+                xor     a
+                ld      (pa_oct),a
+                ld      hl,(pa_dx)
+                bit     7,h
+                jr      z,pa_xp
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ld      (pa_dx),hl
+                ld      a,4
+                ld      (pa_oct),a
+pa_xp:
+                ld      hl,(pa_dy)
+                bit     7,h
+                jr      z,pa_yp
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ld      (pa_dy),hl
+                ld      a,(pa_oct)
+                or      2
+                ld      (pa_oct),a
+pa_yp:
+                ld      hl,(pa_dx)
+                ld      de,(pa_dy)
+                or      a
+                sbc     hl,de
+                jr      z,pa_dyge
+                jr      nc,pa_dxgt
+pa_dyge:
+                ld      hl,(pa_dx)
+                ld      (pa_num),hl
+                ld      hl,(pa_dy)
+                ld      (pa_den),hl
+                ld      a,(pa_oct)
+                or      1
+                ld      (pa_oct),a
+                jr      pa_norm
+pa_dxgt:
+                ld      hl,(pa_dy)
+                ld      (pa_num),hl
+                ld      hl,(pa_dx)
+                ld      (pa_den),hl
+pa_norm:
+                ; Shift the divisor down into a byte and the numerator up by
+                ; the complement: full precision, and an eight-iteration
+                ; 16-by-8 divide.
+                ld      b,0
+                ld      hl,(pa_den)
+pn_l:
+                ld      a,h
+                or      a
+                jr      z,pn_done
+                srl     h
+                rr      l
+                inc     b
+                jr      pn_l
+pn_done:
+                ld      a,l
+                or      a
+                jr      z,pa_t256               ; both deltas were zero
+                ld      c,a                     ; C = divisor, 1..255
+                ld      a,8
+                sub     b
+                ld      b,a
+                ld      hl,(pa_num)
+                or      a
+                jr      z,pn_noshl
+pn_shl:
+                add     hl,hl
+                djnz    pn_shl
+pn_noshl:
+                ld      a,h
+                cp      c
+                jr      nc,pa_t256              ; quotient would reach 256
+                ld      b,8
+                or      a                       ; clear carry into the quotient
+pa_dl:
+                rl      l
+                rla
+                jr      c,pa_ds
+                cp      c
+                jr      c,pa_dn
+pa_ds:          sub     c
+                scf
+                jr      pa_dsh
+pa_dn:          or      a
+pa_dsh:         djnz    pa_dl
+                rl      l
+                ld      h,0
+                jr      pa_look
+pa_t256:
+                ld      hl,256
+pa_look:
+                add     hl,hl
+                ld      de,ATANTAB
+                add     hl,de
                 ld      e,(hl)
                 inc     hl
-                ld      d,(hl)
-                ld      (cr_vx1),de
+                ld      d,(hl)                  ; DE = the first-octant angle
+                ld      a,(pa_oct)
+                ld      l,a
+                ld      h,0
+                add     hl,hl
+                ld      b,0
+                ld      c,a
+                add     hl,bc                   ; octant * 3
+                ld      bc,OCTTAB
+                add     hl,bc
+                ld      c,(hl)
                 inc     hl
-                ld      e,(hl)
+                ld      b,(hl)
                 inc     hl
-                ld      d,(hl)
-                ld      (cr_vy1),de
-                ld      hl,(cr_p2)
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (cr_vx2),de
-                inc     hl
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (cr_vy2),de
-                jp      near_cross
+                ld      a,(hl)
+                ld      h,b
+                ld      l,c
+                or      a
+                jr      nz,pa_neg
+                add     hl,de
+                ret
+pa_neg:
+                or      a
+                sbc     hl,de
+                ret
+
+; Per-octant base angle and whether the first-octant value is subtracted.
+OCTTAB:
+                DW      0
+                DB      0
+                DW      16384
+                DB      1
+                DW      0
+                DB      1
+                DW      49152
+                DB      0
+                DW      32768
+                DB      1
+                DW      16384
+                DB      0
+                DW      32768
+                DB      0
+                DW      49152
+                DB      1
 
 ; ---------------------------------------------------------------------------
 ; near_cross : crossing of the near plane by the segment from (cr_vx1, cr_vy1)
@@ -1111,6 +1214,8 @@ near_cross_seg2:
 ; apply the occlusion update it implies.
 ; ---------------------------------------------------------------------------
 render_seg_body:
+                xor     a
+                ld      (sq_n),a
                 call    use_recip1
                 ld      a,(sg_ch)
                 call    hdelta
@@ -1224,6 +1329,7 @@ rsb_nobb:
                 ld      de,(sg_fb2)
                 call    emit_edge
 rsb_verts:
+                call    flush_edges
                 ; step-face verticals at each endpoint
                 ld      a,(sg_flags)
                 and     SF_NOVT1
@@ -1336,6 +1442,7 @@ rsb_s_bot:
                 ld      de,(sg_fb2)
                 call    emit_edge
 rsb_s_v1:
+                call    flush_edges
                 ld      a,(sg_flags)
                 and     SF_NOVT1
                 jr      nz,rsb_s_v2
@@ -1399,28 +1506,7 @@ hdelta:
 
 ; emit_edge : HL = y at sx1, DE = y at sx2; clip and emit the sloped edge.
 emit_edge:
-                ld      (ln_y1),hl
-                ld      (ln_y2),de
-                ld      hl,(sg_sx1)
-                ld      de,(sg_sx2)
-                call    cmp_s16
-                jr      c,ee_ord
-                ; swap so x1 < x2
-                ld      hl,(sg_sx2)
-                ld      (ln_x1),hl
-                ld      hl,(sg_sx1)
-                ld      (ln_x2),hl
-                ld      hl,(ln_y1)
-                ld      de,(ln_y2)
-                ld      (ln_y1),de
-                ld      (ln_y2),hl
-                jp      sp_draws
-ee_ord:
-                ld      hl,(sg_sx1)
-                ld      (ln_x1),hl
-                ld      hl,(sg_sx2)
-                ld      (ln_x2),hl
-                jp      sp_draws
+                jp      queue_edge
 
 max_hl_de:
                 call    cmp_s16
@@ -1432,3 +1518,20 @@ min_hl_de:
                 ret     c
                 ex      de,hl
                 ret
+
+; ---------------------------------------------------------------------------
+; DOOM's R_CheckBBox corner table, offsets pre-doubled into the bounds array
+; (top = 0, bottom = 2, left = 4, right = 6).  Entry 5 is "viewpoint inside".
+; ---------------------------------------------------------------------------
+CHECKCOORD:
+                DB      6,0,4,2
+                DB      6,0,4,0
+                DB      6,2,4,0
+                DB      0,0,0,0
+                DB      4,0,4,2
+                DB      0,0,0,0
+                DB      6,2,6,0
+                DB      0,0,0,0
+                DB      4,0,6,2
+                DB      4,2,6,2
+                DB      4,2,6,0

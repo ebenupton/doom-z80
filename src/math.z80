@@ -37,6 +37,39 @@ sq2_loop:
                 jr      nz,sq2_loop
                 ret
 
+; MUL_U8_BODY : the quarter-square multiply as a macro, for the handful of
+; call sites hot enough that the 27 T-states of CALL/RET matter.
+                MACRO   MUL_U8_BODY
+                ld      a,h
+                sub     l
+                jr      nc,.pos
+                neg
+.pos:
+                ld      c,a
+                ld      b,SQ_LO>>8
+                ld      a,h
+                add     a,l
+                ld      l,a
+                ld      a,SQ_LO>>8
+                adc     a,0
+                ld      h,a
+                ld      a,(bc)
+                ld      e,a
+                ld      a,(hl)
+                sub     e
+                ld      e,a
+                inc     h
+                inc     h
+                inc     b
+                inc     b
+                ld      a,(bc)
+                ld      d,a
+                ld      a,(hl)
+                sbc     a,d
+                ld      d,a
+                ex      de,hl
+                ENDM
+
 ; ---------------------------------------------------------------------------
 ; mul_u8 : HL = H * L   (unsigned 8x8 -> 16)
 ; corrupts A, BC, DE
@@ -80,10 +113,11 @@ mu_pos:
 mul_s8_u8:
                 bit     7,h
                 jr      nz,ms_neg
-                jp      mul_u8
+                MUL_U8_BODY
+                ret
 ms_neg:
-                push    hl                      ; mul_u8 corrupts BC and DE
-                call    mul_u8
+                push    hl                      ; the multiply corrupts BC and DE
+                MUL_U8_BODY
                 pop     de                      ; E = the unsigned multiplier
                 ld      a,h
                 sub     e
@@ -100,7 +134,6 @@ ms_neg:
 ; corrupts BC, DE
 ; ---------------------------------------------------------------------------
 mul_s16_u8:
-                ld      (m16_mult),a
                 ld      c,a                     ; C = multiplier
                 ld      a,d
                 or      a
@@ -108,6 +141,10 @@ mul_s16_u8:
                 inc     a
                 jr      z,ms16_him1             ; DE high byte = $FF
                 dec     a                       ; restore
+                push    af
+                ld      a,c
+                ld      (m16_mult),a
+                pop     af
                 ; --- general case: high and low partials ---
                 ld      h,a
                 ld      l,c
@@ -132,16 +169,16 @@ mul_s16_u8:
 ms16_hi0:
                 ld      h,e
                 ld      l,c
-                call    mul_u8
+                MUL_U8_BODY
                 xor     a
                 ret
 
 ms16_him1:
                 ld      h,e
+                push    bc
                 ld      l,c
-                call    mul_u8                  ; HL = dlo * mult (unsigned)
-                ld      a,(m16_mult)            ; mul_u8 corrupted C
-                ld      c,a
+                MUL_U8_BODY                     ; HL = dlo * mult (unsigned)
+                pop     bc                      ; the multiply corrupted C
                 ld      a,h
                 sub     c                       ; subtract mult<<8
                 ld      h,a

@@ -183,11 +183,28 @@ def build(md):
         sin_mag[i] = _SIN_QUADRANT[i]
         sin_unity[i] = 1 if _SIN_UNITY[i] else 0
 
-    tables = bytearray(0x300)          # $8800..$8AFF (product tables follow)
+    # --- angle-space bbox culling tables ---------------------------------
+    # ATAN[t] = atan(t/256) as a 16-bit angle (65536 = 360 degrees), so the
+    # first octant maps onto 0..8192.  ANGTOX[k] is the screen column for the
+    # view-relative angle (k<<6) - 8192, i.e. sx = 128 - 128*tan(psi).
+    atan = bytearray(257 * 2)
+    for t in range(257):
+        a = int(round(math.atan(t / 256.0) * 65536 / (2 * math.pi)))
+        atan[t * 2] = a & 0xff
+        atan[t * 2 + 1] = (a >> 8) & 0xff
+    angtox = bytearray(257)
+    for k in range(257):
+        psi = (k << 6) - 8192
+        sx = 128.0 - 128.0 * math.tan(psi * 2 * math.pi / 65536)
+        angtox[k] = max(0, min(255, int(round(sx))))
+
+    tables = bytearray(0x610)          # $8800..$8E0F
     tables[0x000:0x100] = recip_m8     # $8800
     tables[0x100:0x200] = recip_s      # $8900
     tables[0x200:0x241] = sin_mag      # $8A00
     tables[0x241:0x282] = sin_unity    # $8A41
+    tables[0x300:0x502] = atan         # $8B00
+    tables[0x510:0x611] = angtox       # $8D10
 
     return b0, bytes(tables), bytes(nodebb)
 

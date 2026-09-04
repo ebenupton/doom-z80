@@ -19,8 +19,8 @@
                 include "start.inc"
 
                 ORG     $8800
-                INCBIN  "../build/tables.bin"           ; $8800..$8AFF
-                ; $8B00..$8EFF holds the per-frame product tables, built at
+                INCBIN  "../build/tables.bin"           ; $8800..$8E0F
+                ; $8F00..$92FF holds the per-frame product tables, built at
                 ; run time; pad so the image loads contiguously from $8800.
                 DS      ORG_ADDR-$, 0
 START:
@@ -29,7 +29,7 @@ START:
                 call    init_video
                 call    sq_init
                 call    raster_init
-                call    setup_im2
+                call    setup_int
                 call    init_player
 main_loop:
                 ; --- pass 1: geometry ------------------------------------
@@ -118,25 +118,16 @@ init_video:
                 ret
 
 ; ---------------------------------------------------------------------------
-; setup_im2 : a 257-byte $B5 table at $B600 makes any data-bus value vector to
-; $B5B5, where a three-instruction handler lives.  The engine only needs the
-; interrupt as a frame-boundary signal for HALT.
+; setup_int : the engine only wants the interrupt as a frame-boundary signal
+; for HALT, so IM 1 and the ROM's own handler do the job.  IM 2 would need a
+; 257-byte vector table, and bank 2 has no page to spare for one.
+;
+; set_page always keeps ROM 48 in, so $0038 is the familiar handler; it needs
+; IY pointing at the system variables and touches nothing the engine uses.
 ; ---------------------------------------------------------------------------
-setup_im2:
-                ld      hl,IM2_TABLE
-                ld      de,IM2_TABLE+1
-                ld      bc,256
-                ld      (hl),IM2_HANDLER>>8
-                ldir
-                ld      a,IM2_TABLE>>8
-                ld      i,a
-                im      2
-                ld      hl,IM2_HANDLER
-                ld      (hl),$fb                ; EI
-                inc     hl
-                ld      (hl),$ed                ; RETI
-                inc     hl
-                ld      (hl),$4d
+setup_int:
+                ld      iy,$5c3a
+                im      1
                 ret
 
 ; ---------------------------------------------------------------------------
@@ -506,3 +497,4 @@ add_py:
                 include "bsp.z80"
 
 CODE_END:
+                ASSERT  CODE_END <= SPANS_BASE  ; code must not reach the span pool
