@@ -95,10 +95,14 @@ CLIPANGLE       EQU     8192            ; 45 degrees in 16-bit angle units
 ORG_ADDR        EQU     CODE_BASE
 
 ; The span pool lives in bank 2 rather than with the other scratch: it is the
-; hottest data in the clipper and bank 2 is uncontended.
-SPANS_BASE      EQU     $B900        ; two pools, both below VARS_BASE
+; hottest data in the clipper and bank 2 is uncontended.  The live spans are a
+; sorted singly-linked list and the unused slots a free chain, so an occlusion
+; update edits the spans it touches and leaves the rest where they are - there
+; is no second pool and nothing to swap.
+SPANS_BASE      EQU     $BA00
 SPANS_MAX       EQU     24              ; measured peak is 10
 SPAN_SIZE       EQU     16
+SLOT_SIZE       EQU     18
 SP_XLO          EQU     0
 SP_XLAST        EQU     1               ; inclusive, so a span is [xlo, xlast]
 SP_TA           EQU     2               ; top slope, 8.8 signed
@@ -115,9 +119,11 @@ SP_OT           EQU     12
 SP_IT           EQU     13
 SP_OB           EQU     14
 SP_IB           EQU     15
-SPANS_TOP       EQU     SPANS_BASE + SPANS_MAX*SPAN_SIZE
-; scratch pool that tighten and mark_solid build into before swapping
-SPANS_ALT       EQU     SPANS_TOP
+SP_NEXT         EQU     16
+SPANS_TOP       EQU     SPANS_BASE + SPANS_MAX*SLOT_SIZE
+sp_cur          EQU     SPANS_TOP+0     ; the walk's cursor, its successor
+sp_nextp        EQU     SPANS_TOP+2     ; and its insertion point
+sp_prev         EQU     SPANS_TOP+4
 
 ; hot variables and stack live at the top of bank 2
 VARS_BASE       EQU     $BC00
@@ -178,10 +184,10 @@ px_m8           EQU     VARS_BASE+83
 px_p2           EQU     VARS_BASE+84
 
 ; --- clipper state ---------------------------------------------------------
-sp_head         EQU     VARS_BASE+90    ; base of the live span array
+sp_head         EQU     VARS_BASE+90    ; first live span, 0 = none
 sp_count        EQU     VARS_BASE+92    ; number of live spans
-sp_wr           EQU     VARS_BASE+93    ; write cursor while rebuilding
-sp_wcount       EQU     VARS_BASE+95
+sp_free         EQU     VARS_BASE+93    ; first unused slot
+
 cl_lo           EQU     VARS_BASE+96    ; operation x range, [lo, hi)
 cl_hi           EQU     VARS_BASE+98
 cl_sx1          EQU     VARS_BASE+100   ; tighten inputs, all s16

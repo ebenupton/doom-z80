@@ -404,6 +404,34 @@ abs_hl:
 ; sp_reset : one span covering the whole screen, top 0 and bottom RENDER_H-1.
 ; ---------------------------------------------------------------------------
 sp_reset:
+                ; chain every slot onto the free list, then take the first
+                ; back for the full-screen span
+                ld      hl,SPANS_BASE+SLOT_SIZE
+                ld      de,SPANS_BASE+SLOT_SIZE*2
+                ld      b,SPANS_MAX-2
+sr_l:
+                push    bc
+                push    hl
+                ld      bc,SP_NEXT
+                add     hl,bc
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                pop     hl
+                ld      bc,SLOT_SIZE
+                add     hl,bc
+                ex      de,hl
+                add     hl,bc
+                ex      de,hl
+                pop     bc
+                djnz    sr_l
+                ld      bc,SP_NEXT
+                add     hl,bc
+                ld      (hl),0
+                inc     hl
+                ld      (hl),0
+                ld      hl,SPANS_BASE+SLOT_SIZE
+                ld      (sp_free),hl
                 ld      hl,SPANS_BASE
                 ld      (sp_head),hl
                 ld      a,1
@@ -439,6 +467,10 @@ sp_reset:
                 ld      (hl),Y_BIAS+RENDER_H-1  ; and the bottom at row 159
                 inc     hl
                 ld      (hl),Y_BIAS+RENDER_H-1
+                inc     hl
+                ld      (hl),0                  ; end of the live list
+                inc     hl
+                ld      (hl),0
                 ret
 
 ; sp_isfull : Z set when no spans remain (the screen is fully occluded).
@@ -448,37 +480,79 @@ sp_isfull:
                 ret
 
 ; ---------------------------------------------------------------------------
-; Rebuild helpers. sp_begin points the write cursor at the pool the live
-; spans are not in; sp_emit appends; sp_commit swaps them over.
+; The pool is a partition: the live list and the free chain between them hold
+; every slot, always.  A walk keeps sp_prev as its insertion point, so a span
+; it does not touch costs nothing but the pointer chase.
 ; ---------------------------------------------------------------------------
-sp_begin:
-                ld      hl,(sp_head)
-                ld      de,SPANS_BASE
-                or      a
-                sbc     hl,de
-                ld      hl,SPANS_BASE
-                jr      nz,sp_bg1
-                ld      hl,SPANS_ALT
-sp_bg1:
-                ld      (sp_wr),hl
-                xor     a
-                ld      (sp_wcount),a
+
+; sp_alloc : HL = a slot off the free chain, or 0 when the pool is spent.
+sp_alloc:
+                ld      hl,(sp_free)
+                ld      a,h
+                or      l
+                ret     z
+                push    hl
+                ld      de,SP_NEXT
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (sp_free),de
+                ld      a,(sp_count)
+                inc     a
+                ld      (sp_count),a
+                pop     hl
                 ret
 
-; sp_emit : append the span at HL (12 bytes) to the write pool, coalescing
-; it with the one before if they abut and carry the same boundaries.
+; sp_freeslot : HL back onto the free chain.
+sp_freeslot:
+                push    hl
+                ld      de,SP_NEXT
+                add     hl,de
+                ld      de,(sp_free)
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                pop     hl
+                ld      (sp_free),hl
+                ld      a,(sp_count)
+                dec     a
+                ld      (sp_count),a
+                ret
+
+; sp_advance : leave the span at sp_cur where it is and step past it.
+sp_advance:
+                ld      hl,(sp_cur)
+                ld      (sp_prev),hl
+                ld      de,SP_NEXT
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (sp_cur),de
+                ret
+
+; ---------------------------------------------------------------------------
+; sp_emit : link the span at HL (16 bytes) into the live list after sp_prev,
+; coalescing it with that one if they abut and carry the same boundaries.
 ;
-; A fuse splits every span it touches at the seg's own column range whether
-; or not anything changed there, and two of them run per seg, so without this
-; the list fragments a little further with every wall.
+; A fuse splits every span it touches at the seg's own column range whether or
+; not anything changed there, and two of them run per seg, so without this the
+; list fragments a little further with every wall.
+; ---------------------------------------------------------------------------
 sp_emit:
-                ld      a,(sp_wcount)
-                or      a
-                jp      z,se_new
                 ld      (sp_tmp8),hl
-                ld      hl,(sp_wr)
-                ld      bc,-SPAN_SIZE
-                add     hl,bc
+                call    se_try
+                ret     c
+                jp      se_new
+
+; se_try : fold the record at sp_tmp8 into the span at sp_prev if they abut
+; and carry the same boundaries.  Carry set when it went in.
+se_try:
+                ld      hl,(sp_prev)
+                ld      a,h
+                or      l
+                ret     z
                 ld      (se_prev),hl
                 ld      bc,SP_XLAST
                 add     hl,bc
@@ -488,7 +562,7 @@ sp_emit:
                 ld      hl,(sp_tmp8)
                 ld      a,(hl)
                 cp      c
-                jr      nz,se_nomerge
+                jr      nz,se_fail
                 ld      de,(se_prev)
                 inc     de
                 inc     de
@@ -498,7 +572,7 @@ sp_emit:
 se_cmp:
                 ld      a,(de)
                 cp      (hl)
-                jr      nz,se_nomerge
+                jr      nz,se_fail
                 inc     hl
                 inc     de
                 djnz    se_cmp
@@ -517,7 +591,9 @@ se_cmp:
                 ld      hl,(se_prev)
                 inc     hl
                 ld      (hl),a
+                scf
                 ret
+
 ; se_widen : fold the new span's extremes into the one it merged with.
 se_widen:
                 ld      hl,(sp_tmp8)
@@ -551,35 +627,126 @@ sw_3:           inc     hl
                 ld      (hl),a
 sw_4:           ret
 
-se_nomerge:
-                ld      hl,(sp_tmp8)
-se_new:
-                ld      a,(sp_wcount)
-                cp      SPANS_MAX
-                ret     nc                      ; pool full: drop (over-occludes)
-                inc     a
-                ld      (sp_wcount),a
-                ld      de,(sp_wr)
-                ld      bc,SPAN_SIZE
-                ldir
-                ld      (sp_wr),de
+se_fail:
+                or      a
                 ret
 
-sp_commit:
-                ld      a,(sp_wcount)
-                ld      (sp_count),a
+se_new:
+                call    sp_alloc
+                ld      a,h
+                or      l
+                ret     z                       ; pool spent: drop the span
+                ld      (se_prev),hl
+                ex      de,hl
+                ld      hl,(sp_tmp8)
+                ld      bc,SPAN_SIZE
+                ldir
+                ld      hl,(sp_prev)
+                ld      a,h
+                or      l
+                jr      z,se_head
+                ld      de,SP_NEXT
+                add     hl,de
+                ld      de,(se_prev)
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                jr      se_done
+se_head:
+                ld      hl,(se_prev)
+                ld      (sp_head),hl
+se_done:
+                ld      hl,(se_prev)
+                ld      (sp_prev),hl
+                ret
+
+; sp_emit_range : emit the span at HL with xlast replaced by A.
+sp_emit_range:
+                ld      (sp_tmp8+2),a
+                ld      de,sp_scratch
+                ld      bc,SPAN_SIZE
+                ldir
+                ld      a,(sp_tmp8+2)
+                ld      (sp_scratch+SP_XLAST),a
+                ld      hl,sp_scratch
+                jp      sp_emit
+
+; sp_emit_range2 : emit the span at HL with xlo = B and xlast = A.
+sp_emit_range2:
+                ld      (sp_tmp8+2),a
+                ld      a,b
+                ld      (sp_tmp8+3),a
+                ld      de,sp_scratch
+                ld      bc,SPAN_SIZE
+                ldir
+                ld      a,(sp_tmp8+2)
+                ld      (sp_scratch+SP_XLAST),a
+                ld      a,(sp_tmp8+3)
+                ld      (sp_scratch+SP_XLO),a
+                ld      hl,sp_scratch
+                jp      sp_emit
+
+; sp_relink : the walk is done - hang whatever is left of the list off the
+; insertion point.
+sp_relink:
+                ld      hl,(sp_prev)
+                ld      a,h
+                or      l
+                jr      z,sr_head
+                ld      hl,(sp_cur)
+                ld      a,h
+                or      l
+                jr      z,sr_link
+                ld      (sp_tmp8),hl            ; the rebuild used to coalesce
+                call    se_try                  ; across this join too
+                jr      nc,sr_link
+                ld      hl,(sp_cur)
+                ld      de,SP_NEXT
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                push    de
+                ld      hl,(sp_cur)
+                call    sp_freeslot
+                pop     hl
+                ld      (sp_cur),hl
+                jr      sp_relink
+sr_link:
+                ld      de,(sp_cur)
+                ld      hl,(sp_prev)
+                ld      bc,SP_NEXT
+                add     hl,bc
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                ret
+sr_head:
+                ld      de,(sp_cur)
+                ld      (sp_head),de
+                ret
+
+; sp_walk_begin : point the walk at the first span that can overlap the op
+; range, leaving sp_prev at the one before it.
+sp_walk_begin:
                 ld      hl,(sp_head)
-                ld      de,SPANS_BASE
-                or      a
-                sbc     hl,de
-                ld      hl,SPANS_ALT
-                jr      nz,sp_cm1
-                ld      (sp_head),hl
-                ret
-sp_cm1:
-                ld      hl,SPANS_BASE
-                ld      (sp_head),hl
-                ret
+                ld      (sp_cur),hl
+                ld      hl,0
+                ld      (sp_prev),hl
+swb_l:
+                ld      hl,(sp_cur)
+                ld      a,h
+                or      l
+                ret     z
+                inc     hl
+                ld      a,(hl)                  ; xlast
+                ld      b,a
+                ld      a,(cl_lo)
+                cp      b
+                ret     z
+                ret     c                       ; ilo <= xlast: overlaps
+                call    sp_advance
+                jr      swb_l
 
 ; ---------------------------------------------------------------------------
 ; sp_hasgap : are any columns in [cl_lo, cl_hi] still visible?
@@ -590,12 +757,11 @@ sp_hasgap:
                 ld      (hg_lo),a
                 ld      a,c
                 ld      (hg_hi),a
-                ld      a,(sp_count)
-                or      a
-                ret     z                       ; no spans left: no gap
-                ld      (sp_n),a
                 ld      hl,(sp_head)
 hg_loop:
+                ld      a,h
+                or      l
+                jr      z,hg_none
                 ld      (cl_span),hl
                 ld      a,(hg_hi)
                 ld      c,a
@@ -641,12 +807,13 @@ hg_l2:          ld      (hg_chi),a
                 jr      c,hg_yes
 hg_next:
                 ld      hl,(cl_span)
-                ld      de,SPAN_SIZE
+                ld      de,SP_NEXT
                 add     hl,de
-                ld      a,(sp_n)
-                dec     a
-                ld      (sp_n),a
-                jp      nz,hg_loop
+                ld      a,(hl)
+                inc     hl
+                ld      h,(hl)
+                ld      l,a
+                jp      hg_loop
 hg_none:
                 or      a
                 ret
@@ -683,35 +850,31 @@ hg_a_no:
 ; sp_marksolid : delete columns [cl_lo, cl_hi) from the span list.
 ; ---------------------------------------------------------------------------
 sp_marksolid:
-                ld      a,(sp_count)
-                or      a
-                ret     z
-                ld      (sp_n),a
-                call    sp_begin
-                ld      hl,(sp_head)
+                call    sp_walk_begin
 ms_loop:
+                ld      hl,(sp_cur)
+                ld      a,h
+                or      l
+                jp      z,ms_done
                 ld      (cl_span),hl
                 ld      a,(hl)
                 ld      (tg_xlo),a
+                ld      b,a
+                ld      a,(cl_hi)
+                dec     a
+                cp      b
+                jp      c,ms_done               ; xlo past the range: finished
                 inc     hl
                 ld      a,(hl)
                 ld      (tg_xlast),a
-                ld      a,(cl_lo)
-                ld      b,a                     ; B = ilo
-                ld      a,(cl_hi)
-                dec     a
-                ld      c,a                     ; C = ihi, inclusive
-                ; keep the span whole when it misses the range entirely
-                ld      a,(tg_xlast)
-                cp      b
-                jr      c,ms_keep
-                ld      a,c
-                ld      d,a
-                ld      a,(tg_xlo)
-                cp      d
-                jr      z,ms_split
-                jr      nc,ms_keep
-ms_split:
+                ld      hl,(cl_span)
+                ld      de,SP_NEXT
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (sp_nextp),de
+
                 ld      a,(sq_n)
                 or      a
                 jr      z,ms_left
@@ -756,47 +919,14 @@ ms_right:
                 ld      b,a
                 ld      a,(tg_xlast)
                 call    sp_emit_range2
-                jr      ms_next
-ms_keep:
-                ld      hl,(cl_span)
-                call    sp_emit
 ms_next:
                 ld      hl,(cl_span)
-                ld      bc,SPAN_SIZE
-                add     hl,bc
-                ld      a,(sp_n)
-                dec     a
-                ld      (sp_n),a
-                jp      nz,ms_loop
-                jp      sp_commit
-
-; sp_emit_range : emit the span at HL with xlast replaced by A.
-sp_emit_range:
-                ld      (sp_tmp8),a
-                ld      de,sp_scratch
-                push    hl
-                ld      bc,SPAN_SIZE
-                ldir
-                pop     hl
-                ld      a,(sp_tmp8)
-                ld      (sp_scratch+SP_XLAST),a
-                ld      hl,sp_scratch
-                jp      sp_emit
-
-; sp_emit_range2 : emit the span at HL with xlo = B and xlast = A.
-sp_emit_range2:
-                ld      (sp_tmp8),a
-                ld      a,b
-                ld      (sp_tmp8+1),a
-                ld      de,sp_scratch
-                ld      bc,SPAN_SIZE
-                ldir
-                ld      a,(sp_tmp8)
-                ld      (sp_scratch+SP_XLAST),a
-                ld      a,(sp_tmp8+1)
-                ld      (sp_scratch+SP_XLO),a
-                ld      hl,sp_scratch
-                jp      sp_emit
+                call    sp_freeslot
+                ld      hl,(sp_nextp)
+                ld      (sp_cur),hl
+                jp      ms_loop
+ms_done:
+                jp      sp_relink
 
 ; pw_evd : A = column -> HL = the staged difference function's value there.
 pw_evd:
@@ -912,19 +1042,30 @@ al_pos:
 ;      sg_emitt / sg_emitb = whether each is drawn
 ; ---------------------------------------------------------------------------
 sp_fuse:
-                ld      a,(sp_count)
-                or      a
-                ret     z
-                ld      (sp_n),a
-                call    sp_begin
-                ld      hl,(sp_head)
+                call    sp_walk_begin
 fu_loop:
+                ld      hl,(sp_cur)
+                ld      a,h
+                or      l
+                jp      z,fu_done
                 ld      (cl_span),hl
                 ld      a,(hl)
                 ld      (tg_xlo),a
+                ld      b,a
+                ld      a,(cl_hi)
+                dec     a
+                cp      b
+                jp      c,fu_done               ; xlo past the range: finished
                 inc     hl
                 ld      a,(hl)
                 ld      (tg_xlast),a
+                ld      hl,(cl_span)
+                ld      de,SP_NEXT
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (sp_nextp),de
                 ld      a,(cl_lo)
                 ld      b,a
                 ld      a,(tg_xlo)
@@ -940,14 +1081,6 @@ fu_o0:          ld      (fu_ox0),a
                 jr      c,fu_o1
                 ld      a,b
 fu_o1:          ld      (fu_ox1),a
-                ld      b,a
-                ld      a,(fu_ox0)
-                cp      b
-                jr      z,fu_over
-                jr      c,fu_over
-                ld      hl,(cl_span)            ; no overlap: keep it whole
-                call    sp_emit
-                jp      fu_next
 fu_over:
                 ld      a,(fu_ox0)
                 ld      b,a
@@ -1049,13 +1182,12 @@ fu_right:
                 call    sp_emit_range2
 fu_next:
                 ld      hl,(cl_span)
-                ld      bc,SPAN_SIZE
-                add     hl,bc
-                ld      a,(sp_n)
-                dec     a
-                ld      (sp_n),a
-                jp      nz,fu_loop
-                jp      sp_commit
+                call    sp_freeslot
+                ld      hl,(sp_nextp)
+                ld      (sp_cur),hl
+                jp      fu_loop
+fu_done:
+                jp      sp_relink
 
 ; ---------------------------------------------------------------------------
 ; fu_line : one line against one trapezoid piece - draw the visible run and
@@ -1664,12 +1796,11 @@ sp_drawv:
                 ld      (dl_y1),de
                 ld      (dl_y2),hl
 dv_ordered:
-                ld      a,(sp_count)
-                or      a
-                ret     z
-                ld      (sp_n),a
                 ld      hl,(sp_head)
 dv_find:
+                ld      a,h
+                or      l
+                ret     z
                 ld      (cl_span),hl
                 ld      a,(ev_col_x)
                 ld      c,a
@@ -1681,14 +1812,18 @@ dv_find:
                 ld      a,(hl)
                 cp      c
                 jr      nc,dv_in2
-                dec     hl
-                ld      bc,SPAN_SIZE
-                add     hl,bc
-                ld      a,(sp_n)
-                dec     a
-                ld      (sp_n),a
-                jp      nz,dv_find
+                call    dv_step
+                jp      dv_find
 dv_none:
+                ret
+dv_step:
+                ld      hl,(cl_span)
+                ld      de,SP_NEXT
+                add     hl,de
+                ld      a,(hl)
+                inc     hl
+                ld      h,(hl)
+                ld      l,a
                 ret
 dv_in:
                 inc     hl
@@ -1698,14 +1833,8 @@ dv_in:
                 cp      c
                 jr      z,dv_in2
                 jr      c,dv_in2
-                dec     hl
-                ld      bc,SPAN_SIZE
-                add     hl,bc
-                ld      a,(sp_n)
-                dec     a
-                ld      (sp_n),a
-                jp      nz,dv_find
-                ret
+                call    dv_step
+                jp      dv_find
 dv_in2:
                 ; aperture at this column
                 ld      hl,(cl_span)
