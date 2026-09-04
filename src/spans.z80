@@ -277,6 +277,12 @@ lf_slope:
                 ld      de,(cl_ly1)
                 or      a
                 sbc     hl,de
+                ld      a,h
+                or      l
+                jr      nz,lf_div
+                ld      hl,(cl_ly1)             ; a level edge needs no divide
+                jr      lf_store0
+lf_div:
                 ex      de,hl                   ; DE = dy
                 call    divs
                 ld      a,h

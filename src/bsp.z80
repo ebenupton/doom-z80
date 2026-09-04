@@ -872,11 +872,17 @@ render_seg:
                 ; dot = ldy*(px - lx) - ldx*(py - ly) must be strictly
                 ; positive.  Three quarters of DOOM's linedefs are axis
                 ; aligned, and for those one term vanishes and the test
-                ; collapses to a sign comparison with no multiply at all.
+                ; collapses to a sign comparison - with only one of the two
+                ; deltas worth fetching.
                 ld      de,SG_FLAGS
                 add     hl,de
                 ld      a,(hl)
                 ld      (sg_flags),a
+                and     SF_LDX0
+                jp      nz,rs_bf_x0
+                ld      a,(sg_flags)
+                and     SF_LDY0
+                jp      nz,rs_bf_y0
                 ld      hl,(sg_ptr)
                 ld      de,SG_LX
                 add     hl,de
@@ -905,13 +911,6 @@ render_seg:
                 inc     hl
                 ld      a,(hl)                  ; ldy
                 ld      (pos_ndy),a
-
-                ld      a,(sg_flags)
-                and     SF_LDX0
-                jr      nz,rs_bf_x0
-                ld      a,(sg_flags)
-                and     SF_LDY0
-                jr      nz,rs_bf_y0
                 ; general case: two 16x8 products
                 ld      de,(pos_dx)
                 ld      a,(pos_ndy)
@@ -936,23 +935,53 @@ render_seg:
                 jr      rs_visible
 rs_bf_x0:
                 ; dot = ldy * (px - lx)
-                ld      hl,(pos_dx)
+                ld      hl,(sg_ptr)
+                ld      de,SG_LX
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      hl,(pl_x)
+                or      a
+                sbc     hl,de
                 ld      a,h
                 or      l
                 ret     z
-                ld      a,(pos_ndy)
-                xor     h                       ; sign of the product
+                ld      a,h
+                ld      (pos_dx+1),a
+                ld      hl,(sg_ptr)
+                ld      de,SG_LX+5
+                add     hl,de
+                ld      a,(hl)                  ; ldy
+                ld      b,a
+                ld      a,(pos_dx+1)
+                xor     b                       ; sign of the product
                 bit     7,a
                 ret     nz
                 jr      rs_visible
 rs_bf_y0:
                 ; dot = -ldx * (py - ly)
-                ld      hl,(pos_dy)
+                ld      hl,(sg_ptr)
+                ld      de,SG_LX+2
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      hl,(pl_y)
+                or      a
+                sbc     hl,de
                 ld      a,h
                 or      l
                 ret     z
-                ld      a,(pos_ndx)
-                xor     h
+                ld      a,h
+                ld      (pos_dy+1),a
+                ld      hl,(sg_ptr)
+                ld      de,SG_LX+4
+                add     hl,de
+                ld      a,(hl)                  ; ldx
+                ld      b,a
+                ld      a,(pos_dy+1)
+                xor     b
                 bit     7,a
                 ret     z                       ; product positive -> dot < 0
 rs_visible:
