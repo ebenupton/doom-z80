@@ -181,14 +181,9 @@ rsel1:          ld      h,ROWLO_A>>8
                 ld      a,0
                 adc     a,d
                 ld      h,a
-                ld      a,c
-                and     7
-                push    hl
-                ld      hl,BITTAB
-                add     a,l
-                ld      l,a
-                ld      a,(hl)
-                pop     hl
+                ld      d,MASKTAB>>8
+                ld      e,c
+                ld      a,(de)                  ; the pixel's bit, by x
                 ret
 
 ; ---------------------------------------------------------------------------
@@ -530,8 +525,10 @@ pl_set:
 ; ---------------------------------------------------------------------------
 ; Pixel mask tables.
 ; ---------------------------------------------------------------------------
-                ALIGN   8
-BITTAB:         DB      $80,$40,$20,$10,$08,$04,$02,$01
+                ALIGN   256
+MASKTAB:        DUP     32
+                DB      $80,$40,$20,$10,$08,$04,$02,$01
+                EDUP
                 ALIGN   8
 MASKR:          DB      $ff,$7f,$3f,$1f,$0f,$07,$03,$01   ; from x rightwards
                 ALIGN   8

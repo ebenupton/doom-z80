@@ -493,29 +493,22 @@ lf_store0:
 ; sp_reset : one span covering the whole screen, top 0 and bottom RENDER_H-1.
 ; ---------------------------------------------------------------------------
 sp_reset:
-                ; chain every slot onto the free list, then take the first
-                ; back for the full-screen span
-                ld      hl,SPANS_BASE+SLOT_SIZE
+                ; the free chain: slot 1 -> 2 -> ... -> the last -> 0
+                ld      hl,SPANS_BASE+SLOT_SIZE+SP_NEXT
                 ld      de,SPANS_BASE+SLOT_SIZE*2
-                ld      b,SPANS_MAX-2
+                ld      bc,SLOT_SIZE
+                ld      a,SPANS_MAX-2
 sr_l:
-                push    bc
-                push    hl
-                ld      bc,SP_NEXT
-                add     hl,bc
                 ld      (hl),e
                 inc     hl
                 ld      (hl),d
-                pop     hl
-                ld      bc,SLOT_SIZE
+                dec     hl
                 add     hl,bc
                 ex      de,hl
                 add     hl,bc
                 ex      de,hl
-                pop     bc
-                djnz    sr_l
-                ld      bc,SP_NEXT
-                add     hl,bc
+                dec     a
+                jr      nz,sr_l
                 ld      (hl),0
                 inc     hl
                 ld      (hl),0
@@ -1822,148 +1815,103 @@ sp_drawv:
                 ld      a,h
                 or      a
                 ret     nz                      ; off screen either side
-                ld      a,l
-                ld      (ev_col_x),a
-                ; order y
-                ld      hl,(dl_y1)
-                ld      de,(dl_y2)
-                CMP16F
-                jr      c,dv_ordered
-                jr      z,dv_ordered
-                ld      hl,(dl_y1)
-                ld      de,(dl_y2)
-                ld      (dl_y1),de
-                ld      (dl_y2),hl
-dv_ordered:
-                ld      hl,(sp_head)
-dv_find:
-                ld      a,h
-                or      l
-                ret     z
-                ld      (cl_span),hl
-                ld      a,(ev_col_x)
-                ld      c,a
-                ld      a,(hl)
-                cp      c
-                jr      z,dv_in
-                jr      nc,dv_none              ; xlo > x: sorted, so give up
-                inc     hl
-                ld      a,(hl)
-                cp      c
-                jr      nc,dv_in2
-                call    dv_step
-                jp      dv_find
-dv_none:
-                ret
-dv_step:
-                ld      hl,(cl_span)
-                ld      de,SP_NEXT
-                add     hl,de
-                ld      a,(hl)
-                inc     hl
-                ld      h,(hl)
-                ld      l,a
-                ret
-dv_in:
-                inc     hl
-                ld      a,(hl)
-                ld      c,a
-                ld      a,(ev_col_x)
-                cp      c
-                jr      z,dv_in2
-                jr      c,dv_in2
-                call    dv_step
-                jp      dv_find
-dv_in2:
-                ; The span's extremes settle a vertical the same way they
-                ; settle a sloped edge: inside the inner pair it needs no
-                ; clamp, outside the outer pair it is not there at all, and
-                ; either way neither boundary is evaluated.
+                ld      c,l                     ; C = the column
                 ld      hl,(dl_y1)
                 call    clampb
-                ld      (dv_a),a
+                ld      b,a
                 ld      hl,(dl_y2)
                 call    clampb
-                ld      (dv_b),a
-                ld      hl,(cl_span)
-                ld      de,SP_OT
-                add     hl,de
-                ld      a,(dv_b)
-                cp      (hl)
-                ret     c                       ; wholly above the top
-                inc     hl
-                ld      d,(hl)                  ; D = inner top
-                inc     hl
-                ld      a,(hl)                  ; outer bottom
-                ld      hl,dv_a
-                cp      (hl)
-                ret     c                       ; wholly below the bottom
-                ld      hl,(cl_span)
-                ld      bc,SP_IB
-                add     hl,bc
-                ld      a,(hl)                  ; E = inner bottom
-                ld      e,a
+                cp      b
+                jr      nc,dv_ordered           ; the clamp is monotone, so
+                ld      d,a                     ; ordering after it is the same
+                ld      a,b
+                ld      b,d
+dv_ordered:     ld      d,a                     ; B = ya, D = yb, biased bytes
+                ld      ix,(sp_head)
+dv_find:
+                ld      a,ixh
+                or      ixl
+                ret     z
+                ld      a,(ix+SP_XLO)
+                cp      c
+                jr      z,dv_in
+                ret     nc                      ; xlo > x: sorted, so give up
+                ld      a,(ix+SP_XLAST)
+                cp      c
+                jr      nc,dv_in
+                ld      l,(ix+SP_NEXT)
+                ld      h,(ix+SP_NEXT+1)
+                push    hl
+                pop     ix
+                jr      dv_find
+dv_in:
                 ld      a,d
+                cp      (ix+SP_OT)
+                ret     c                       ; wholly above the top
+                ld      a,(ix+SP_OB)
+                cp      b
+                ret     c                       ; wholly below the bottom
+                ld      e,(ix+SP_IT)
+                ld      a,(ix+SP_IB)
                 cp      e
-                jr      nc,dv_slow              ; inner pair not open
-                ld      a,(dv_a)
+                jr      c,dv_slow               ; inner pair not open
+                jr      z,dv_slow
+                ld      a,b
+                cp      e
+                jr      c,dv_slow               ; ya above the inner top
+                ld      a,(ix+SP_IB)
                 cp      d
-                jr      c,dv_slow
-                ld      a,e
-                ld      hl,dv_b
-                cp      (hl)
-                jr      c,dv_slow
-                ld      a,(dv_b)
+                jr      c,dv_slow               ; yb below the inner bottom
+dv_emit:
+                ld      a,d
                 sub     Y_BIAS
                 ld      d,a
-                ld      a,(dv_a)
+                ld      a,b
                 sub     Y_BIAS
                 ld      b,a
-                ld      a,(ev_col_x)
-                ld      c,a
+                ld      a,c
                 jp      dl_emit
 dv_slow:
-                ; aperture at this column
-                ld      hl,(cl_span)
+                push    bc
+                push    de
+                push    ix
+                pop     hl
                 ld      de,SP_TA
                 add     hl,de
-                ld      a,(ev_col_x)
-                call    ev_at
-                ld      (dv_top),a
-                ld      hl,(cl_span)
-                ld      de,SP_BA
-                add     hl,de
-                ld      a,(ev_col_x)
-                call    ev_at
-                ld      (dv_bot),a
-                ld      hl,dv_top
-                cp      (hl)
+                push    hl
+                ld      a,c
+                call    ev_at                   ; the top there
+                pop     hl
+                pop     de
+                pop     bc
+                ld      e,a
+                push    bc
+                push    de
+                inc     hl
+                inc     hl
+                inc     hl
+                inc     hl                      ; SP_BA
+                ld      a,c
+                call    ev_at                   ; and the bottom
+                pop     de
+                pop     bc
+                cp      e
                 ret     c                       ; empty aperture
                 ret     z
-                ; a = max(y1, top), b = min(y2, bot)
-                ld      a,(dv_a)
-                ld      hl,dv_top
-                cp      (hl)
+                ld      h,a
+                ld      a,b
+                cp      e
                 jr      nc,dv_a1
-                ld      a,(dv_top)
-dv_a1:          ld      (dv_a),a
-                ld      a,(dv_b)
-                ld      hl,dv_bot
-                cp      (hl)
+                ld      b,e                     ; ya = max(ya, top)
+dv_a1:          ld      a,d
+                cp      h
                 jr      c,dv_b1
-                ld      a,(dv_bot)
-dv_b1:          ld      (dv_b),a
-                ld      hl,dv_a
-                cp      (hl)
-                ret     c                       ; a > b: nothing visible
-                sub     Y_BIAS
-                ld      d,a
-                ld      a,(dv_a)
-                sub     Y_BIAS
-                ld      b,a
-                ld      a,(ev_col_x)
-                ld      c,a
-                jp      dl_emit
+                ld      d,h                     ; yb = min(yb, bottom)
+dv_b1:          ld      a,d
+                cp      b
+                ret     c                       ; nothing visible
+                jr      dv_emit
+
 
 ; ---------------------------------------------------------------------------
 ; queue_edge : remember one sloped edge of the current seg.  HL = y at sx1,

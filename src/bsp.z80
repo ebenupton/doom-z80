@@ -157,95 +157,76 @@ ss_loop:
 ; Returns A = 0 (front) or 1 (back).
 ; ---------------------------------------------------------------------------
 point_on_side:
-                ld      hl,(bsp_node)
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                push    hl
+                ; DOOM's R_PointOnSide on the gcd-reduced partition
+                ; direction; IX = the node, dx and dy in registers
+                ld      ix,(bsp_node)
+                ld      e,(ix+0)
+                ld      d,(ix+1)
                 ld      hl,(pl_wx)
                 or      a
-                sbc     hl,de
-                ld      (pos_dx),hl
-                pop     hl
-                inc     hl
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
+                sbc     hl,de                   ; dx
                 push    hl
+                ld      e,(ix+2)
+                ld      d,(ix+3)
                 ld      hl,(pl_wy)
                 or      a
-                sbc     hl,de
-                ld      (pos_dy),hl
-                pop     hl
-                inc     hl
-                ld      a,(hl)                  ; rdx
-                ld      (pos_ndx),a
-                inc     hl
-                ld      a,(hl)                  ; rdy
-                ld      (pos_ndy),a
-
-                ld      a,(pos_ndx)
+                sbc     hl,de                   ; dy
+                ld      b,(ix+4)                ; rdx
+                ld      c,(ix+5)                ; rdy
+                pop     de                      ; DE = dx, HL = dy
+                ld      a,b
                 or      a
                 jr      nz,pos_notx0
-                ; vertical partition
-                ld      hl,(pos_dx)
-                ld      a,h
-                or      l
+                ; a north-south partition: the side is dx's, by rdy's sign
+                ld      a,d
+                or      a
+                jp      m,pos_dxle
+                or      e
                 jr      z,pos_dxle
-                bit     7,h
-                jr      nz,pos_dxle
-                ; dx > 0
-                ld      a,(pos_ndy)
-                bit     7,a
-                ld      a,0
-                ret     z
-                ld      a,1
+                ld      a,c                     ; dx > 0: side = rdy < 0
+                rla
+                sbc     a,a
+                and     1
                 ret
 pos_dxle:
-                ld      a,(pos_ndy)
-                or      a
-                ld      a,0
+                ld      a,c                     ; dx <= 0: side = rdy != 0 (rdy is
+                or      a                       ; never negative with rdx zero)
                 ret     z
-                bit     7,a
                 ld      a,1
-                ret     z
-                ld      a,0
                 ret
 pos_notx0:
-                ld      a,(pos_ndy)
+                ld      a,c
                 or      a
                 jr      nz,pos_general
-                ; horizontal partition
-                ld      hl,(pos_dy)
+                ; an east-west partition
                 ld      a,h
+                or      a
+                jp      m,pos_dyle
                 or      l
                 jr      z,pos_dyle
-                bit     7,h
-                jr      nz,pos_dyle
-                ld      a,(pos_ndx)
-                bit     7,a
-                ld      a,1
-                ret     z
-                ld      a,0
+                ld      a,b                     ; dy > 0: side = rdx > 0
+                rla
+                sbc     a,a
+                and     1
+                xor     1
                 ret
 pos_dyle:
-                ld      a,(pos_ndx)
-                bit     7,a
-                ld      a,0
-                ret     z
-                ld      a,1
+                ld      a,b                     ; dy <= 0: side = rdx < 0
+                rla
+                sbc     a,a
+                and     1
                 ret
 pos_general:
-                ; left = ndy * dx, right = dy * ndx; front when right < left
-                ld      de,(pos_dx)
-                ld      a,(pos_ndy)
-                call    mul_s16_u8_signed
+                push    hl                      ; dy
+                push    bc
+                ld      a,c
+                call    mul_s16_u8_signed       ; A:HL = rdy * dx
                 ld      (pos_l),hl
                 ld      (pos_l+2),a
-                ld      de,(pos_dy)
-                ld      a,(pos_ndx)
-                call    mul_s16_u8_signed
-                ; compute left - right as s24
+                pop     bc
+                pop     de
+                ld      a,b
+                call    mul_s16_u8_signed       ; A:HL = rdx * dy
                 ld      c,a
                 ld      de,(pos_l)
                 ex      de,hl
@@ -253,11 +234,11 @@ pos_general:
                 sbc     hl,de
                 ld      a,(pos_l+2)
                 sbc     a,c
-                bit     7,a
-                ld      a,0
-                ret     z                       ; left - right >= 0 -> front
-                ld      a,1
+                rla                             ; rdy*dx - rdx*dy < 0: side 1
+                sbc     a,a
+                and     1
                 ret
+
 
 ; mul_s16_u8_signed : A:HL = DE (s16) * A (s8, sign honoured)
 mul_s16_u8_signed:
