@@ -1,1 +1,30 @@
-; --- spilled into the row-plane tail (spare) --------------------------------
+; --- spilled into the row-plane tail ---------------------------------------
+; to_view : the rotation, as a routine.  The engine's own copy is inlined at
+; its single call site in vertex_get; this one is what the unit test drives.
+to_view:
+                ; bx = rot_sin(wx) - rot_cos(wy)
+                ld      de,(tv_wx)
+                call    rot_sin
+                ld      (vs_acc),hl
+                ld      (vs_acc+2),a
+                ld      de,(tv_wy)
+                call    rot_cos
+                call    sub_pushed
+                call    rns3_ahl
+                ld      de,(vs_rx)
+                add     hl,de
+                ld      (tv_tvx),hl
+
+                ; by = rot_cos(wx) + rot_sin(wy)
+                ld      de,(tv_wx)
+                call    rot_cos
+                ld      (vs_acc),hl
+                ld      (vs_acc+2),a
+                ld      de,(tv_wy)
+                call    rot_sin
+                call    add_pushed
+                call    rns3_ahl
+                ld      de,(vs_ry)
+                add     hl,de
+                ld      (tv_tvy),hl
+                ret

@@ -887,7 +887,7 @@ vertex_get:
                 ld      hl,(vs_ry)
                 add     hl,de
                 ld      (tv_tvy),hl
-                jr      vg_have
+                jp      vg_have
 vg_cold:
                 ld      a,(hl)
                 or      c
@@ -906,7 +906,34 @@ vg_cold:
                 inc     hl
                 ld      d,(hl)
                 ld      (tv_wy),de
-                call    to_view
+                ; to_view, inlined: one caller, and the call and return were
+                ; a fortieth of what the rotation itself costs
+                ; bx = rot_sin(wx) - rot_cos(wy)
+                ld      de,(tv_wx)
+                call    rot_sin
+                ld      (vs_acc),hl
+                ld      (vs_acc+2),a
+                ld      de,(tv_wy)
+                call    rot_cos
+                call    sub_pushed
+                call    rns3_ahl
+                ld      de,(vs_rx)
+                add     hl,de
+                ld      (tv_tvx),hl
+
+                ; by = rot_cos(wx) + rot_sin(wy)
+                ld      de,(tv_wx)
+                call    rot_cos
+                ld      (vs_acc),hl
+                ld      (vs_acc+2),a
+                ld      de,(tv_wy)
+                call    rot_sin
+                call    add_pushed
+                call    rns3_ahl
+                ld      de,(vs_ry)
+                add     hl,de
+                ld      (tv_tvy),hl
+
                 call    vx_addr
                 push    hl
                 ld      hl,(tv_tvx)

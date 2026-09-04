@@ -436,35 +436,6 @@ sub_pushed:
 ; ---------------------------------------------------------------------------
 ; to_view : tv_wx / tv_wy (s16 prescaled) -> tv_tvx / tv_tvy (s16 counts)
 ; ---------------------------------------------------------------------------
-to_view:
-                ; bx = rot_sin(wx) - rot_cos(wy)
-                ld      de,(tv_wx)
-                call    rot_sin
-                ld      (vs_acc),hl
-                ld      (vs_acc+2),a
-                ld      de,(tv_wy)
-                call    rot_cos
-                call    sub_pushed
-                call    rns3_ahl
-                ld      de,(vs_rx)
-                add     hl,de
-                ld      (tv_tvx),hl
-
-                ; by = rot_cos(wx) + rot_sin(wy)
-                ld      de,(tv_wx)
-                call    rot_cos
-                ld      (vs_acc),hl
-                ld      (vs_acc+2),a
-                ld      de,(tv_wy)
-                call    rot_sin
-                call    add_pushed
-                call    rns3_ahl
-                ld      de,(vs_ry)
-                add     hl,de
-                ld      (tv_tvy),hl
-                ret
-
-; ---------------------------------------------------------------------------
 ; recip : HL = tvy (positive s16 counts) -> rc_m8, rc_s
 ;   idx = max(2, tvy >> 4), reduced by right shifts into [2, 255]
 ; ---------------------------------------------------------------------------

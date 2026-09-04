@@ -525,25 +525,6 @@ sr_l:
 ; it does not touch costs nothing but the pointer chase.
 ; ---------------------------------------------------------------------------
 
-; sp_alloc : HL = a slot off the free chain, or 0 when the pool is spent.
-sp_alloc:
-                ld      hl,(sp_free)
-                ld      a,h
-                or      l
-                ret     z
-                push    hl
-                ld      de,SP_NEXT
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (sp_free),de
-                ld      a,(sp_count)
-                inc     a
-                ld      (sp_count),a
-                pop     hl
-                ret
-
 ; sp_freeslot : HL back onto the free chain.
 sp_freeslot:
                 push    hl
@@ -558,18 +539,6 @@ sp_freeslot:
                 ld      a,(sp_count)
                 dec     a
                 ld      (sp_count),a
-                ret
-
-; sp_advance : leave the span at sp_cur where it is and step past it.
-sp_advance:
-                ld      hl,(sp_cur)
-                ld      (sp_prev),hl
-                ld      de,SP_NEXT
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (sp_cur),de
                 ret
 
 ; ---------------------------------------------------------------------------
@@ -672,10 +641,21 @@ se_fail:
                 ret
 
 se_new:
-                call    sp_alloc
+                ld      hl,(sp_free)            ; sp_alloc, inlined
                 ld      a,h
                 or      l
                 ret     z                       ; pool spent: drop the span
+                push    hl
+                ld      de,SP_NEXT
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (sp_free),de
+                ld      a,(sp_count)
+                inc     a
+                ld      (sp_count),a
+                pop     hl
                 ld      (se_prev),hl
                 ex      de,hl
                 ld      hl,(sp_tmp8)
@@ -785,7 +765,14 @@ swb_l:
                 cp      b
                 ret     z
                 ret     c                       ; ilo <= xlast: overlaps
-                call    sp_advance
+                ld      hl,(sp_cur)             ; sp_advance, inlined
+                ld      (sp_prev),hl
+                ld      de,SP_NEXT
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (sp_cur),de
                 jr      swb_l
 
 ; ---------------------------------------------------------------------------

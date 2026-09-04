@@ -197,9 +197,9 @@ the tracked 109-frame walkthrough of E1M1:
 | | T-states/frame | fps |
 |---|---|---|
 | best frame (facing a near wall) | 142k | 24.9 |
-| median | 922k | 3.9 |
-| mean | 952k | 3.7 |
-| worst frame (the long start corridor) | 1.63M | 2.2 |
+| median | 921k | 3.9 |
+| mean | 950k | 3.7 |
+| worst frame (the long start corridor) | 1.70M | 2.1 |
 
 The tracked comparison is against the BBC port's own recorded baseline: the
 same 18 viewpoints, its 6502 cycles beside these T-states, with parity meaning
@@ -210,11 +210,13 @@ outside the BBC harness's counted region too.
 | | 6502 cycles / Z80 T | fps |
 |---|---|---|
 | BBC Micro port | 2,956,217 | 12.2 |
-| this port | 14,304,080 | 4.5 |
+| this port | 14,738,966 | 4.3 |
 
-That is 2.73× off parity, from 3.72× when the engine first ran.
+That is 2.81× off parity, from 3.72× when the engine first ran.
 
 ### What came over from the BBC port
+
+Structure:
 
 - **The fused draw-and-tighten walk.** A boundary line that was drawn is, by
   construction, inside the aperture on every column it lit, so there
@@ -226,35 +228,60 @@ That is 2.73× off parity, from 3.72× when the engine first ran.
   land at [48, 207] and anything a line reaches outside the band clamps to 0
   or 255 — the correct side of every boundary. Every y comparison is a `CP`.
 - **Boundary extremes.** Each boundary carries its outer and inner value over
-  the span. A line inside `[inner top, inner bottom]` is inside the aperture
-  right across the range and one outside `[outer top, outer bottom]` never
-  enters it, so 85% of clips need no boundary evaluation, no crossing search
+  the span, so 85% of clips need no boundary evaluation, no crossing search
   and no clamp: four byte comparisons and the line's own two ends.
-- **A linked span pool.** Live spans are a sorted list and unused slots a free
-  chain; a walk skips to the first span that can overlap, edits the ones that
-  do, and leaves the rest alone.
-- **Angle-space bounding boxes.** DOOM's own `R_CheckBBox`: silhouette corners
-  through `R_PointToAngle`, clipped to the ±45° field of view, `ANGTOX` to
-  columns.
-- **The seg chain.** Four segs in five share `v1` with the previous seg's
-  `v2`, and the front sector is the same across a subsector, so that seg's
-  projected y pair carries over — no reciprocal, no multiply.
+- **A linked span pool** with a free chain, so a walk edits the spans it
+  touches and leaves the rest alone.
+- **Angle-space bounding boxes** — DOOM's own `R_CheckBBox`.
+- **The seg chain**: four segs in five share `v1` with the previous seg's
+  `v2`, so that seg's projected y pair carries over.
+
+Arithmetic:
+
+- **The log2/atanexp angle.** `ta(num, den) = ATANEXP[L(den) − L(num)]`, with
+  `L(v) = L8[v]` under 256 and `L8[v>>3] + 96` above, the shifted-out half-bit
+  averaging the two neighbours. `ATANEXP[k]` is the midpoint of the exact
+  angle over the pairs in bucket k; exhaustively over `den` 2..2047 the error
+  is 195 angle units, and every box is widened by it so a verdict is a
+  superset of the exact one's. `point_to_angle` 1138 → 814 T-states.
+- **Byte-at-a-time division** against an 8-bit remainder, leading zero bytes
+  skipped: every slope here has a column span for a denominator.
 - **Axis-aligned plotters**, and eight copies of the shallow-line step so the
-  mask is an immediate in a `SET` — most of a wireframe's sloped pixels are
-  near-horizontal.
-- **Byte-at-a-time division** against an 8-bit remainder, with the dividend's
-  leading zero bytes skipped: every slope this engine takes has a column span
-  for a denominator, so it is under 256.
-- The packed geometry itself, including the dead-seg elimination, colinear
-  merging and NOVT vertical suppression the BBC port's `pack` does.
+  mask is an immediate in a `SET`: 74 → 37 T-states a pixel.
+- **Single-caller inlining**, where the call and return were a measurable part
+  of what the body cost.
+
+Caches — all three ported, and what each is actually worth here:
+
+| | hit rate | worth |
+|---|---|---|
+| translation-coherence vertex cache | 85% | **−11k T/frame** |
+| `project_y` memo on `(h, M8, S)` | 34% | −2k T/frame |
+| corner-angle memo | 12–20% | **+6k T/frame** |
+
+The vertex cache is the big one: the view transform is exactly linear in the
+integer world deltas, so `to_view(w) = L(w) + ref` for a fixed angle, and a
+warm read is two adds. It earns nothing on a per-viewpoint benchmark, where
+every angle differs, and a great deal in motion.
+
+The corner memo does not pay on E1M1. `R_PointToAngle` is a pure function of
+the delta pair so an entry never goes stale, but the geometric reuse is only
+12–20% (a perfect unbounded memo measures 16% in the reference), and a
+four-byte key probe costs a fifth of what the log2 angle now does. It is in,
+page-aligned and as cheap as the probe can be made; `CPM_BASE` is the one
+place to disable it.
+
+Two of the BBC port's ideas are deliberately absent: its rotation-coherence
+bbox cache, which that port has itself retired, and its 160-block unrolled
+vertical plotter, which exists because the 6502 has no cheap "next scanline"
+step — on the Z80 `INC H` already costs 22 T-states a pixel against the 30 an
+unrolled absolute-addressed block would, and there is no room for 1.9K of
+blocks.
 
 What is left is spread thin — nothing above 7% of a frame. The 6502 does the
-same work about 2.7× cheaper per operation, and a quarter of this engine's
+same work about 2.8× cheaper per operation, and a quarter of this engine's
 time is absolute-address loads and stores where the 6502 has zero page at
-three cycles. Two of the BBC port's caches remain unported: the
-translation-coherence vertex cache, which is worth nothing on a per-viewpoint
-benchmark but a great deal in motion, and the rotation-coherence bbox cache,
-which that port has since retired itself.
+three cycles.
 
 ## The toolchain
 
