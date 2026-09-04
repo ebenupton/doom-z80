@@ -124,6 +124,11 @@ SPANS_TOP       EQU     SPANS_BASE + SPANS_MAX*SLOT_SIZE
 sp_cur          EQU     SPANS_TOP+0     ; the walk's cursor, its successor
 sp_nextp        EQU     SPANS_TOP+2     ; and its insertion point
 sp_prev         EQU     SPANS_TOP+4
+; the seg chain: a subsector's segs share endpoints, so the pair projected for
+; one seg's v2 is the pair its neighbour needs for v1
+ch_vtx          EQU     SPANS_TOP+6
+ch_ft           EQU     SPANS_TOP+8
+ch_fb           EQU     SPANS_TOP+10
 
 ; hot variables and stack live at the top of bank 2
 VARS_BASE       EQU     $BC00

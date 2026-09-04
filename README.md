@@ -197,9 +197,9 @@ the tracked 109-frame walkthrough of E1M1:
 | | T-states/frame | fps |
 |---|---|---|
 | best frame (facing a near wall) | 142k | 24.9 |
-| median | 1.06M | 3.3 |
-| mean | 1.12M | 3.2 |
-| worst frame (the long start corridor) | 1.92M | 1.9 |
+| median | 922k | 3.9 |
+| mean | 956k | 3.7 |
+| worst frame (the long start corridor) | 1.63M | 2.2 |
 
 The tracked comparison is against the BBC port's own recorded baseline: the
 same 18 viewpoints, its 6502 cycles beside these T-states, with parity meaning
@@ -210,25 +210,48 @@ outside the BBC harness's counted region too.
 | | 6502 cycles / Z80 T | fps |
 |---|---|---|
 | BBC Micro port | 2,956,217 | 12.2 |
-| this port | 16,471,988 | 3.9 |
+| this port | 14,332,392 | 4.5 |
 
-That is 3.14× off parity, from 3.72× when the engine first ran. What has come
-out since: the fused draw-and-tighten walk, span-major clipping, angle-space
-bounding-box culling, and the flat-aperture short circuit in `has_gap`.
+That is 2.73× off parity, from 3.72× when the engine first ran.
 
-The profile is flat — no routine is above 8% — which is the usual sign that
-what remains is structural. The three that look worth the most:
+### What came over from the BBC port
 
-- **8-bit biased screen space.** The BBC port pre-clips lines to the screen in
-  s16 and then does every span comparison on `u8` values biased by 48. Here
-  everything downstream is `s16`, and signed 16-bit comparison alone is 5% of
-  the frame.
-- **A linked span pool.** Every occlusion update rebuilds the whole array into
-  a second pool and swaps; a linked list would let a split touch two spans and
-  leave the rest alone.
-- **Rotation- and translation-coherence caches.** The BBC port caches the
-  bounding-box angle test across frames while the view is coherent; the two
-  `R_PointToAngle` calls per node are 5% of the frame here.
+- **The fused draw-and-tighten walk.** A boundary line that was drawn is, by
+  construction, inside the aperture on every column it lit, so there
+  `max(old_top, line)` *is* the line: the tighten is a copy, not a piecewise
+  maximum with a crossover search, and it happens in the pass that clipped the
+  line. Both of a seg's boundary lines and all its other edges go through one
+  walk of the span list.
+- **Byte screen space.** Clipper y is a byte biased by 48, so the visible rows
+  land at [48, 207] and anything a line reaches outside the band clamps to 0
+  or 255 — the correct side of every boundary. Every y comparison is a `CP`.
+- **Boundary extremes.** Each boundary carries its outer and inner value over
+  the span. A line inside `[inner top, inner bottom]` is inside the aperture
+  right across the range and one outside `[outer top, outer bottom]` never
+  enters it, so 85% of clips need no boundary evaluation, no crossing search
+  and no clamp: four byte comparisons and the line's own two ends.
+- **A linked span pool.** Live spans are a sorted list and unused slots a free
+  chain; a walk skips to the first span that can overlap, edits the ones that
+  do, and leaves the rest alone.
+- **Angle-space bounding boxes.** DOOM's own `R_CheckBBox`: silhouette corners
+  through `R_PointToAngle`, clipped to the ±45° field of view, `ANGTOX` to
+  columns.
+- **The seg chain.** Four segs in five share `v1` with the previous seg's
+  `v2`, and the front sector is the same across a subsector, so that seg's
+  projected y pair carries over — no reciprocal, no multiply.
+- **Axis-aligned plotters**, and eight copies of the shallow-line step so the
+  mask is an immediate in a `SET` — most of a wireframe's sloped pixels are
+  near-horizontal.
+- The packed geometry itself, including the dead-seg elimination, colinear
+  merging and NOVT vertical suppression the BBC port's `pack` does.
+
+What is left is spread thin — nothing above 7% of a frame. The 6502 does the
+same work about 2.7× cheaper per operation, and a quarter of this engine's
+time is absolute-address loads and stores where the 6502 has zero page at
+three cycles. Two of the BBC port's caches remain unported: the
+translation-coherence vertex cache, which is worth nothing on a per-viewpoint
+benchmark but a great deal in motion, and the rotation-coherence bbox cache,
+which that port has since retired itself.
 
 ## The toolchain
 

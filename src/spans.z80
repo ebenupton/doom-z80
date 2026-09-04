@@ -58,6 +58,74 @@ dv_go:
                 jr      z,dv_ok
                 ld      bc,$7fff                ; keep rem*2 inside 16 bits
 dv_ok:
+                ; A divisor under 256 - which is every slope this engine takes,
+                ; the denominator being a column span - divides byte at a time
+                ; against an 8-bit remainder, and the leading zero bytes of the
+                ; dividend can be skipped outright.  That is 51 T-states a bit
+                ; against 75, over fewer bits.
+                ld      a,b
+                or      a
+                jr      nz,dv_wide
+                ld      a,d
+                or      a
+                jr      nz,dv_by3
+                ld      a,e
+                cp      c
+                jr      nc,dv_by2
+                ld      a,e                     ; quotient is under 256
+                ld      l,0
+                call    div8b
+                ld      h,0
+                jp      dv_sign_apply
+dv_by2:
+                xor     a
+                ld      l,e
+                call    div8b
+                ld      e,l
+                ld      l,0
+                call    div8b
+                ld      h,e
+                bit     7,h
+                jp      nz,dv_sat
+                jp      dv_sign_apply
+dv_by3:
+                xor     a
+                ld      l,d
+                call    div8b
+                ld      d,l
+                ld      l,e
+                call    div8b
+                ld      e,l
+                ld      l,0
+                call    div8b
+                ld      h,e
+                ld      a,d
+                or      a
+                jp      nz,dv_sat
+                bit     7,h
+                jp      nz,dv_sat
+                jp      dv_sign_apply
+
+; div8b : one byte of dividend in L against the divisor in C, with the running
+; remainder in A.  L comes back as the quotient byte, A as the new remainder.
+div8b:
+                ld      b,8
+                or      a
+db_lp:
+                rl      l
+                rla
+                jr      c,db_s
+                cp      c
+                jr      c,db_n
+db_s:           sub     c
+                scf
+                jr      db_h
+db_n:           or      a
+db_h:           djnz    db_lp
+                rl      l
+                ret
+
+dv_wide:
                 ; Fast path: when the numerator is smaller than the divisor the
                 ; integer quotient is zero, so the sixteen integer steps are
                 ; pure overhead - and that is the usual case for a parametric
@@ -219,34 +287,50 @@ ev_at:
                 jr      nz,ev_slope
                 ld      h,b
                 ld      l,c
-                jr      clampb
+                jp      ev_clamp
 ev_slope:
                 ; (slope*col) >> 8 == shi*col + ((slo*col) >> 8); the high
                 ; byte is 0 or -1 for any gradient under one pixel a column,
-                ; which is most of them, so that term usually vanishes.
+                ; which is most of them, so that term usually vanishes - and
+                ; testing it here rather than after the multiply saves keeping
+                ; it and the column alive across one.
+                ld      a,d
+                or      a
+                jr      z,ev_hi0
+                inc     a
+                jp      nz,ev_gen
                 push    bc                      ; intercept
-                ld      b,d                     ; B = slope high byte
-                ld      c,l                     ; C = column
-                push    bc
+                ld      a,l
+                ld      (ev_tmp),a              ; column
                 ld      h,e
                 MUL_U8_BODY                     ; HL = slo * col
                 ld      l,h
                 ld      h,0
-                pop     bc
-                ld      a,b
-                or      a
-                jr      z,ev_fin
-                inc     a
-                jr      nz,ev_gen
-                ld      e,c
+                ld      a,(ev_tmp)
+                ld      e,a
                 ld      d,0
                 or      a
                 sbc     hl,de
                 jr      ev_fin
+ev_hi0:
+                push    bc
+                ld      h,e
+                MUL_U8_BODY
+                ld      l,h
+                ld      h,0
+                jr      ev_fin
 ev_gen:
-                dec     a
+                push    bc
+                ld      b,d
+                ld      c,l
+                push    bc
+                ld      h,e
+                MUL_U8_BODY
+                ld      l,h
+                ld      h,0
+                pop     bc
                 push    hl
-                ld      h,a
+                ld      h,b
                 ld      l,c
                 call    mul_s8_u8
                 pop     de
@@ -254,10 +338,8 @@ ev_gen:
 ev_fin:
                 pop     de
                 add     hl,de
-; clampb : HL (s16 screen y) -> A, biased and clamped to a byte.
-clampb:
-                ld      de,Y_BIAS
-                add     hl,de
+; ev_clamp : HL (already biased) -> A, clamped to a byte.
+ev_clamp:
                 ld      a,h
                 or      a
                 jr      z,cb_ok
@@ -269,12 +351,28 @@ clampb:
 cb_ok:          ld      a,l
                 ret
 
+; clampb : HL (raw s16 screen y) -> A, biased and clamped.
+clampb:
+                ld      de,Y_BIAS
+                add     hl,de
+                jr      ev_clamp
+
 ; ---------------------------------------------------------------------------
 ; linfn : write (slope, intercept) for the line through
 ;         (cl_lx1, cl_ly1) - (cl_lx2, cl_ly2) into the buffer at HL.
 ; ---------------------------------------------------------------------------
 linfn:
                 ld      (lf_out),hl
+                ; bias the endpoints here, so every intercept this writes is
+                ; already in the clipper's byte space and ev_at need only
+                ; range-check.  The slope is a difference, so it is untouched.
+                ld      hl,(cl_ly1)
+                ld      de,Y_BIAS
+                add     hl,de
+                ld      (cl_ly1),hl
+                ld      hl,(cl_ly2)
+                add     hl,de
+                ld      (cl_ly2),hl
                 ld      hl,(cl_lx2)
                 ld      de,(cl_lx1)
                 or      a
@@ -444,7 +542,7 @@ sr_l:
                 inc     hl
                 ld      (hl),0
                 inc     hl
-                ld      (hl),0                  ; top intercept = 0
+                ld      (hl),Y_BIAS             ; top intercept, biased
                 inc     hl
                 ld      (hl),0
                 inc     hl
@@ -452,7 +550,7 @@ sr_l:
                 inc     hl
                 ld      (hl),0
                 inc     hl
-                ld      (hl),RENDER_H-1         ; bottom intercept
+                ld      (hl),Y_BIAS+RENDER_H-1  ; bottom intercept, biased
                 inc     hl
                 ld      (hl),0
                 inc     hl
@@ -1206,7 +1304,6 @@ fu_line:
                 ld      a,(fu_x1)
                 call    ev_at
                 ld      (ct_yb),a
-                call    fu_lyext
                 call    fu_verdict
                 jr      c,fl_outside
                 jp      nz,fl_slow
@@ -1479,27 +1576,23 @@ fl_nr2e:
                 ld      a,(fu_k1)
                 jp      fu_okeep
 
-; fu_lyext : the line's own extremes over the staged range, from the values
-; already evaluated at its two ends.
-fu_lyext:
-                ld      a,(ct_yb)
-                ld      hl,ct_ya
-                cp      (hl)
-                jr      nc,fl_yo
-                ld      (fu_lylo),a
-                ld      a,(hl)
-                ld      (fu_lyhi),a
-                ret
-fl_yo:
-                ld      (fu_lyhi),a
-                ld      a,(hl)
-                ld      (fu_lylo),a
-                ret
-
 ; fu_verdict : the two-level test.  Carry set when the line never enters the
 ; aperture anywhere in the range; otherwise Z set when it is inside it
 ; everywhere, and Z clear when the boundaries have to be evaluated.
 fu_verdict:
+                ld      a,(ct_yb)               ; the line's own extremes
+                ld      hl,ct_ya
+                cp      (hl)
+                jr      nc,fv_yo
+                ld      (fu_lylo),a
+                ld      a,(hl)
+                ld      (fu_lyhi),a
+                jr      fv_go
+fv_yo:
+                ld      (fu_lyhi),a
+                ld      a,(hl)
+                ld      (fu_lylo),a
+fv_go:
                 ld      a,(fu_lyhi)
                 ld      hl,fu_t_o
                 cp      (hl)
@@ -2125,7 +2218,6 @@ ct_edge:
                 ld      a,(ct_xb0)
                 call    ev_at
                 ld      (ct_yb),a
-                call    fu_lyext
                 call    fu_verdict
                 ret     c                       ; never enters the aperture
                 jr      nz,ct_slow

@@ -129,6 +129,8 @@ walk_ss:
                 inc     hl
                 ld      d,(hl)
                 ld      (ss_seg),de
+                ld      hl,$ffff
+                ld      (ch_vtx),hl             ; the chain starts empty
 ss_loop:
                 ld      a,(ss_cnt)
                 or      a
@@ -589,6 +591,11 @@ pn_done:
                 ld      hl,(pa_num)
                 or      a
                 jr      z,pn_noshl
+                cp      8                       ; the divisor is under 256 for
+                jr      nz,pn_shl               ; every corner in the map, so
+                ld      h,l                     ; this is the shift every time
+                ld      l,0
+                jr      pn_noshl
 pn_shl:
                 add     hl,hl
                 djnz    pn_shl
@@ -1245,6 +1252,24 @@ near_cross_seg2:
 render_seg_body:
                 xor     a
                 ld      (sq_n),a
+                ; Four segs in five share v1 with the previous seg's v2, and
+                ; the front sector is the same right across a subsector, so
+                ; that seg's projected pair is this one's - no reciprocal, no
+                ; multiply, two loads.
+                ld      a,(sg_n1)
+                or      a
+                jr      nz,rsb_p1
+                ld      hl,(ch_vtx)
+                ld      de,(sg_v1)
+                or      a
+                sbc     hl,de
+                jr      nz,rsb_p1
+                ld      hl,(ch_ft)
+                ld      (sg_ft1),hl
+                ld      hl,(ch_fb)
+                ld      (sg_fb1),hl
+                jr      rsb_p2
+rsb_p1:
                 call    use_recip1
                 ld      a,(sg_ch)
                 call    hdelta
@@ -1254,6 +1279,7 @@ render_seg_body:
                 call    hdelta
                 call    project_y
                 ld      (sg_fb1),hl
+rsb_p2:
                 call    use_recip2
                 ld      a,(sg_ch)
                 call    hdelta
@@ -1263,6 +1289,18 @@ render_seg_body:
                 call    hdelta
                 call    project_y
                 ld      (sg_fb2),hl
+                ld      hl,$ffff                ; hand the pair to the next seg
+                ld      (ch_vtx),hl
+                ld      a,(sg_n2)
+                or      a
+                jr      nz,rsb_p3
+                ld      hl,(sg_v2)
+                ld      (ch_vtx),hl
+                ld      hl,(sg_ft2)
+                ld      (ch_ft),hl
+                ld      hl,(sg_fb2)
+                ld      (ch_fb),hl
+rsb_p3:
 
                 ld      a,(sg_flags)
                 and     SF_SOLID
