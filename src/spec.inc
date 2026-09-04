@@ -99,7 +99,7 @@ ORG_ADDR        EQU     CODE_BASE
 ; sorted singly-linked list and the unused slots a free chain, so an occlusion
 ; update edits the spans it touches and leaves the rest where they are - there
 ; is no second pool and nothing to swap.
-SPANS_BASE      EQU     $BA00
+SPANS_BASE      EQU     $BA40
 SPANS_MAX       EQU     24              ; measured peak is 10
 SPAN_SIZE       EQU     16
 SLOT_SIZE       EQU     18

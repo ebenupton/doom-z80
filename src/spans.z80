@@ -1929,6 +1929,54 @@ dv_in:
                 call    dv_step
                 jp      dv_find
 dv_in2:
+                ; The span's extremes settle a vertical the same way they
+                ; settle a sloped edge: inside the inner pair it needs no
+                ; clamp, outside the outer pair it is not there at all, and
+                ; either way neither boundary is evaluated.
+                ld      hl,(dl_y1)
+                call    clampb
+                ld      (dv_a),a
+                ld      hl,(dl_y2)
+                call    clampb
+                ld      (dv_b),a
+                ld      hl,(cl_span)
+                ld      de,SP_OT
+                add     hl,de
+                ld      a,(dv_b)
+                cp      (hl)
+                ret     c                       ; wholly above the top
+                inc     hl
+                ld      d,(hl)                  ; D = inner top
+                inc     hl
+                ld      a,(hl)                  ; outer bottom
+                ld      hl,dv_a
+                cp      (hl)
+                ret     c                       ; wholly below the bottom
+                ld      hl,(cl_span)
+                ld      bc,SP_IB
+                add     hl,bc
+                ld      a,(hl)                  ; E = inner bottom
+                ld      e,a
+                ld      a,d
+                cp      e
+                jr      nc,dv_slow              ; inner pair not open
+                ld      a,(dv_a)
+                cp      d
+                jr      c,dv_slow
+                ld      a,e
+                ld      hl,dv_b
+                cp      (hl)
+                jr      c,dv_slow
+                ld      a,(dv_b)
+                sub     Y_BIAS
+                ld      d,a
+                ld      a,(dv_a)
+                sub     Y_BIAS
+                ld      b,a
+                ld      a,(ev_col_x)
+                ld      c,a
+                jp      dl_emit
+dv_slow:
                 ; aperture at this column
                 ld      hl,(cl_span)
                 ld      de,SP_TA
@@ -1947,15 +1995,13 @@ dv_in2:
                 ret     c                       ; empty aperture
                 ret     z
                 ; a = max(y1, top), b = min(y2, bot)
-                ld      hl,(dl_y1)
-                call    clampb
+                ld      a,(dv_a)
                 ld      hl,dv_top
                 cp      (hl)
                 jr      nc,dv_a1
                 ld      a,(dv_top)
 dv_a1:          ld      (dv_a),a
-                ld      hl,(dl_y2)
-                call    clampb
+                ld      a,(dv_b)
                 ld      hl,dv_bot
                 cp      (hl)
                 jr      c,dv_b1

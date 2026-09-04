@@ -198,7 +198,7 @@ the tracked 109-frame walkthrough of E1M1:
 |---|---|---|
 | best frame (facing a near wall) | 142k | 24.9 |
 | median | 922k | 3.9 |
-| mean | 956k | 3.7 |
+| mean | 952k | 3.7 |
 | worst frame (the long start corridor) | 1.63M | 2.2 |
 
 The tracked comparison is against the BBC port's own recorded baseline: the
@@ -210,7 +210,7 @@ outside the BBC harness's counted region too.
 | | 6502 cycles / Z80 T | fps |
 |---|---|---|
 | BBC Micro port | 2,956,217 | 12.2 |
-| this port | 14,332,392 | 4.5 |
+| this port | 14,304,080 | 4.5 |
 
 That is 2.73× off parity, from 3.72× when the engine first ran.
 
@@ -242,6 +242,9 @@ That is 2.73× off parity, from 3.72× when the engine first ran.
 - **Axis-aligned plotters**, and eight copies of the shallow-line step so the
   mask is an immediate in a `SET` — most of a wireframe's sloped pixels are
   near-horizontal.
+- **Byte-at-a-time division** against an 8-bit remainder, with the dividend's
+  leading zero bytes skipped: every slope this engine takes has a column span
+  for a denominator, so it is under 256.
 - The packed geometry itself, including the dead-seg elimination, colinear
   merging and NOVT vertical suppression the BBC port's `pack` does.
 
