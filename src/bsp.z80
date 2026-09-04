@@ -829,79 +829,78 @@ vertex_get:
                 ld      (ix+VC_TVY+1),h
                 jp      vg_project
 vg_cold:
-                ld      a,(hl)
                 or      c
-                ld      (hl),a
-                ld      hl,(vg_idx)
-                add     hl,hl
-                add     hl,hl
-                ld      de,VERTS
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (tv_wx),de
-                inc     hl
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (tv_wy),de
-                ; to_view, inlined: one caller, and the call and return were
-                ; a fortieth of what the rotation itself costs
-                ld      de,(tv_wx)
-                call    rot_sin
-                ld      (vs_acc),hl
-                ld      (vs_acc+2),a
-                ld      de,(tv_wy)
-                call    rot_cos
-                call    sub_pushed
-                call    rns3_ahl
-                ld      (ix+VC_TVX),l           ; L(w), before the ref term
-                ld      (ix+VC_TVX+1),h
-                ld      de,(vs_rx)
-                add     hl,de
-                ld      (tv_tvx),hl
-                ld      de,(tv_wx)
-                call    rot_cos
-                ld      (vs_acc),hl
-                ld      (vs_acc+2),a
-                ld      de,(tv_wy)
-                call    rot_sin
-                call    add_pushed
-                call    rns3_ahl
-                ld      (ix+VC_TVY),l
-                ld      (ix+VC_TVY+1),h
-                ld      de,(vs_ry)
-                add     hl,de
-                push    hl                      ; tvy
-                ; bank L(w) for the epoch, then finish the entry
+                ld      (hl),a                  ; the epoch's valid bit
                 ld      hl,(vg_idx)
                 add     hl,hl
                 add     hl,hl
                 ld      de,VXCACHE_BASE
                 add     hl,de
-                ld      a,(ix+VC_TVX)
-                ld      (hl),a
+                push    hl
+                pop     iy                      ; IY -> the banked L(w)
+                ld      de,VERTS-VXCACHE_BASE
+                add     hl,de                   ; HL -> the vertex
+                ld      c,(hl)
                 inc     hl
-                ld      a,(ix+VC_TVX+1)
-                ld      (hl),a
+                ld      b,(hl)
                 inc     hl
-                ld      a,(ix+VC_TVY)
-                ld      (hl),a
+                ld      e,(hl)
                 inc     hl
-                ld      a,(ix+VC_TVY+1)
-                ld      (hl),a
-                ld      hl,(tv_tvx)
+                ld      d,(hl)                  ; BC = wx, DE = wy
+                push    bc
+                push    de
+                ; the two wy products first, so wx's each land on a whole
+                ; s24 accumulator
+                call    rot_cos                 ; A:HL = wy * cos
+                ld      (vs_acc),hl
+                ld      (vs_acc+2),a
+                pop     de
+                call    rot_sin                 ; A:HL = wy * sin
+                ld      (vs_acc2),hl
+                ld      (vs_acc2+2),a
+                pop     de                      ; wx
+                push    de
+                call    rot_sin                 ; A:HL = wx * sin
+                ld      de,(vs_acc)
+                or      a
+                sbc     hl,de
+                ld      c,a
+                ld      a,(vs_acc+2)
+                ld      d,a
+                ld      a,c
+                sbc     a,d                     ; wx*sin - wy*cos
+                RNS3                            ; HL = L(w)x
+                ld      (iy+0),l
+                ld      (iy+1),h
+                ld      de,(vs_rx)
+                add     hl,de
                 ld      (ix+VC_TVX),l
                 ld      (ix+VC_TVX+1),h
-                pop     hl
+                pop     de                      ; wx
+                call    rot_cos                 ; A:HL = wx * cos
+                ld      de,(vs_acc2)
+                add     hl,de
+                ld      d,a
+                ld      a,(vs_acc2+2)
+                adc     a,d                     ; wx*cos + wy*sin
+                RNS3                            ; HL = L(w)y
+                ld      (iy+2),l
+                ld      (iy+3),h
+                ld      de,(vs_ry)
+                add     hl,de
                 ld      (ix+VC_TVY),l
                 ld      (ix+VC_TVY+1),h
 vg_project:
                 ; HL = tvy: project when in front of the near plane
-                call    rs_near
+                bit     7,h
+                jr      nz,vg_behind
+                ld      a,h
                 or      a
-                jr      z,vg_front
+                jr      nz,vg_front
+                ld      a,l
+                cp      NEAR_VERDICT
+                jr      nc,vg_front
+vg_behind:
                 xor     a
                 ld      (ix+VC_SX),a
                 ld      (ix+VC_SX+1),a
@@ -1071,7 +1070,7 @@ rs_front:
                 ld      hl,(cr_vy1)
                 call    recip
                 ld      (sg_s1),a
-                ld      a,(rc_m8)
+                ld      a,e
                 ld      (sg_m1),a
                 ld      l,(ix+VC_SX)
                 ld      h,(ix+VC_SX+1)
@@ -1094,7 +1093,7 @@ rs_clip1:
                 ld      hl,NEAR_CROSS
                 call    recip
                 ld      (sg_s1),a
-                ld      a,(rc_m8)
+                ld      a,e
                 ld      (sg_m1),a
                 ld      hl,(bb_cx)
                 call    project_x
@@ -1103,7 +1102,7 @@ rs_do2:
                 ld      hl,(cr_vy2)
                 call    recip
                 ld      (sg_s2),a
-                ld      a,(rc_m8)
+                ld      a,e
                 ld      (sg_m2),a
                 ld      l,(iy+VC_SX)
                 ld      h,(iy+VC_SX+1)
@@ -1114,7 +1113,7 @@ rs_clip2:
                 ld      hl,(cr_vy1)
                 call    recip
                 ld      (sg_s1),a
-                ld      a,(rc_m8)
+                ld      a,e
                 ld      (sg_m1),a
                 ld      l,(ix+VC_SX)
                 ld      h,(ix+VC_SX+1)
@@ -1124,7 +1123,7 @@ rs_clip2:
                 ld      hl,NEAR_CROSS
                 call    recip
                 ld      (sg_s2),a
-                ld      a,(rc_m8)
+                ld      a,e
                 ld      (sg_m2),a
                 ld      hl,(bb_cx)
                 call    project_x

@@ -205,11 +205,7 @@ tv_wx           EQU     VARS_BASE+48
 tv_wy           EQU     VARS_BASE+50
 tv_tvx          EQU     VARS_BASE+52
 tv_tvy          EQU     VARS_BASE+54
-rc_m8           EQU     VARS_BASE+56
-rc_s            EQU     VARS_BASE+57
 acc32           EQU     VARS_BASE+58    ; 4-byte little-endian accumulator
-px_def          EQU     VARS_BASE+62
-px_s            EQU     VARS_BASE+63
 px_tmp          EQU     VARS_BASE+64
 vs_nx           EQU     VARS_BASE+66
 vs_ny           EQU     VARS_BASE+68
@@ -221,10 +217,7 @@ vs_acc          EQU     VARS_BASE+76    ; 3 bytes
 py_h            EQU     VARS_BASE+80
 py_idx          EQU     VARS_BASE+85
 py_res          EQU     VARS_BASE+86
-px_frac         EQU     VARS_BASE+81
-px_vx           EQU     VARS_BASE+82
-px_m8           EQU     VARS_BASE+83
-px_p2           EQU     VARS_BASE+84
+vs_acc2         EQU     VARS_BASE+81    ; 3 bytes
 
 ; --- clipper state ---------------------------------------------------------
 sp_head         EQU     VARS_BASE+90    ; first live span, 0 = none

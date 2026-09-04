@@ -434,56 +434,50 @@ sub_pushed:
                 ret
 
 ; ---------------------------------------------------------------------------
-; to_view : tv_wx / tv_wy (s16 prescaled) -> tv_tvx / tv_tvy (s16 counts)
-; ---------------------------------------------------------------------------
-; recip : HL = tvy (positive s16 counts) -> rc_m8, rc_s
-;   idx = max(2, tvy >> 4), reduced by right shifts into [2, 255]
+; recip : HL = tvy (positive s16 counts) -> D = S, E = M8, A = S
+;   idx = tvy >> 4, clamped to the table's 1023 and reduced by right shifts
+;   into [2, 255]; S counts those on top of the table's own.  Each case is
+;   a shift up read a byte high.
 ; ---------------------------------------------------------------------------
 recip:
-                srl     h
-                rr      l
-                srl     h
-                rr      l
-                srl     h
-                rr      l
-                srl     h
-                rr      l                       ; HL = tvy >> 4
-                ; the table is defined for a 9.1 index of at most 1023
                 ld      a,h
-                cp      4
-                jr      c,rp_noclamp
-                ld      hl,1023
-rp_noclamp:
+                cp      $10
+                jr      nc,rp_far
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
                 ld      b,0
-                ld      a,h
-                or      a
-                jr      z,rp_small
-rp_shift:
-                srl     h
-                rr      l
-                inc     b
-                ld      a,h
-                or      a
-                jr      nz,rp_shift
-rp_small:
-                ld      a,l
+                jr      rp_idx
+rp_far:         cp      $20
+                jr      nc,rp_far2
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                ld      b,1
+                jr      rp_idx
+rp_far2:        cp      $40
+                jr      nc,rp_clamp
+                add     hl,hl
+                add     hl,hl
+                ld      b,2
+                jr      rp_idx
+rp_clamp:       ld      h,255
+                ld      b,2
+rp_idx:         ld      a,h
                 cp      2
                 jr      nc,rp_ok
-                ld      l,2
-rp_ok:
+                ld      a,2
+rp_ok:          ld      l,a
                 ld      h,RECIP_M8>>8
-                ld      a,(hl)
-                ld      (rc_m8),a
+                ld      e,(hl)
                 inc     h
                 ld      a,(hl)
                 add     a,b
-                ld      (rc_s),a
+                ld      d,a
                 ret
 
-; ---------------------------------------------------------------------------
-; project_y : A = height delta (s8), rc_m8 / rc_s set -> HL = screen y (s16)
-;   sy = 80 - rns(h*M8 + (h << 8), S)
-; ---------------------------------------------------------------------------
+
 project_y:
                 ; A = height delta, E = M8, D = S -> HL = screen y.
                 ; The whole input tuple is the key, so an entry survives
@@ -567,127 +561,115 @@ py_miss:
 ;   B32 = (X88 << 8) + X88 * M8
 ;   sx  = 128 + rns(B32, S + 8)
 ; ---------------------------------------------------------------------------
+; ---------------------------------------------------------------------------
+; project_x : HL = tvx (s16 counts), E = M8, D = S -> HL = screen column,
+; saturated to s16 (far off-screen endpoints only need sign and order).
+;
+;   sx = HALF_W + rns(X88 * m9, S + 8),  X88 = tvx << 3,  m9 = 256 + M8
+;
+; X88 is first shrunk to s16 - halved with S decremented, to a floor of 1
+; beyond which the halvings become a deficit shifted back at the end.  Every
+; bit below the eighth of the product is shifted out, so
+;       (X88 * m9) >> 8  ==  ((X88 * M8) >> 8) + X88
+; which is one signed 8x8 and the high byte of an unsigned one.
+; ---------------------------------------------------------------------------
 project_x:
-                ; X88 = tvx << 3, as s24 in A:HL
+                ld      c,0                     ; the deficit
                 ld      a,h
-                rla
-                sbc     a,a
+                add     a,16
+                cp      32
+                jr      c,px_k0                 ; tvx fits 13 bits
+                ld      a,h
+                add     a,32
+                cp      64
+                jr      c,px_k1
+                ld      a,h
+                add     a,64
+                cp      128
+                jr      c,px_k2
+                ld      b,3                     ; X88 = tvx
+                jr      px_sadj
+px_k2:          add     hl,hl
+                ld      b,2
+                jr      px_sadj
+px_k1:          add     hl,hl
                 add     hl,hl
-                rla
-                add     hl,hl
-                rla
-                add     hl,hl
-                rla
-                ld      d,a
-                ld      a,(rc_s)
-                ld      (px_s),a
-                xor     a
-                ld      (px_def),a
+                ld      b,1
+px_sadj:        ; each halving costs a unit of S down to its floor of one;
+                ; the rest are deficit
                 ld      a,d
-px_shrink:
-                ; X88 fits s16 once A equals the sign extension of H.
-                ld      d,a
-                ld      a,h
-                rla
-                sbc     a,a
-                cp      d
-                jr      z,px_fits
-                ld      a,(px_s)
                 cp      2
-                jr      c,px_deficit
-                dec     a
-                ld      (px_s),a
-                jr      px_sh1
-px_deficit:
-                ld      a,(px_def)
-                inc     a
-                ld      (px_def),a
-px_sh1:
-                ld      a,d
-                sra     a
-                rr      h
-                rr      l
-                jr      px_shrink
-px_fits:
-                ; vx = H (s8), frac = L (u8).
-                ;
-                ; sx - 128 = rns(X88 * m9, S + 8), and X88 * m9 splits as
-                ;   256*W + (frac*M8 & 255)   with   W = vx*m9 + frac + (frac*M8 >> 8)
-                ; so the whole thing collapses to rns(W, S): no 32-bit
-                ; arithmetic, and the discarded low byte cannot change the
-                ; floor because it is strictly less than one unit.
-                ld      a,l
-                ld      (px_frac),a
-                ld      a,h
-                ld      (px_vx),a
-                ld      a,(rc_m8)
-                ld      (px_m8),a
+                jr      c,px_sdef
+                dec     d
+                djnz    px_sadj
+                jr      px_mul
+px_sdef:        ld      c,b
+                jr      px_mul
+px_k0:          add     hl,hl
+                add     hl,hl
+                add     hl,hl
+px_mul:         ; HL = X88, E = M8, D = S, C = deficit
+                push    de
+                push    bc
+                push    hl
+                ld      a,e
+                ld      l,a                     ; H = vx (s8), L = M8
+                push    af
+                call    mul_s8_u8               ; HL = vx * M8
+                pop     af
+                pop     de                      ; DE = X88
+                push    de
+                push    hl
+                ld      h,e                     ; H = frac
                 ld      l,a
-                call    mul_s8_u8               ; HL = vx * M8 (signed)
-                ld      (px_p2),hl
-                ld      a,(px_frac)
-                ld      h,a
-                ld      a,(px_m8)
-                ld      l,a
-                call    mul_u8                  ; HL = frac * M8 (unsigned)
-                ld      e,h                     ; E = frac*M8 >> 8
-                ld      d,0
-                ld      hl,(px_p2)
+                MUL_U8_BODY                     ; HL = frac * M8
                 ld      a,h
-                rla
-                sbc     a,a                     ; A:HL = vx*M8 sign extended
-                add     hl,de
-                adc     a,0
-                ld      c,a
-                ld      a,(px_frac)
-                ld      e,a
-                ld      d,0
-                ld      a,c
-                add     hl,de
-                adc     a,0
-                ; + vx << 8
-                ld      c,a
-                ld      a,(px_vx)
-                ld      d,a
-                ld      e,0
+                pop     hl                      ; vx * M8
+                pop     de                      ; X88
+                ld      c,a                     ; the fraction's carry byte
+                ld      a,h
                 rla
                 sbc     a,a
-                ld      b,a                     ; B = sign extension of vx<<8
-                ld      a,c
+                ld      b,a
+                ld      a,d
+                rla
+                sbc     a,a
                 add     hl,de
-                adc     a,b                     ; A:HL = W
-
-                ld      c,a
-                ld      a,(px_def)
+                adc     a,b                     ; A:HL = vx*M8 + X88
+                ld      e,c
+                ld      d,0
+                add     hl,de
+                adc     a,0                     ; A:HL = (X88 * m9) >> 8
+                pop     bc                      ; C = deficit
+                pop     de                      ; D = S
+                ld      b,d
+                ld      d,a
+                ld      a,c
                 or      a
                 jr      nz,px_defpath
-                ld      a,(px_s)
-                ld      b,a
-                ld      a,c
+                ld      a,d
                 call    rns_ahl
                 ld      de,HALF_W
                 add     hl,de
                 adc     a,0
                 jp      sat_ahl
 px_defpath:
+                ; the shrink's truncation is the only rounding here: the
+                ; product, whole, shifted back up by all but one
                 dec     a
-                jr      z,px_dfdone
                 ld      b,a
+                ld      a,d
+                jr      z,px_dfdone
 px_dfsh:        add     hl,hl
-                rl      c
+                rla
                 djnz    px_dfsh
 px_dfdone:
-                ld      a,c
                 ld      de,HALF_W
                 add     hl,de
                 adc     a,0
                 jp      sat_ahl
 
-; ---------------------------------------------------------------------------
-; sat_ahl : clamp the s24 in A:HL to a signed 16-bit HL.
-; Columns far off screen only need to keep their sign and ordering, and
-; letting them wrap would put them back on screen.
-; ---------------------------------------------------------------------------
+
 sat_ahl:
                 ld      d,a
                 ld      a,h

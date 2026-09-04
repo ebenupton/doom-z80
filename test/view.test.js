@@ -23,7 +23,6 @@ const A = {
   pl_x: 0xBC00+28, pl_xf: 0xBC00+30, pl_y: 0xBC00+31, pl_yf: 0xBC00+33,
   pl_ang: 0xBC00+34, vs_rx: 0xBC00+22, vs_ry: 0xBC00+24,
   tv_wx: 0xBC00+48, tv_wy: 0xBC00+50, tv_tvx: 0xBC00+52, tv_tvy: 0xBC00+54,
-  rc_m8: 0xBC00+56, rc_s: 0xBC00+57,
 };
 f0 = fail;
 let tsetup = 0, tview = 0, nview = 0;
@@ -48,9 +47,9 @@ console.log(`view_setup/to_view: ${fail===f0?'ok':'FAIL'}  setup ${(tsetup/V.ctx
 // --- recip ----------------------------------------------------------------
 f0 = fail;
 for (const [tvy, m, s] of V.recip) {
-  z.call('recip', { hl: tvy });
-  chk('recip.m8', z.peek(A.rc_m8), m, `tvy=${tvy}`);
-  chk('recip.s', z.peek(A.rc_s), s, `tvy=${tvy}`);
+  const r = z.call('recip', { hl: tvy });
+  chk('recip.m8', r.e, m, `tvy=${tvy}`);
+  chk('recip.s', r.d, s, `tvy=${tvy}`);
 }
 console.log('recip:', fail===f0 ? 'ok' : 'FAIL');
 
@@ -66,8 +65,7 @@ console.log(`project_y: ${fail===f0?'ok':'FAIL'}  ${(tp/V.projy.length).toFixed(
 // --- project_x ------------------------------------------------------------
 f0 = fail; tp = 0;
 for (const [tvx, m, s, want] of V.projx) {
-  z.poke(A.rc_m8, m); z.poke(A.rc_s, s);
-  const r = z.call('project_x', { hl: tvx & 0xffff }, { maxT: 200000 });
+  const r = z.call('project_x', { hl: tvx & 0xffff, e: m, d: s }, { maxT: 200000 });
   tp += r.tstates;
   chk('projx', s16(r.hl), want & 0xffff ? s16(want & 0xffff) : want, `tvx=${tvx} m=${m} s=${s}`);
 }
