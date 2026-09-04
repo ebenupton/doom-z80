@@ -84,6 +84,13 @@ TCLO            EQU     $9100
 TCHI            EQU     $9200
 CODE_BASE       EQU     $9300
 
+; Screen-space y inside the clipper is carried as a byte biased by Y_BIAS,
+; so the visible rows [0, 159] land at [48, 207].  Anything a boundary line
+; reaches outside the visible band clamps to 0 or 255, which is on the correct
+; side of every boundary - and that makes every y comparison in the clipper a
+; single CP instead of a signed 16-bit subtract.
+Y_BIAS          EQU     48
+
 CLIPANGLE       EQU     8192            ; 45 degrees in 16-bit angle units
 ORG_ADDR        EQU     CODE_BASE
 
@@ -443,7 +450,9 @@ fu_np           EQU     VARS_BASE+695
 fu_ax0          EQU     VARS_BASE+696
 fu_ax1          EQU     VARS_BASE+697
 fu_have         EQU     VARS_BASE+716
-al_both         EQU     VARS_BASE+717   ; the walk supplied the boundary values
+al_both         EQU     VARS_BASE+717
+al_open         EQU     VARS_BASE+718
+al_t            EQU     VARS_BASE+719   ; the walk supplied the boundary values
 fu_pb           EQU     VARS_BASE+698   ; 3 x (x0, x1, topfn, botfn)
 lf_absx         EQU     VARS_BASE+550
 ds_cx1          EQU     VARS_BASE+551

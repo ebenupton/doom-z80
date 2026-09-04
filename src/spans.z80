@@ -198,7 +198,12 @@ ms8_1:
 
 ; ---------------------------------------------------------------------------
 ; ev_at : HL = pointer to (slope s16, intercept s16), A = column 0..255
-;         -> HL = y (s16).  Flat boundaries skip the multiply.
+;         -> A = y, biased by Y_BIAS and clamped to a byte.
+;
+; A boundary evaluated inside its own span always lands in the visible band,
+; so the clamp only ever fires on a line that has left it - and then it lands
+; on the correct side of every boundary, which is all any comparison needs.
+; Flat boundaries skip the multiply.
 ; ---------------------------------------------------------------------------
 ev_at:
                 ld      e,(hl)
@@ -214,7 +219,7 @@ ev_at:
                 jr      nz,ev_slope
                 ld      h,b
                 ld      l,c
-                ret
+                jr      clampb
 ev_slope:
                 ; (slope*col) >> 8 == shi*col + ((slo*col) >> 8); the high
                 ; byte is 0 or -1 for any gradient under one pixel a column,
@@ -249,6 +254,19 @@ ev_gen:
 ev_fin:
                 pop     de
                 add     hl,de
+; clampb : HL (s16 screen y) -> A, biased and clamped to a byte.
+clampb:
+                ld      de,Y_BIAS
+                add     hl,de
+                ld      a,h
+                or      a
+                jr      z,cb_ok
+                bit     7,h
+                ld      a,255
+                ret     z
+                xor     a
+                ret
+cb_ok:          ld      a,l
                 ret
 
 ; ---------------------------------------------------------------------------
@@ -601,14 +619,14 @@ hg_alive:
                 add     hl,de
                 ld      a,(hg_col)
                 call    ev_at
-                ld      (hg_top),hl
+                ld      (hg_top),a
                 ld      hl,(cl_span)
                 ld      de,SP_BA
                 add     hl,de
                 ld      a,(hg_col)
                 call    ev_at
-                ld      de,(hg_top)
-                call    cmp_s16                 ; signed: top can be negative
+                ld      hl,hg_top
+                cp      (hl)
                 jr      c,hg_a_no
                 jr      z,hg_a_no
                 scf
@@ -804,22 +822,26 @@ sp_alive:
                 ld      a,b
                 call    pw_evd
                 call    al_pos
-                ld      (al_lo),a
+                ld      (al_open),a
                 pop     bc
                 ld      a,c
                 call    pw_evd
                 call    al_pos
                 ld      b,a
-                ld      a,(al_lo)
+                ld      a,(al_open)
                 and     b
                 ld      (al_both),a             ; open right across the span
-                ld      a,(al_lo)
+                ld      a,(al_open)
                 or      b
                 ret     z
                 scf
                 ret
 
 ; al_pos : A = 1 when HL is strictly positive.
+;
+; The aperture is measured on the difference function, not on the two
+; boundaries evaluated apart: each evaluation truncates its own shift, so the
+; separated form can disagree with the reference by a row.
 al_pos:
                 ld      a,h
                 or      l
@@ -987,59 +1009,56 @@ fu_line:
                 ld      hl,(cl_lfnp)
                 ld      a,(fu_x0)
                 call    ev_at
-                ld      (ct_ya),hl
+                ld      (ct_ya),a
                 ld      hl,(cl_lfnp)
                 ld      a,(fu_x1)
                 call    ev_at
-                ld      (ct_yb),hl
+                ld      (ct_yb),a
                 ld      a,(fu_have)
                 or      a
                 jr      z,fl_ev
                 xor     a
                 ld      (fu_have),a             ; the walk already has them
-                ld      hl,(ct_ta0)
-                ld      (ct_ta),hl
-                ld      hl,(ct_ba0)
-                ld      (ct_ba),hl
-                ld      hl,(ct_tb0)
-                ld      (ct_tb),hl
-                ld      hl,(ct_bb0)
-                ld      (ct_bb),hl
+                ld      a,(ct_ta0)
+                ld      (ct_ta),a
+                ld      a,(ct_ba0)
+                ld      (ct_ba),a
+                ld      a,(ct_tb0)
+                ld      (ct_tb),a
+                ld      a,(ct_bb0)
+                ld      (ct_bb),a
                 jr      fl_have
 fl_ev:
                 ld      hl,(fu_tp)
                 ld      a,(fu_x0)
                 call    ev_at
-                ld      (ct_ta),hl
+                ld      (ct_ta),a
                 ld      hl,(fu_bp)
                 ld      a,(fu_x0)
                 call    ev_at
-                ld      (ct_ba),hl
+                ld      (ct_ba),a
                 ld      hl,(fu_tp)
                 ld      a,(fu_x1)
                 call    ev_at
-                ld      (ct_tb),hl
+                ld      (ct_tb),a
                 ld      hl,(fu_bp)
                 ld      a,(fu_x1)
                 call    ev_at
-                ld      (ct_bb),hl
+                ld      (ct_bb),a
 fl_have:
-
                 ; columns at or past the near boundary
-                ld      hl,(ct_ya)
-                ld      de,(ct_ta)
-                call    cmp_s16
-                ld      a,0
-                jr      nc,fl_t0
-                ld      a,$80
-fl_t0:          ld      (fu_v0),a
-                ld      hl,(ct_yb)
-                ld      de,(ct_tb)
-                call    cmp_s16
-                ld      a,0
-                jr      nc,fl_t1
-                ld      a,$80
-fl_t1:          ld      (fu_v1),a
+                ld      a,(ct_ya)
+                ld      hl,ct_ta
+                sub     (hl)
+                sbc     a,a                     ; 0 when y >= top, else -1
+                and     $80
+                ld      (fu_v0),a
+                ld      a,(ct_yb)
+                ld      hl,ct_tb
+                sub     (hl)
+                sbc     a,a
+                and     $80
+                ld      (fu_v1),a
                 ld      hl,(cl_lfnp)
                 ld      (pw_f),hl
                 ld      hl,(fu_tp)
@@ -1050,20 +1069,18 @@ fl_t1:          ld      (fu_v1),a
                 ld      a,(fu_g1)
                 ld      (fu_t1),a
                 ; and the ones at or short of the far one
-                ld      hl,(ct_ba)
-                ld      de,(ct_ya)
-                call    cmp_s16
-                ld      a,0
-                jr      nc,fl_b0
-                ld      a,$80
-fl_b0:          ld      (fu_v0),a
-                ld      hl,(ct_bb)
-                ld      de,(ct_yb)
-                call    cmp_s16
-                ld      a,0
-                jr      nc,fl_b1
-                ld      a,$80
-fl_b1:          ld      (fu_v1),a
+                ld      a,(ct_ba)
+                ld      hl,ct_ya
+                sub     (hl)
+                sbc     a,a
+                and     $80
+                ld      (fu_v0),a
+                ld      a,(ct_bb)
+                ld      hl,ct_yb
+                sub     (hl)
+                sbc     a,a
+                and     $80
+                ld      (fu_v1),a
                 ld      hl,(fu_bp)
                 ld      (pw_f),hl
                 ld      hl,(cl_lfnp)
@@ -1098,15 +1115,15 @@ fl_r1:          ld      (fu_r1),a
                 ld      hl,(cl_lfnp)
                 ld      a,(fu_r0)
                 call    ev_at
-                ld      (ct_ya),hl
+                ld      (ct_ya),a
                 ld      hl,(fu_tp)
                 ld      a,(fu_r0)
                 call    ev_at
-                ld      (ct_ta),hl
+                ld      (ct_ta),a
                 ld      hl,(fu_bp)
                 ld      a,(fu_r0)
                 call    ev_at
-                ld      (ct_ba),hl
+                ld      (ct_ba),a
 fl_dr1:
                 ld      a,(fu_r1)
                 ld      b,a
@@ -1116,15 +1133,15 @@ fl_dr1:
                 ld      hl,(cl_lfnp)
                 ld      a,(fu_r1)
                 call    ev_at
-                ld      (ct_yb),hl
+                ld      (ct_yb),a
                 ld      hl,(fu_tp)
                 ld      a,(fu_r1)
                 call    ev_at
-                ld      (ct_tb),hl
+                ld      (ct_tb),a
                 ld      hl,(fu_bp)
                 ld      a,(fu_r1)
                 call    ev_at
-                ld      (ct_bb),hl
+                ld      (ct_bb),a
 fl_dr2:
                 ld      a,(fu_r0)
                 ld      (ct_xa),a
@@ -1488,40 +1505,41 @@ dv_in2:
                 add     hl,de
                 ld      a,(ev_col_x)
                 call    ev_at
-                ld      (dv_top),hl
+                ld      (dv_top),a
                 ld      hl,(cl_span)
                 ld      de,SP_BA
                 add     hl,de
                 ld      a,(ev_col_x)
                 call    ev_at
-                ld      (dv_bot),hl
-                ld      de,(dv_top)
-                call    cmp_s16                 ; signed: top can be negative
+                ld      (dv_bot),a
+                ld      hl,dv_top
+                cp      (hl)
                 ret     c                       ; empty aperture
                 ret     z
                 ; a = max(y1, top), b = min(y2, bot)
                 ld      hl,(dl_y1)
-                ld      de,(dv_top)
-                call    cmp_s16
+                call    clampb
+                ld      hl,dv_top
+                cp      (hl)
                 jr      nc,dv_a1
-                ld      hl,(dv_top)
-dv_a1:          ld      (dv_a),hl
+                ld      a,(dv_top)
+dv_a1:          ld      (dv_a),a
                 ld      hl,(dl_y2)
-                ld      de,(dv_bot)
-                call    cmp_s16
+                call    clampb
+                ld      hl,dv_bot
+                cp      (hl)
                 jr      c,dv_b1
-                ld      hl,(dv_bot)
-dv_b1:          ld      (dv_b),hl
-                ld      de,(dv_a)
-                call    cmp_s16
+                ld      a,(dv_bot)
+dv_b1:          ld      (dv_b),a
+                ld      hl,dv_a
+                cp      (hl)
                 ret     c                       ; a > b: nothing visible
-                ld      a,(ev_col_x)
-                ld      c,a
-                ld      a,(dv_a)
-                ld      b,a
-                ld      a,(dv_b)
+                sub     Y_BIAS
                 ld      d,a
-                ld      a,c
+                ld      a,(dv_a)
+                sub     Y_BIAS
+                ld      b,a
+                ld      a,(ev_col_x)
                 ld      c,a
                 jp      dl_emit
 
@@ -1715,25 +1733,25 @@ ct_bounds:
                 add     hl,de
                 ld      a,(ct_xa0)
                 call    ev_at
-                ld      (ct_ta0),hl
+                ld      (ct_ta0),a
                 ld      hl,(cl_span)
                 ld      de,SP_BA
                 add     hl,de
                 ld      a,(ct_xa0)
                 call    ev_at
-                ld      (ct_ba0),hl
+                ld      (ct_ba0),a
                 ld      hl,(cl_span)
                 ld      de,SP_TA
                 add     hl,de
                 ld      a,(ct_xb0)
                 call    ev_at
-                ld      (ct_tb0),hl
+                ld      (ct_tb0),a
                 ld      hl,(cl_span)
                 ld      de,SP_BA
                 add     hl,de
                 ld      a,(ct_xb0)
                 call    ev_at
-                ld      (ct_bb0),hl
+                ld      (ct_bb0),a
                 ret
 
 ; ---------------------------------------------------------------------------
@@ -1745,31 +1763,31 @@ ct_edge:
                 ld      (ct_xa),a
                 ld      a,(ct_xb0)
                 ld      (ct_xb),a
-                ld      hl,(ct_ta0)
-                ld      (ct_ta),hl
-                ld      hl,(ct_ba0)
-                ld      (ct_ba),hl
-                ld      hl,(ct_tb0)
-                ld      (ct_tb),hl
-                ld      hl,(ct_bb0)
-                ld      (ct_bb),hl
+                ld      a,(ct_ta0)
+                ld      (ct_ta),a
+                ld      a,(ct_ba0)
+                ld      (ct_ba),a
+                ld      a,(ct_tb0)
+                ld      (ct_tb),a
+                ld      a,(ct_bb0)
+                ld      (ct_bb),a
                 ld      hl,(cl_lfnp)
                 ld      a,(ct_xa)
                 call    ev_at
-                ld      (ct_ya),hl
+                ld      (ct_ya),a
                 ld      hl,(cl_lfnp)
                 ld      a,(ct_xb)
                 call    ev_at
-                ld      (ct_yb),hl
+                ld      (ct_yb),a
 
                 ; --- y >= top(x) ---------------------------------------
-                ld      hl,(ct_ya)
-                ld      de,(ct_ta)
-                call    cmp_s16
+                ld      a,(ct_ya)
+                ld      hl,ct_ta
+                cp      (hl)
                 jr      c,ct_topcross
-                ld      hl,(ct_yb)
-                ld      de,(ct_tb)
-                call    cmp_s16
+                ld      a,(ct_yb)
+                ld      hl,ct_tb
+                cp      (hl)
                 jr      nc,ct_bot
                 call    ct_topdiff
                 call    cross_col
@@ -1778,9 +1796,9 @@ ct_edge:
                 call    ct_eval_b
                 jr      ct_order
 ct_topcross:
-                ld      hl,(ct_yb)
-                ld      de,(ct_tb)
-                call    cmp_s16
+                ld      a,(ct_yb)
+                ld      hl,ct_tb
+                cp      (hl)
                 ret     c                       ; both ends above the top
                 call    ct_topdiff
                 call    cross_col
@@ -1796,13 +1814,13 @@ ct_order:
 
                 ; --- y <= bot(x) ---------------------------------------
 ct_bot:
-                ld      hl,(ct_ba)
-                ld      de,(ct_ya)
-                call    cmp_s16
+                ld      a,(ct_ba)
+                ld      hl,ct_ya
+                cp      (hl)
                 jr      c,ct_botcross
-                ld      hl,(ct_bb)
-                ld      de,(ct_yb)
-                call    cmp_s16
+                ld      a,(ct_bb)
+                ld      hl,ct_yb
+                cp      (hl)
                 jr      nc,ct_emit
                 call    ct_botdiff
                 call    cross_col
@@ -1811,9 +1829,9 @@ ct_bot:
                 call    ct_eval_b
                 jr      ct_order2
 ct_botcross:
-                ld      hl,(ct_bb)
-                ld      de,(ct_yb)
-                call    cmp_s16
+                ld      a,(ct_bb)
+                ld      hl,ct_yb
+                cp      (hl)
                 ret     c                       ; both ends below the bottom
                 call    ct_botdiff
                 call    cross_col
@@ -1828,29 +1846,29 @@ ct_order2:
                 ret     c
 
 ct_emit:
-                ld      hl,(ct_ya)
-                ld      de,(ct_ta)
-                call    cmp_s16
+                ld      a,(ct_ya)
+                ld      hl,ct_ta
+                cp      (hl)
                 jr      nc,ct_e1
-                ld      hl,(ct_ta)
+                ld      a,(ct_ta)
                 jr      ct_e2
-ct_e1:          ld      de,(ct_ba)
-                call    cmp_s16
+ct_e1:          ld      hl,ct_ba
+                cp      (hl)
                 jr      c,ct_e2
-                ld      hl,(ct_ba)
-ct_e2:          ld      a,l
+                ld      a,(ct_ba)
+ct_e2:          sub     Y_BIAS
                 ld      (ct_ya),a
-                ld      hl,(ct_yb)
-                ld      de,(ct_tb)
-                call    cmp_s16
+                ld      a,(ct_yb)
+                ld      hl,ct_tb
+                cp      (hl)
                 jr      nc,ct_e3
-                ld      hl,(ct_tb)
+                ld      a,(ct_tb)
                 jr      ct_e4
-ct_e3:          ld      de,(ct_bb)
-                call    cmp_s16
+ct_e3:          ld      hl,ct_bb
+                cp      (hl)
                 jr      c,ct_e4
-                ld      hl,(ct_bb)
-ct_e4:          ld      a,l
+                ld      a,(ct_bb)
+ct_e4:          sub     Y_BIAS
                 ld      d,a
                 ld      a,(ct_ya)
                 ld      b,a
@@ -1865,37 +1883,37 @@ ct_eval:
                 ld      (ct_col),a
                 ld      hl,(cl_lfnp)
                 call    ev_at
-                ld      (ct_ya),hl
+                ld      (ct_ya),a
                 ld      hl,(cl_span)
                 ld      de,SP_TA
                 add     hl,de
                 ld      a,(ct_col)
                 call    ev_at
-                ld      (ct_ta),hl
+                ld      (ct_ta),a
                 ld      hl,(cl_span)
                 ld      de,SP_BA
                 add     hl,de
                 ld      a,(ct_col)
                 call    ev_at
-                ld      (ct_ba),hl
+                ld      (ct_ba),a
                 ret
 ct_eval_b:
                 ld      (ct_col),a
                 ld      hl,(cl_lfnp)
                 call    ev_at
-                ld      (ct_yb),hl
+                ld      (ct_yb),a
                 ld      hl,(cl_span)
                 ld      de,SP_TA
                 add     hl,de
                 ld      a,(ct_col)
                 call    ev_at
-                ld      (ct_tb),hl
+                ld      (ct_tb),a
                 ld      hl,(cl_span)
                 ld      de,SP_BA
                 add     hl,de
                 ld      a,(ct_col)
                 call    ev_at
-                ld      (ct_bb),hl
+                ld      (ct_bb),a
                 ret
 
 ct_topdiff:
