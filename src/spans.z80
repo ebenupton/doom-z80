@@ -351,6 +351,42 @@ clampb:
                 jr      ev_clamp
 
 ; ---------------------------------------------------------------------------
+; evl : HL = a line's function, DE -> its (y1, y2), A = a column -> A = the
+; line's y there, clamped like ev_at's - but a column that is one of the
+; line's own ends takes that end's y, not the quantised slope's version of
+; it.  Every line of a seg ends at the seg's columns (cl_lx1, cl_lx2), so
+; the ends need no record of their own; most pieces end where their line
+; does, and there the multiply is skipped.
+; ---------------------------------------------------------------------------
+evl:
+                ld      c,a
+                ld      a,(cl_lx1+1)
+                or      a
+                jr      nz,evl_2                ; the left end is off-screen
+                ld      a,(cl_lx1)
+                cp      c
+                jr      nz,evl_2
+evl_y:          ex      de,hl
+                ld      a,(hl)
+                inc     hl
+                ld      h,(hl)
+                ld      l,a
+                jp      clampb
+evl_2:
+                ld      a,(cl_lx2+1)
+                or      a
+                jr      nz,evl_ev
+                ld      a,(cl_lx2)
+                cp      c
+                jr      nz,evl_ev
+                inc     de
+                inc     de
+                jr      evl_y
+evl_ev:
+                ld      a,c
+                jp      ev_at
+
+; ---------------------------------------------------------------------------
 ; linfn : write (slope, intercept) for the line through
 ;         (cl_lx1, cl_ly1) - (cl_lx2, cl_ly2) into the buffer at HL.
 ; ---------------------------------------------------------------------------
@@ -1218,6 +1254,8 @@ fu_nolt:
                 ld      (fu_x0),hl              ; and fu_x1
                 ld      hl,fu_tfn
                 ld      (cl_lfnp),hl
+                ld      hl,fu_tend
+                ld      (cl_lenp),hl
                 ld      a,1
                 ld      (fu_side),a
                 ld      (fu_stage),a
@@ -1228,6 +1266,8 @@ fu_nolt:
                 call    fu_line
                 ld      hl,fu_bfn
                 ld      (cl_lfnp),hl
+                ld      hl,fu_bend
+                ld      (cl_lenp),hl
                 xor     a
                 ld      (fu_side),a
                 ld      (fu_stage),a
@@ -1298,12 +1338,14 @@ fu_line:
                 xor     a
                 ld      (fu_have),a
                 ld      hl,(cl_lfnp)
+                ld      de,(cl_lenp)
                 ld      a,(fu_x0)
-                call    ev_at
+                call    evl
                 ld      (ct_ya),a
                 ld      hl,(cl_lfnp)
+                ld      de,(cl_lenp)
                 ld      a,(fu_x1)
-                call    ev_at
+                call    evl
                 ld      (ct_yb),a
                 call    fu_verdict
                 jr      c,fl_outside
@@ -1443,8 +1485,9 @@ fl_r1:          ld      (fu_r1),a
                 cp      b                       ; B still holds r0
                 jr      z,fl_dr1
                 ld      hl,(cl_lfnp)
+                ld      de,(cl_lenp)
                 ld      a,(fu_r0)
-                call    ev_at
+                call    evl
                 ld      (ct_ya),a
                 ld      hl,(fu_tp)
                 ld      a,(fu_r0)
@@ -1461,8 +1504,9 @@ fl_dr1:
                 cp      b
                 jr      z,fl_dr2
                 ld      hl,(cl_lfnp)
+                ld      de,(cl_lenp)
                 ld      a,(fu_r1)
-                call    ev_at
+                call    evl
                 ld      (ct_yb),a
                 ld      hl,(fu_tp)
                 ld      a,(fu_r1)
@@ -2048,8 +2092,15 @@ fu_extras:
                 ret     z
                 ld      hl,sq_fn
                 ld      (fe_fp),hl
+                ld      hl,sq_y
+                ld      (fe_ep),hl
                 ld      (fe_i),a
 fx_loop:
+                ld      hl,(fe_ep)              ; the edge's own (y1, y2)
+                ld      (cl_lenp),hl
+                ld      de,4
+                add     hl,de
+                ld      (fe_ep),hl
                 ld      hl,(fe_fp)
                 call    ct_edge
                 ld      hl,(fe_fp)
@@ -2137,12 +2188,14 @@ ct_bounds:
 ; ---------------------------------------------------------------------------
 ct_edge:
                 ld      (cl_lfnp),hl
+                ld      de,(cl_lenp)
                 ld      a,(ct_xa0)
-                call    ev_at
+                call    evl
                 ld      (ct_ya),a
                 ld      hl,(cl_lfnp)
+                ld      de,(cl_lenp)
                 ld      a,(ct_xb0)
-                call    ev_at
+                call    evl
                 ld      (ct_yb),a
                 call    fu_verdict
                 ret     c                       ; never enters the aperture
@@ -2275,7 +2328,8 @@ ct_e4:          sub     Y_BIAS
 ct_eval:
                 ld      (ct_col),a
                 ld      hl,(cl_lfnp)
-                call    ev_at
+                ld      de,(cl_lenp)
+                call    evl
                 ld      (ct_ya),a
                 ld      hl,(cl_span)
                 ld      de,SP_TA
@@ -2293,7 +2347,8 @@ ct_eval:
 ct_eval_b:
                 ld      (ct_col),a
                 ld      hl,(cl_lfnp)
-                call    ev_at
+                ld      de,(cl_lenp)
+                call    evl
                 ld      (ct_yb),a
                 ld      hl,(cl_span)
                 ld      de,SP_TA

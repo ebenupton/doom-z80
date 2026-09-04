@@ -792,9 +792,7 @@ vertex_get:
                 push    hl
                 ld      hl,(vs_rx)
                 add     hl,de
-                ld      (ix+VC_TVX),l
-                ld      (ix+VC_TVX+1),h
-                pop     hl
+                ex      (sp),hl                 ; tvx down, the pointer up
                 ld      e,(hl)
                 inc     hl
                 ld      d,(hl)
@@ -848,10 +846,9 @@ vg_cold:
                 ld      (iy+0),l
                 ld      (iy+1),h
                 ld      de,(vs_rx)
-                add     hl,de
-                ld      (ix+VC_TVX),l
-                ld      (ix+VC_TVX+1),h
-                pop     de                      ; wx
+                add     hl,de                   ; HL = tvx
+                ex      (sp),hl                 ; tvx down, wx up
+                ex      de,hl
                 call    rot_cos                 ; A:HL = wx * cos
                 ld      de,(vs_acc2)
                 add     hl,de
@@ -866,7 +863,8 @@ vg_cold:
                 ld      (ix+VC_TVY),l
                 ld      (ix+VC_TVY+1),h
 vg_project:
-                ; HL = tvy: project when in front of the near plane
+                ; HL = tvy, (sp) = tvx: project when in front of the near
+                ; plane, keeping the reciprocal with the column
                 bit     7,h
                 jr      nz,vg_behind
                 ld      a,h
@@ -876,6 +874,7 @@ vg_project:
                 cp      NEAR_VERDICT
                 jr      nc,vg_front
 vg_behind:
+                pop     hl
                 xor     a
                 ld      (ix+VC_SX),a
                 ld      (ix+VC_SX+1),a
@@ -884,8 +883,9 @@ vg_behind:
                 ret
 vg_front:
                 call    recip
-                ld      l,(ix+VC_TVX)
-                ld      h,(ix+VC_TVX+1)
+                ld      (ix+VC_M8),e
+                ld      (ix+VC_S),d
+                pop     hl
                 call    project_x
                 ld      (ix+VC_SX),l
                 ld      (ix+VC_SX+1),h
@@ -1038,25 +1038,42 @@ rs_front:
                 ld      a,b
                 or      a
                 jr      nz,rs_clip2
-                ; both in front: the cached columns
-                ld      l,(ix+VC_TVY)
-                ld      h,(ix+VC_TVY+1)
-                call    recip
+                ; both in front: the cached columns and reciprocals
+                ld      e,(ix+VC_M8)
+                ld      d,(ix+VC_S)
                 ld      (sg_m1),de
                 ld      l,(ix+VC_SX)
                 ld      h,(ix+VC_SX+1)
                 ld      (sg_sx1),hl
                 jr      rs_do2
 rs_clipx:
+                ; the view x's come back from the epoch's banked rotation
+                ; plus this frame's ref term
                 push    bc
-                ld      l,(ix+VC_TVX)
-                ld      h,(ix+VC_TVX+1)
+                ld      hl,(sg_v1)
+                add     hl,hl
+                add     hl,hl
+                ld      de,VXCACHE_BASE
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      hl,(vs_rx)
+                add     hl,de
                 ld      (cr_vx1),hl
                 ld      l,(ix+VC_TVY)
                 ld      h,(ix+VC_TVY+1)
                 ld      (cr_vy1),hl
-                ld      l,(iy+VC_TVX)
-                ld      h,(iy+VC_TVX+1)
+                ld      hl,(sg_v2)
+                add     hl,hl
+                add     hl,hl
+                ld      de,VXCACHE_BASE
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      hl,(vs_rx)
+                add     hl,de
                 ld      (cr_vx2),hl
                 ld      l,(iy+VC_TVY)
                 ld      h,(iy+VC_TVY+1)
@@ -1074,9 +1091,8 @@ rs_clip1:
                 call    project_x
                 ld      (sg_sx1),hl
 rs_do2:
-                ld      l,(iy+VC_TVY)
-                ld      h,(iy+VC_TVY+1)
-                call    recip
+                ld      e,(iy+VC_M8)
+                ld      d,(iy+VC_S)
                 ld      (sg_m2),de
                 ld      l,(iy+VC_SX)
                 ld      h,(iy+VC_SX+1)
@@ -1084,9 +1100,8 @@ rs_do2:
                 jr      rs_havex
 rs_clip2:
                 ; v2 is behind: cross toward v1
-                ld      l,(ix+VC_TVY)
-                ld      h,(ix+VC_TVY+1)
-                call    recip
+                ld      e,(ix+VC_M8)
+                ld      d,(ix+VC_S)
                 ld      (sg_m1),de
                 ld      l,(ix+VC_SX)
                 ld      h,(ix+VC_SX+1)
@@ -1449,13 +1464,16 @@ rsb_sw0:        ld      (sg_swap),a
                 ; every unarmed line has met the aperture they narrow
                 ld      hl,cl_yt1
                 ld      de,fu_tfn
+                ld      bc,fu_tend
                 call    rsb_armfn
                 ld      hl,cl_yb1
                 ld      de,fu_bfn
+                ld      bc,fu_bend
                 call    rsb_armfn
                 jp      sp_fuse
 
-; rsb_armfn : HL -> the pair (y at sx1, y at sx2), DE -> the fn buffer.
+; rsb_armfn : HL -> the pair (y at sx1, y at sx2), DE -> the fn buffer,
+; BC -> where its ordered (y1, y2) is kept.
 rsb_armfn:
                 push    de
                 ld      a,(sg_swap)
@@ -1490,6 +1508,11 @@ rsb_af_s:
                 ld      hl,(sg_sx1)
                 ld      (cl_lx2),hl
 rsb_af_go:
+                ld      hl,cl_ly1               ; the ordered pair, kept for evl
+                ld      d,b
+                ld      e,c
+                ld      bc,4
+                ldir
                 pop     hl
                 jp      linfn
 

@@ -18,29 +18,26 @@
                 jr      nc,.pos
                 neg
 .pos:
-                ld      c,a
-                ld      b,SQ_LO>>8
+                ld      c,a                     ; |a-b|, an 8-bit index
                 ld      a,h
                 add     a,l
                 ld      l,a
                 ld      a,SQ_LO>>8
                 adc     a,0
-                ld      h,a
-                ld      a,(bc)
-                ld      e,a
-                ld      a,(hl)
-                sub     e
-                ld      e,a
+                ld      h,a                     ; HL -> f(a+b), 9-bit
+                ld      e,(hl)
                 inc     h
                 inc     h
-                inc     b
-                inc     b
-                ld      a,(bc)
-                ld      d,a
-                ld      a,(hl)
-                sbc     a,d
-                ld      d,a
+                ld      d,(hl)                  ; DE = f(a+b)
+                ld      l,c
+                ld      h,SQ_LO>>8
+                ld      c,(hl)
+                inc     h
+                inc     h
+                ld      b,(hl)                  ; BC = f(|a-b|)
                 ex      de,hl
+                or      a
+                sbc     hl,bc
                 ENDM
 
 ; ---------------------------------------------------------------------------
@@ -49,34 +46,7 @@
 ; ~139 T-states including CALL/RET.
 ; ---------------------------------------------------------------------------
 mul_u8:
-                ld      a,h
-                sub     l
-                jr      nc,mu_pos
-                neg
-mu_pos:
-                ld      c,a
-                ld      b,SQ_LO>>8              ; BC -> SQ_LO[|a-b|]
-                ld      a,h
-                add     a,l
-                ld      l,a
-                ld      a,SQ_LO>>8
-                adc     a,0
-                ld      h,a                     ; HL -> SQ_LO[a+b]
-                ld      a,(bc)
-                ld      e,a
-                ld      a,(hl)
-                sub     e
-                ld      e,a                     ; low byte of product
-                inc     h
-                inc     h
-                inc     b
-                inc     b
-                ld      a,(bc)
-                ld      d,a
-                ld      a,(hl)
-                sbc     a,d
-                ld      d,a
-                ex      de,hl
+                MUL_U8_BODY
                 ret
 
 ; ---------------------------------------------------------------------------

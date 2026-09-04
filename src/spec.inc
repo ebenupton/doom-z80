@@ -92,9 +92,11 @@ VXVALID_LEN     EQU     (NVERTS+7)/8
 VCACHE_BASE     EQU     $7300           ; NVERTS x 7, indexed by vertex
 VCACHE_ENT      EQU     7
 VC_STAMP        EQU     0               ; frame generation; 0 = empty
-VC_TVX          EQU     1               ; view-space counts, s16
-VC_TVY          EQU     3
-VC_SX           EQU     5               ; projected screen column, s16
+VC_TVY          EQU     1               ; view-space depth, s16 counts (the
+                                        ; x is VXCACHE's L(w)x plus vs_rx)
+VC_SX           EQU     3               ; projected screen column, s16
+VC_M8           EQU     5               ; and its reciprocal, (M8, S)
+VC_S            EQU     6
 
 ; --- bank 2 ($8000-$BFFF): code and hot tables -----------------------------
 SQ_LO           EQU     $8000           ; quarter-square f(n)=n*n/4, low bytes
@@ -266,11 +268,6 @@ ev_col_x        EQU     VARS_BASE+206
 sp_src          EQU     VARS_BASE+208
 sp_n            EQU     VARS_BASE+210
 pw_n            EQU     VARS_BASE+211
-tg_tf           EQU     VARS_BASE+212   ; winning top fn for the current piece
-tg_bf           EQU     VARS_BASE+216
-tg_ox0          EQU     VARS_BASE+220
-tg_ox1          EQU     VARS_BASE+222
-tg_right        EQU     VARS_BASE+224
 cl_ta           EQU     VARS_BASE+226
 cl_tb           EQU     VARS_BASE+228
 cl_ba           EQU     VARS_BASE+230
@@ -282,7 +279,8 @@ cl_q            EQU     VARS_BASE+240
 pw2_x0          EQU     VARS_BASE+242
 pw2_x1          EQU     VARS_BASE+244
 pw2_f           EQU     VARS_BASE+246
-tg_iter         EQU     VARS_BASE+250
+cl_lenp         EQU     VARS_BASE+248   ; the (y1, y2) of the line at cl_lfnp
+fe_ep           EQU     VARS_BASE+250
 dl_x1           EQU     VARS_BASE+252
 dl_y1           EQU     VARS_BASE+254
 dl_x2           EQU     VARS_BASE+256
@@ -300,19 +298,8 @@ tg_tp           EQU     VARS_BASE+308
 tg_bp           EQU     VARS_BASE+312
 tg_xlo          EQU     VARS_BASE+316
 tg_xlast        EQU     VARS_BASE+317
-tg_ilo          EQU     VARS_BASE+318
-tg_ihi          EQU     VARS_BASE+320
-tg_ntop         EQU     VARS_BASE+322
-tg_nbot         EQU     VARS_BASE+324
-tg_ox0v         EQU     VARS_BASE+326
-tg_ox1v         EQU     VARS_BASE+327
-tg_tp2          EQU     VARS_BASE+328
-tg_bp2          EQU     VARS_BASE+330
-tg_tx0          EQU     VARS_BASE+332
-tg_tx1          EQU     VARS_BASE+333
-tg_bx0          EQU     VARS_BASE+334
-tg_bx1          EQU     VARS_BASE+335
-tg_biter        EQU     VARS_BASE+336
+fu_tend         EQU     VARS_BASE+318   ; the armed lines' ordered (y1, y2)
+fu_bend         EQU     VARS_BASE+322
 dv_top          EQU     VARS_BASE+338
 dv_bot          EQU     VARS_BASE+340
 dv_a            EQU     VARS_BASE+342

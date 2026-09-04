@@ -149,21 +149,42 @@ def div8s(num, den):
 
 
 def linfn(y1, y2, sx1, sx2):
+    """(slope, intercept, ends): the line through the two points, carrying
+    its own endpoints so that evaluating it at one of them gives the
+    point's y rather than the quantised slope's version of it - what the
+    BBC port's two-point records give for free."""
+    ends = (sx1, y1, sx2, y2)
     dx = sx2 - sx1
     if dx == 0:
-        return (0, (y1 + y2) >> 1)
+        return (0, (y1 + y2) >> 1, ends)
     slope = div8s(y2 - y1, dx)
     if slope == 0:
-        return (0, y1)
+        return (0, y1, ends)
     if abs(sx1) <= abs(sx2):
-        return (slope, y1 - fp_mul8(slope, sx1))
-    return (slope, y2 - fp_mul8(slope, sx2))
+        return (slope, y1 - fp_mul8(slope, sx1), ends)
+    return (slope, y2 - fp_mul8(slope, sx2), ends)
 
 
 def ev(fn, x):
+    """A boundary's y at a column: the linear function alone."""
     if fn[0] == 0:
         return fn[1]
     return fp_mul8(fn[0], x) + fn[1]
+
+
+def evl(fn, x):
+    """A drawn line's y at a column: its own end where the column is one."""
+    if len(fn) > 2:
+        e = fn[2]
+        if x == e[0]:
+            return e[1]
+        if x == e[2]:
+            return e[3]
+    return ev(fn, x)
+
+
+def same_fn(a, b):
+    return a[0] == b[0] and a[1] == b[1]
 
 
 def ev88(fn, x):
@@ -298,7 +319,7 @@ class Spans:
         for sp in new:
             if self.spans:
                 p = self.spans[-1]
-                if p[1] + 1 == sp[0] and p[2] == sp[2] and p[3] == sp[3]:
+                if p[1] + 1 == sp[0] and same_fn(p[2], sp[2]) and same_fn(p[3], sp[3]):
                     self.spans[-1] = (p[0], sp[1], p[2], p[3])
                     continue
             self.spans.append(sp)
@@ -310,7 +331,7 @@ class Spans:
         if ta_ is None:
             ta_, ba_ = ev(tfn, x0), ev(bfn, x0)
             tb_, bb_ = ev(tfn, x1), ev(bfn, x1)
-        ya, yb = ev(fn, x0), ev(fn, x1)
+        ya, yb = evl(fn, x0), evl(fn, x1)
         t0, t1 = ge_range(ya - ta_, yb - tb_,
                           (fn[0] - tfn[0], fn[1] - tfn[1]), x0, x1)
         b0, b1 = ge_range(ba_ - ya, bb_ - yb,
@@ -318,9 +339,9 @@ class Spans:
         r0, r1 = max(t0, b0), min(t1, b1)
         if emit and r0 <= r1:
             if r0 != x0:
-                ya, ta_, ba_ = ev(fn, r0), ev(tfn, r0), ev(bfn, r0)
+                ya, ta_, ba_ = evl(fn, r0), ev(tfn, r0), ev(bfn, r0)
             if r1 != x1:
-                yb, tb_, bb_ = ev(fn, r1), ev(tfn, r1), ev(bfn, r1)
+                yb, tb_, bb_ = evl(fn, r1), ev(tfn, r1), ev(bfn, r1)
             ea = ta_ if ya < ta_ else (ba_ if ya > ba_ else ya)
             eb = tb_ if yb < tb_ else (bb_ if yb > bb_ else yb)
             self.out.append((r0, ea, r1, eb))
@@ -449,7 +470,7 @@ def clip_to_trap(fn, xa, xb, tfn, bfn, ta_, ba_, tb_, bb_):
     over a third of them are flat - and leaves the exact aperture in hand, so
     the endpoint clamp costs nothing extra.
     """
-    ya, yb = ev(fn, xa), ev(fn, xb)
+    ya, yb = evl(fn, xa), evl(fn, xb)
 
     if ya < ta_ or yb < tb_:                       # y >= top(x)
         if ya < ta_ and yb < tb_:
@@ -459,10 +480,10 @@ def clip_to_trap(fn, xa, xb, tfn, bfn, ta_, ba_, tb_, bb_):
             return None
         if ya < ta_:
             xa = xc
-            ya, ta_, ba_ = ev(fn, xa), ev(tfn, xa), ev(bfn, xa)
+            ya, ta_, ba_ = evl(fn, xa), ev(tfn, xa), ev(bfn, xa)
         else:
             xb = xc
-            yb, tb_, bb_ = ev(fn, xb), ev(tfn, xb), ev(bfn, xb)
+            yb, tb_, bb_ = evl(fn, xb), ev(tfn, xb), ev(bfn, xb)
         if xa > xb:
             return None
 
@@ -474,10 +495,10 @@ def clip_to_trap(fn, xa, xb, tfn, bfn, ta_, ba_, tb_, bb_):
             return None
         if ya > ba_:
             xa = xc
-            ya, ta_, ba_ = ev(fn, xa), ev(tfn, xa), ev(bfn, xa)
+            ya, ta_, ba_ = evl(fn, xa), ev(tfn, xa), ev(bfn, xa)
         else:
             xb = xc
-            yb, tb_, bb_ = ev(fn, xb), ev(tfn, xb), ev(bfn, xb)
+            yb, tb_, bb_ = evl(fn, xb), ev(tfn, xb), ev(bfn, xb)
         if xa > xb:
             return None
 
