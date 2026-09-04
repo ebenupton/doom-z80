@@ -128,7 +128,15 @@ walk_ss:
                 ld      e,(hl)
                 inc     hl
                 ld      d,(hl)
-                ld      (ss_seg),de
+                ex      de,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                ld      de,SEGS
+                add     hl,de
+                push    hl
+                pop     ix                      ; IX -> the first seg's record
                 ld      hl,$ffff
                 ld      (ch_vtx),hl             ; the chain starts empty
 ss_loop:
@@ -137,12 +145,11 @@ ss_loop:
                 ret     z
                 dec     a
                 ld      (ss_cnt),a
-                ld      hl,(ss_seg)
-                push    hl
+                push    ix
                 call    render_seg
-                pop     hl
-                inc     hl
-                ld      (ss_seg),hl
+                pop     ix
+                ld      de,SEG_SIZE
+                add     ix,de
                 jr      ss_loop
 
 ; ---------------------------------------------------------------------------
@@ -776,7 +783,7 @@ d168_n:
                 ret
 
 ; ---------------------------------------------------------------------------
-; vertex_get : HL = vertex index -> vc_ptr points at its cache entry, which
+; vertex_get : HL = vertex index -> HL = its cache entry, which
 ; holds the view-space position and, when in front of the near plane, the
 ; projected column.
 ; ---------------------------------------------------------------------------
@@ -791,10 +798,9 @@ vertex_get:
                 sbc     hl,de                   ; seven bytes an entry
                 ld      de,VCACHE_BASE
                 add     hl,de
-                ld      (vc_ptr),hl
                 ld      a,(vc_stamp)
                 cp      (hl)
-                ret     z
+                ret     z                       ; HL = the entry
                 ld      (hl),a
                 push    hl
                 pop     ix                      ; IX = the entry
@@ -904,6 +910,8 @@ vg_behind:
                 xor     a
                 ld      (ix+VC_SX),a
                 ld      (ix+VC_SX+1),a
+                push    ix
+                pop     hl
                 ret
 vg_front:
                 call    recip
@@ -912,24 +920,14 @@ vg_front:
                 call    project_x
                 ld      (ix+VC_SX),l
                 ld      (ix+VC_SX+1),h
+                push    ix
+                pop     hl
                 ret
 
 ; ---------------------------------------------------------------------------
 ; render_seg : HL = seg index.
 ; ---------------------------------------------------------------------------
-render_seg:
-                ; IX = the seg record for the back-face test and the field
-                ; fetch; after that IX and IY are the two endpoint cache
-                ; records, and the near-plane verdicts ride in registers.
-                add     hl,hl
-                add     hl,hl
-                add     hl,hl
-                add     hl,hl
-                ld      de,SEGS
-                add     hl,de
-                ld      (sg_ptr),hl
-                push    hl
-                pop     ix
+render_seg:     ; IX -> the seg record
                 ld      a,(ix+SG_FLAGS)
                 ld      (sg_flags),a
 
@@ -1005,16 +1003,16 @@ rs_bf_y0:
 rs_visible:
                 ld      hl,frame_segs
                 inc     (hl)
-
-                ; --- seg fields ----------------------------------------
-                ld      a,(ix+SG_FH)
-                ld      (sg_fh),a
-                ld      a,(ix+SG_CH)
-                ld      (sg_ch),a
-                ld      a,(ix+SG_BFH)
-                ld      (sg_bfh),a
-                ld      a,(ix+SG_BCH)
-                ld      (sg_bch),a
+                ; the four heights, contiguous in the record
+                push    ix
+                pop     hl
+                ld      de,SG_FH
+                add     hl,de
+                ld      de,sg_fh
+                ldi
+                ldi
+                ldi
+                ldi
                 ld      a,(ix+SG_VHI)
                 ld      c,a
                 and     1
@@ -1027,51 +1025,55 @@ rs_visible:
                 ld      h,a
                 ld      l,(ix+SG_V2)
                 ld      (sg_v2),hl
-
-                ; --- vertices ------------------------------------------
+                push    hl
                 ld      hl,(sg_v1)
+                call    vertex_get              ; HL = v1's record
+                ex      (sp),hl                 ; v1's record down, v2's index up
                 call    vertex_get
-                ld      hl,(vc_ptr)
+                pop     ix                      ; IX = v1's record
                 push    hl
-                ld      hl,(sg_v2)
-                call    vertex_get
-                ld      hl,(vc_ptr)
-                push    hl
-                pop     iy                      ; IY = v2's record
-                pop     ix                      ; IX = v1's
+                pop     iy                      ; IY = v2's
 
                 ; near-plane verdicts: tvy < NEAR_VERDICT, signed
-                ld      l,(ix+VC_TVY)
-                ld      h,(ix+VC_TVY+1)
-                ld      (cr_vy1),hl
-                call    rs_near
-                ld      b,a
-                ld      l,(iy+VC_TVY)
-                ld      h,(iy+VC_TVY+1)
-                ld      (cr_vy2),hl
-                call    rs_near
-                ld      c,a
-                ld      (sg_n2),a
+                ld      a,(ix+VC_TVY+1)
+                or      a
+                jp      m,rs_n1y
+                jr      nz,rs_n1n
+                ld      a,(ix+VC_TVY)
+                cp      NEAR_VERDICT
+                jr      nc,rs_n1n
+rs_n1y:         ld      c,1
+                jr      rs_n2
+rs_n1n:         ld      c,0
+rs_n2:          ld      a,(iy+VC_TVY+1)
+                or      a
+                jp      m,rs_n2y
+                jr      nz,rs_n2n
+                ld      a,(iy+VC_TVY)
+                cp      NEAR_VERDICT
+                jr      nc,rs_n2n
+rs_n2y:         ld      b,1
+                jr      rs_nd
+rs_n2n:         ld      b,0
+rs_nd:          ld      (sg_n1),bc              ; C = v1's verdict, B = v2's
                 ld      a,b
-                ld      (sg_n1),a
                 and     c
                 ret     nz                      ; both behind the near plane
                 ld      a,b
                 or      c
-                jr      nz,rs_clipx             ; a crossing needs the view x's
+                jr      nz,rs_clipx             ; a crossing needs the view coords
 rs_front:
-                ld      a,b
+                ld      a,c
                 or      a
                 jr      nz,rs_clip1
-                ld      a,c
+                ld      a,b
                 or      a
                 jr      nz,rs_clip2
                 ; both in front: the cached columns
-                ld      hl,(cr_vy1)
+                ld      l,(ix+VC_TVY)
+                ld      h,(ix+VC_TVY+1)
                 call    recip
-                ld      (sg_s1),a
-                ld      a,e
-                ld      (sg_m1),a
+                ld      (sg_m1),de
                 ld      l,(ix+VC_SX)
                 ld      h,(ix+VC_SX+1)
                 ld      (sg_sx1),hl
@@ -1081,9 +1083,15 @@ rs_clipx:
                 ld      l,(ix+VC_TVX)
                 ld      h,(ix+VC_TVX+1)
                 ld      (cr_vx1),hl
+                ld      l,(ix+VC_TVY)
+                ld      h,(ix+VC_TVY+1)
+                ld      (cr_vy1),hl
                 ld      l,(iy+VC_TVX)
                 ld      h,(iy+VC_TVX+1)
                 ld      (cr_vx2),hl
+                ld      l,(iy+VC_TVY)
+                ld      h,(iy+VC_TVY+1)
+                ld      (cr_vy2),hl
                 pop     bc
                 jr      rs_front
 rs_clip1:
@@ -1092,29 +1100,25 @@ rs_clip1:
                 ret     nc
                 ld      hl,NEAR_CROSS
                 call    recip
-                ld      (sg_s1),a
-                ld      a,e
-                ld      (sg_m1),a
+                ld      (sg_m1),de
                 ld      hl,(bb_cx)
                 call    project_x
                 ld      (sg_sx1),hl
 rs_do2:
-                ld      hl,(cr_vy2)
+                ld      l,(iy+VC_TVY)
+                ld      h,(iy+VC_TVY+1)
                 call    recip
-                ld      (sg_s2),a
-                ld      a,e
-                ld      (sg_m2),a
+                ld      (sg_m2),de
                 ld      l,(iy+VC_SX)
                 ld      h,(iy+VC_SX+1)
                 ld      (sg_sx2),hl
                 jr      rs_havex
 rs_clip2:
                 ; v2 is behind: cross toward v1
-                ld      hl,(cr_vy1)
+                ld      l,(ix+VC_TVY)
+                ld      h,(ix+VC_TVY+1)
                 call    recip
-                ld      (sg_s1),a
-                ld      a,e
-                ld      (sg_m1),a
+                ld      (sg_m1),de
                 ld      l,(ix+VC_SX)
                 ld      h,(ix+VC_SX+1)
                 ld      (sg_sx1),hl
@@ -1122,9 +1126,7 @@ rs_clip2:
                 ret     nc
                 ld      hl,NEAR_CROSS
                 call    recip
-                ld      (sg_s2),a
-                ld      a,e
-                ld      (sg_m2),a
+                ld      (sg_m2),de
                 ld      hl,(bb_cx)
                 call    project_x
                 ld      (sg_sx2),hl

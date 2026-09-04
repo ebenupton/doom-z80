@@ -541,6 +541,7 @@ TURN_RUN        EQU     5
 GEO_BASE        EQU     $C000
 VERTS           EQU     GEO_BASE+$0000  ; 455 x (s16 x, s16 y), prescaled
 SEGS            EQU     GEO_BASE+$0720  ; 644 x 16
+SEG_SIZE        EQU     16
 SSEC            EQU     GEO_BASE+$2F60  ; 196 x (count, first_lo, first_hi)
 SECFH           EQU     GEO_BASE+$31B0  ; 85 x s8
 SECCH           EQU     GEO_BASE+$3210
