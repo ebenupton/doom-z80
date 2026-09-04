@@ -1358,7 +1358,7 @@ rsb_nobb:
                 ld      a,1
                 ld      (sg_emitb),a
 rsb_verts:
-                call    flush_edges
+                call    fe_prepare
                 ; step-face verticals at each endpoint
                 ld      a,(sg_flags)
                 and     SF_NOVT1
@@ -1520,7 +1520,7 @@ rsb_s_bot:
                 ld      de,(sg_fb2)
                 call    emit_edge
 rsb_s_v1:
-                call    flush_edges
+                call    fe_prepare
                 ld      a,(sg_flags)
                 and     SF_NOVT1
                 jr      nz,rsb_s_v2

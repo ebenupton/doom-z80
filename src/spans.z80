@@ -409,6 +409,8 @@ sp_reset:
                 ld      (hl),RENDER_H-1         ; bottom intercept
                 inc     hl
                 ld      (hl),0
+                inc     hl
+                ld      (hl),1                  ; aperture open throughout
                 ret
 
 ; sp_isfull : Z set when no spans remain (the screen is fully occluded).
@@ -472,6 +474,14 @@ se_cmp:
                 inc     hl
                 inc     de
                 djnz    se_cmp
+                ld      hl,(sp_tmp8)
+                ld      de,SP_OPEN
+                add     hl,de
+                ld      a,(hl)
+                ld      hl,(se_prev)
+                add     hl,de
+                and     (hl)                    ; the merged span is only open
+                ld      (hl),a                  ; where both halves were
                 ld      hl,(sp_tmp8)
                 inc     hl
                 ld      a,(hl)                  ; the new span's xlast
@@ -553,6 +563,14 @@ hg_l1:          ld      (hg_clo),a
                 jr      c,hg_l2
                 ld      a,c
 hg_l2:          ld      (hg_chi),a
+                ; an aperture that is open at both ends of the span is open
+                ; right across it, so any overlap is a gap
+                ld      hl,(cl_span)
+                ld      de,SP_OPEN
+                add     hl,de
+                ld      a,(hl)
+                or      a
+                jr      nz,hg_yes
                 ld      a,(hg_clo)
                 call    hg_alive
                 jr      c,hg_yes
@@ -620,7 +638,7 @@ ms_loop:
                 ld      b,a                     ; B = ilo
                 ld      a,(cl_hi)
                 dec     a
-                ld      c,a                     ; C = ihi - 1, inclusive
+                ld      c,a                     ; C = ihi, inclusive
                 ; keep the span whole when it misses the range entirely
                 ld      a,(tg_xlast)
                 cp      b
@@ -632,7 +650,29 @@ ms_loop:
                 jr      z,ms_split
                 jr      nc,ms_keep
 ms_split:
+                ld      a,(sq_n)
+                or      a
+                jr      z,ms_left
+                ld      a,(cl_lo)
+                ld      b,a
+                ld      a,(tg_xlo)
+                cp      b
+                jr      nc,ms_d0
+                ld      a,b
+ms_d0:          ld      (ct_xa0),a
+                ld      a,(cl_hi)
+                dec     a
+                ld      b,a
+                ld      a,(tg_xlast)
+                cp      b
+                jr      c,ms_d1
+                ld      a,b
+ms_d1:          ld      (ct_xb0),a
+                call    fu_extras
+ms_left:
                 ; left piece [xlo, ilo-1]
+                ld      a,(cl_lo)
+                ld      b,a
                 ld      a,(tg_xlo)
                 cp      b
                 jr      nc,ms_right
@@ -763,25 +803,31 @@ sp_alive:
                 push    bc
                 ld      a,b
                 call    pw_evd
+                call    al_pos
+                ld      (al_lo),a
                 pop     bc
-                ld      a,h
-                or      l
-                jr      z,al_try2
-                bit     7,h
-                jr      z,al_yes
-al_try2:
                 ld      a,c
                 call    pw_evd
+                call    al_pos
+                ld      b,a
+                ld      a,(al_lo)
+                and     b
+                ld      (al_both),a             ; open right across the span
+                ld      a,(al_lo)
+                or      b
+                ret     z
+                scf
+                ret
+
+; al_pos : A = 1 when HL is strictly positive.
+al_pos:
                 ld      a,h
                 or      l
-                jr      z,al_no
+                ret     z
                 bit     7,h
-                jr      z,al_yes
-al_no:
-                or      a
-                ret
-al_yes:
-                scf
+                ld      a,0
+                ret     nz
+                inc     a
                 ret
 
 ; ---------------------------------------------------------------------------
@@ -847,6 +893,13 @@ fu_over:
                 dec     a
                 call    sp_emit_range           ; [xlo, ox0-1]
 fu_nolt:
+                ld      a,(fu_ox0)
+                ld      (ct_xa0),a
+                ld      a,(fu_ox1)
+                ld      (ct_xb0),a
+                call    fu_extras
+                ld      a,1
+                ld      (fu_have),a
                 ld      hl,(cl_span)
                 ld      de,SP_TA
                 add     hl,de
@@ -935,6 +988,25 @@ fu_line:
                 ld      a,(fu_x0)
                 call    ev_at
                 ld      (ct_ya),hl
+                ld      hl,(cl_lfnp)
+                ld      a,(fu_x1)
+                call    ev_at
+                ld      (ct_yb),hl
+                ld      a,(fu_have)
+                or      a
+                jr      z,fl_ev
+                xor     a
+                ld      (fu_have),a             ; the walk already has them
+                ld      hl,(ct_ta0)
+                ld      (ct_ta),hl
+                ld      hl,(ct_ba0)
+                ld      (ct_ba),hl
+                ld      hl,(ct_tb0)
+                ld      (ct_tb),hl
+                ld      hl,(ct_bb0)
+                ld      (ct_bb),hl
+                jr      fl_have
+fl_ev:
                 ld      hl,(fu_tp)
                 ld      a,(fu_x0)
                 call    ev_at
@@ -943,10 +1015,6 @@ fu_line:
                 ld      a,(fu_x0)
                 call    ev_at
                 ld      (ct_ba),hl
-                ld      hl,(cl_lfnp)
-                ld      a,(fu_x1)
-                call    ev_at
-                ld      (ct_yb),hl
                 ld      hl,(fu_tp)
                 ld      a,(fu_x1)
                 call    ev_at
@@ -955,6 +1023,7 @@ fu_line:
                 ld      a,(fu_x1)
                 call    ev_at
                 ld      (ct_bb),hl
+fl_have:
 
                 ; columns at or past the near boundary
                 ld      hl,(ct_ya)
@@ -1291,6 +1360,8 @@ fu_out:
                 ld      de,sp_scratch+SP_BA
                 ld      bc,4
                 ldir
+                ld      a,(al_both)
+                ld      (sp_scratch+SP_OPEN),a
                 ld      hl,sp_scratch
                 jp      sp_emit
 fo_stage:
@@ -1486,14 +1557,12 @@ queue_edge:
                 ret
 
 ; ---------------------------------------------------------------------------
-; flush_edges : clip and emit every queued edge, span-major.
-;
-; The edges of a seg share an x range, so a span's trapezoid boundaries are
-; evaluated once and reused by all of them; only the line itself is evaluated
-; per edge.  That turns six evaluations per edge per span into four per span
-; plus two per edge.
+; fe_prepare : reduce the seg's queued edges to line functions, ready for the
+; walk that draws them.  They all share the seg's x range, so the ordering and
+; the column clamp are done once here and the walk clips them span by span
+; alongside the boundary lines.
 ; ---------------------------------------------------------------------------
-flush_edges:
+fe_prepare:
                 ld      a,(sq_n)
                 or      a
                 ret     z
@@ -1527,12 +1596,6 @@ fe_have:
                 jp      nz,fe_clear             ; wholly right of it
 fe_on:
                 ld      hl,(fe_x1)
-                call    clamp_col
-                ld      (ds_cx1),a
-                ld      hl,(fe_x2)
-                call    clamp_col
-                ld      (ds_cx2),a
-                ld      hl,(fe_x1)
                 ld      (cl_lx1),hl
                 ld      hl,(fe_x2)
                 ld      (cl_lx2),hl
@@ -1565,29 +1628,25 @@ fe_fl:
                 dec     a
                 ld      (fe_i),a
                 jr      nz,fe_fl
+                ret
+fe_clear:
+                xor     a
+                ld      (sq_n),a
+                ret
 
-                ld      a,(sp_count)
-                ld      (sp_n),a
-                ld      hl,(sp_head)
-fe_sloop:
-                ld      (cl_span),hl
-                ld      a,(ds_cx2)
-                cp      (hl)
-                jr      c,fe_clear              ; xlo > x2: the list is sorted
-                inc     hl
-                ld      a,(hl)
-                ld      b,a
-                ld      a,(ds_cx1)
-                cp      b
-                jr      z,fe_span
-                jr      nc,fe_next
-fe_span:
-                call    ct_span
+; ---------------------------------------------------------------------------
+; fu_extras : the boundary values at the staged column range, shared by every
+; line clipped against this span, and then the seg's own edges through them.
+; ---------------------------------------------------------------------------
+fu_extras:
+                call    ct_bounds
+                ld      a,(sq_n)
+                or      a
+                ret     z
                 ld      hl,sq_fn
                 ld      (fe_fp),hl
-                ld      a,(sq_n)
                 ld      (fe_i),a
-fe_eloop:
+fx_loop:
                 ld      hl,(fe_fp)
                 call    ct_edge
                 ld      hl,(fe_fp)
@@ -1597,18 +1656,7 @@ fe_eloop:
                 ld      a,(fe_i)
                 dec     a
                 ld      (fe_i),a
-                jr      nz,fe_eloop
-fe_next:
-                ld      hl,(cl_span)
-                ld      bc,SPAN_SIZE
-                add     hl,bc
-                ld      a,(sp_n)
-                dec     a
-                ld      (sp_n),a
-                jp      nz,fe_sloop
-fe_clear:
-                xor     a
-                ld      (sq_n),a
+                jr      nz,fx_loop
                 ret
 
 ; fe_swapy : the seg's x endpoints were the wrong way round, so swap every
@@ -1658,32 +1706,10 @@ cc_zero:        xor     a
                 ret
 
 ; ---------------------------------------------------------------------------
-; ct_span : the part of the clip that is the same for every edge - the
-; overlapping column range and the trapezoid boundaries at its two ends.
+; ct_bounds : the trapezoid boundaries at ct_xa0 and ct_xb0 - the part of the
+; clip that every line crossing this span shares.
 ; ---------------------------------------------------------------------------
-ct_span:
-                ld      hl,(cl_span)
-                ld      a,(hl)
-                ld      (ct_xa0),a
-                inc     hl
-                ld      a,(hl)
-                ld      (ct_xb0),a
-                ld      a,(ds_cx1)
-                ld      b,a
-                ld      a,(ct_xa0)
-                cp      b
-                jr      nc,cts_a
-                ld      a,b
-                ld      (ct_xa0),a
-cts_a:
-                ld      a,(ds_cx2)
-                ld      b,a
-                ld      a,(ct_xb0)
-                cp      b
-                jr      c,cts_b
-                ld      a,b
-                ld      (ct_xb0),a
-cts_b:
+ct_bounds:
                 ld      hl,(cl_span)
                 ld      de,SP_TA
                 add     hl,de

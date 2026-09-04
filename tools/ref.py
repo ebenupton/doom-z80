@@ -210,40 +210,16 @@ class Spans:
 
     # -- drawing ----------------------------------------------------------
 
-    def draw(self, lines):
-        """Draw one seg's edges.
-
-        The sloped ones all share an x range, so they are clipped span-major:
-        each span's boundaries are evaluated once and reused by every edge,
-        instead of six evaluations per edge per span.
-        """
-        sloped, verts = [], []
-        for (x1, y1, x2, y2) in lines:
-            if x1 == x2:
-                verts.append((x1, y1, y2))
-            else:
-                if x1 > x2:
-                    x1, y1, x2, y2 = x2, y2, x1, y1
-                sloped.append((linfn(y1, y2, x1, x2), x1, x2))
-        if sloped:
-            self._draw_sloped_batch(sloped)
+    def draw_verticals(self, verts):
         for (x, ya, yb) in verts:
             self._draw_vertical(x, ya, yb)
 
-    def _draw_sloped_batch(self, fns):
-        lo = min(f[1] for f in fns)
-        hi = max(f[2] for f in fns)
-        for xlo, xlast, tfn, bfn in self.spans:
-            if xlo > hi:
-                break
-            if xlast < lo:
-                continue
-            for (fn, x1, x2) in fns:
-                if xlo > x2 or xlast < x1:
-                    continue
-                c = clip_to_trap(fn, x1, x2, xlo, xlast, tfn, bfn)
-                if c:
-                    self.out.append(c)
+    def _draw_extras(self, extra, ox0, ox1, tfn, bfn, ta, ba, tb, bb):
+        """The seg's other edges, clipped to one span's trapezoid."""
+        for fn in extra:
+            c = clip_to_trap(fn, ox0, ox1, tfn, bfn, ta, ba, tb, bb)
+            if c:
+                self.out.append(c)
 
     def _draw_vertical(self, x, ya, yb):
         if x < 0 or x >= W:
@@ -267,8 +243,8 @@ class Spans:
 
     # -- occlusion updates -------------------------------------------------
 
-    def mark_solid(self, lo, hi):
-        """Delete the half-open column range [lo, hi)."""
+    def mark_solid(self, extra, lo, hi):
+        """Draw a solid wall's edges and delete its columns, in one walk."""
         ilo, ihi = max(0, lo), min(W, hi) - 1
         if ilo > ihi:
             return
@@ -277,13 +253,17 @@ class Spans:
             if xlast < ilo or xlo > ihi:
                 new.append((xlo, xlast, tfn, bfn))
                 continue
+            ox0, ox1 = max(xlo, ilo), min(xlast, ihi)
+            self._draw_extras(extra, ox0, ox1, tfn, bfn,
+                              ev(tfn, ox0), ev(bfn, ox0),
+                              ev(tfn, ox1), ev(bfn, ox1))
             if xlo < ilo:
                 new.append((xlo, ilo - 1, tfn, bfn))
             if xlast > ihi:
                 new.append((ihi + 1, xlast, tfn, bfn))
         self.spans = new
 
-    def fuse_seg(self, tfn, bfn, x1, x2, emit_t, emit_b):
+    def fuse_seg(self, tfn, bfn, x1, x2, emit_t, emit_b, extra):
         """Clip both of a seg's boundary lines to the span list, draw them,
         and make them the new boundaries - all in one walk.
 
@@ -303,8 +283,11 @@ class Spans:
                 continue
             if xlo < ox0:
                 new.append((xlo, ox0 - 1, sp_t, sp_b))
+            ta, ba = ev(sp_t, ox0), ev(sp_b, ox0)
+            tb, bb = ev(sp_t, ox1), ev(sp_b, ox1)
+            self._draw_extras(extra, ox0, ox1, sp_t, sp_b, ta, ba, tb, bb)
             for (a, b, tf, bf) in self._apply(tfn, ox0, ox1, sp_t, sp_b,
-                                              True, emit_t):
+                                              True, emit_t, ta, ba, tb, bb):
                 new.extend(self._apply(bfn, a, b, tf, bf, False, emit_b))
             if xlast > ox1:
                 new.append((ox1 + 1, xlast, sp_t, sp_b))
@@ -320,11 +303,14 @@ class Spans:
                     continue
             self.spans.append(sp)
 
-    def _apply(self, fn, x0, x1, tfn, bfn, side, emit):
+    def _apply(self, fn, x0, x1, tfn, bfn, side, emit,
+               ta_=None, ba_=None, tb_=None, bb_=None):
         """One line against one trapezoid piece: draw the visible run and
         return the pieces that survive, the run carrying the line."""
-        ya, ta_, ba_ = ev(fn, x0), ev(tfn, x0), ev(bfn, x0)
-        yb, tb_, bb_ = ev(fn, x1), ev(tfn, x1), ev(bfn, x1)
+        if ta_ is None:
+            ta_, ba_ = ev(tfn, x0), ev(bfn, x0)
+            tb_, bb_ = ev(tfn, x1), ev(bfn, x1)
+        ya, yb = ev(fn, x0), ev(fn, x1)
         t0, t1 = ge_range(ya - ta_, yb - tb_,
                           (fn[0] - tfn[0], fn[1] - tfn[1]), x0, x1)
         b0, b1 = ge_range(ba_ - ya, bb_ - yb,
@@ -454,21 +440,16 @@ def ge_range(v0, v1, d, x0, x1):
     return (xc, x1) if v0 < 0 else (x0, xc)
 
 
-def clip_to_trap(fn, x1, x2, xlo, xlast, tfn, bfn):
+def clip_to_trap(fn, xa, xb, tfn, bfn, ta_, ba_, tb_, bb_):
     """Clip the line y = fn to the trapezoid, in column space.
 
-    The line and both boundaries are evaluated at the two ends of the
-    overlapping column range. Evaluating the boundaries directly rather than
-    as differences from the line keeps the flat-boundary short circuit - well
+    The boundaries are evaluated once per span by the caller and shared by
+    every line clipped against it; evaluating them directly rather than as
+    differences from the line keeps the flat-boundary short circuit - well
     over a third of them are flat - and leaves the exact aperture in hand, so
     the endpoint clamp costs nothing extra.
     """
-    xa = xlo if x1 < xlo else x1
-    xb = xlast if x2 > xlast else x2
-    if xa > xb:
-        return None
-    ya, ta_, ba_ = ev(fn, xa), ev(tfn, xa), ev(bfn, xa)
-    yb, tb_, bb_ = ev(fn, xb), ev(tfn, xb), ev(bfn, xb)
+    ya, yb = ev(fn, xa), ev(fn, xb)
 
     if ya < ta_ or yb < tb_:                       # y >= top(x)
         if ya < ta_ and yb < tb_:
@@ -878,18 +859,22 @@ class Renderer:
             if bch <= fh or bfh >= ch:
                 solid = True
 
-        lines = []
+        if sx1 < sx2:
+            mk = lambda a, b: linfn(a, b, sx1, sx2)
+        else:
+            mk = lambda a, b: linfn(b, a, sx2, sx1)
+        extra, verts = [], []
         if solid:
             if ch > vz:
-                lines.append((sx1, ft1, sx2, ft2))
+                extra.append(mk(ft1, ft2))
             if fh < vz:
-                lines.append((sx1, fb1, sx2, fb2))
+                extra.append(mk(fb1, fb2))
             if not sg["no_vt1"]:
-                lines.append((sx1, ft1, sx1, fb1))
+                verts.append((sx1, ft1, fb1))
             if not sg["no_vt2"]:
-                lines.append((sx2, ft2, sx2, fb2))
-            self.spans.draw(lines)
-            self.spans.mark_solid(x_lo, x_hi + 1)
+                verts.append((sx2, ft2, fb2))
+            self.spans.draw_verticals(verts)
+            self.spans.mark_solid(extra, x_lo, x_hi + 1)
             return
 
         need_bt = bch < ch
@@ -899,42 +884,36 @@ class Renderer:
             bt1 = project_y(bch - vz, m1, s1)
             bt2 = project_y(bch - vz, m2, s2)
             if ch > vz:
-                lines.append((sx1, ft1, sx2, ft2))
-
+                extra.append(mk(ft1, ft2))
         if need_bb:
             bb1 = project_y(bfh - vz, m1, s1)
             bb2 = project_y(bfh - vz, m2, s2)
             if fh < vz:
-                lines.append((sx1, fb1, sx2, fb2))
+                extra.append(mk(fb1, fb2))
 
         # Verticals bound the visible step faces at each endpoint.
         if not sg["no_vt1"]:
             if need_bt:
-                lines.append((sx1, ft1, sx1, bt1))
+                verts.append((sx1, ft1, bt1))
             if need_bb:
-                lines.append((sx1, bb1, sx1, fb1))
+                verts.append((sx1, bb1, fb1))
         if not sg["no_vt2"]:
             if need_bt:
-                lines.append((sx2, ft2, sx2, bt2))
+                verts.append((sx2, ft2, bt2))
             if need_bb:
-                lines.append((sx2, bb2, sx2, fb2))
+                verts.append((sx2, bb2, fb2))
+        self.spans.draw_verticals(verts)
 
-        self.spans.draw(lines)
-
-        # The two boundary lines are drawn by the fuse itself, after every
-        # unarmed line has been clipped against the aperture they narrow.
+        # The two boundary lines are drawn by the fuse itself, in the same
+        # walk that narrows the aperture to them.
         tt1 = bt1 if need_bt else ft1
         tt2 = bt2 if need_bt else ft2
         tb1 = bb1 if need_bb else fb1
         tb2 = bb2 if need_bb else fb2
-        if sx1 < sx2:
-            ntf = linfn(max(ft1, tt1), max(ft2, tt2), sx1, sx2)
-            nbf = linfn(min(fb1, tb1), min(fb2, tb2), sx1, sx2)
-        else:
-            ntf = linfn(max(ft2, tt2), max(ft1, tt1), sx2, sx1)
-            nbf = linfn(min(fb2, tb2), min(fb1, tb1), sx2, sx1)
-        self.spans.fuse_seg(ntf, nbf, x_lo, x_hi,
-                            need_bt or bch > ch, need_bb or bfh < fh)
+        self.spans.fuse_seg(mk(max(ft1, tt1), max(ft2, tt2)),
+                            mk(min(fb1, tb1), min(fb2, tb2)),
+                            x_lo, x_hi,
+                            need_bt or bch > ch, need_bb or bfh < fh, extra)
 
 # ---------------------------------------------------------------------------
 # Rasterisation (for comparison against the Z80 framebuffer)

@@ -98,6 +98,7 @@ SP_TA           EQU     2               ; top slope, 8.8 signed
 SP_TB           EQU     4               ; top intercept, s16
 SP_BA           EQU     6
 SP_BB           EQU     8
+SP_OPEN         EQU     10              ; 1 when the aperture is open throughout
 SPANS_TOP       EQU     SPANS_BASE + SPANS_MAX*SPAN_SIZE
 ; scratch pool that tighten and mark_solid build into before swapping
 SPANS_ALT       EQU     SPANS_TOP
@@ -441,6 +442,8 @@ fu_stage        EQU     VARS_BASE+694   ; 1 = stage a piece, 0 = emit a span
 fu_np           EQU     VARS_BASE+695
 fu_ax0          EQU     VARS_BASE+696
 fu_ax1          EQU     VARS_BASE+697
+fu_have         EQU     VARS_BASE+716
+al_both         EQU     VARS_BASE+717   ; the walk supplied the boundary values
 fu_pb           EQU     VARS_BASE+698   ; 3 x (x0, x1, topfn, botfn)
 lf_absx         EQU     VARS_BASE+550
 ds_cx1          EQU     VARS_BASE+551
