@@ -996,6 +996,9 @@ vg_store:
 ; render_seg : HL = seg index.
 ; ---------------------------------------------------------------------------
 render_seg:
+                ; IX = the seg record for the back-face test and the field
+                ; fetch; after that IX and IY are the two endpoint cache
+                ; records, and the near-plane verdicts ride in registers.
                 add     hl,hl
                 add     hl,hl
                 add     hl,hl
@@ -1003,80 +1006,57 @@ render_seg:
                 ld      de,SEGS
                 add     hl,de
                 ld      (sg_ptr),hl
+                push    hl
+                pop     ix
+                ld      a,(ix+SG_FLAGS)
+                ld      (sg_flags),a
 
                 ; --- back face -----------------------------------------
                 ; dot = ldy*(px - lx) - ldx*(py - ly) must be strictly
                 ; positive.  Three quarters of DOOM's linedefs are axis
                 ; aligned, and for those one term vanishes and the test
-                ; collapses to a sign comparison - with only one of the two
-                ; deltas worth fetching.
-                ld      de,SG_FLAGS
-                add     hl,de
-                ld      a,(hl)
-                ld      (sg_flags),a
+                ; collapses to a sign comparison with one delta.
                 and     SF_LDX0
-                jp      nz,rs_bf_x0
+                jr      nz,rs_bf_x0
                 ld      a,(sg_flags)
                 and     SF_LDY0
-                jp      nz,rs_bf_y0
-                ld      hl,(sg_ptr)
-                ld      de,SG_LX
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                push    hl
+                jr      nz,rs_bf_y0
+                ld      e,(ix+SG_LX)
+                ld      d,(ix+SG_LX+1)
                 ld      hl,(pl_x)
                 or      a
                 sbc     hl,de
                 ld      (pos_dx),hl             ; px - lx
-                pop     hl
-                inc     hl
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                push    hl
+                ld      e,(ix+SG_LY)
+                ld      d,(ix+SG_LY+1)
                 ld      hl,(pl_y)
                 or      a
-                sbc     hl,de
-                ld      (pos_dy),hl             ; py - ly
-                pop     hl
-                inc     hl
-                ld      a,(hl)                  ; ldx
-                ld      (pos_ndx),a
-                inc     hl
-                ld      a,(hl)                  ; ldy
-                ld      (pos_ndy),a
-                ; general case: two 16x8 products
-                ld      de,(pos_dx)
-                ld      a,(pos_ndy)
-                call    mul_s16_u8_signed
-                ld      (pos_l),hl
-                ld      (pos_l+2),a
-                ld      de,(pos_dy)
-                ld      a,(pos_ndx)
-                call    mul_s16_u8_signed
-                ld      c,a
-                ld      de,(pos_l)
+                sbc     hl,de                   ; py - ly
                 ex      de,hl
+                ld      a,(ix+SG_LDX)
+                call    mul_s16_u8_signed       ; A:HL = ldx * dy
+                ld      (pos_l+2),a             ; the multiply eats BC
+                push    hl
+                ld      de,(pos_dx)
+                ld      a,(ix+SG_LDY)
+                call    mul_s16_u8_signed       ; A:HL = ldy * dx
+                pop     de
                 or      a
                 sbc     hl,de
+                ld      d,a
                 ld      a,(pos_l+2)
-                sbc     a,c
-                bit     7,a
-                ret     nz
+                ld      e,a
+                ld      a,d
+                sbc     a,e                     ; A:HL = ldy*dx - ldx*dy
+                ret     m
                 or      h
                 or      l
                 ret     z
                 jr      rs_visible
 rs_bf_x0:
                 ; dot = ldy * (px - lx)
-                ld      hl,(sg_ptr)
-                ld      de,SG_LX
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
+                ld      e,(ix+SG_LX)
+                ld      d,(ix+SG_LX+1)
                 ld      hl,(pl_x)
                 or      a
                 sbc     hl,de
@@ -1084,25 +1064,13 @@ rs_bf_x0:
                 or      l
                 ret     z
                 ld      a,h
-                ld      (pos_dx+1),a
-                ld      hl,(sg_ptr)
-                ld      de,SG_LX+5
-                add     hl,de
-                ld      a,(hl)                  ; ldy
-                ld      b,a
-                ld      a,(pos_dx+1)
-                xor     b                       ; sign of the product
-                bit     7,a
-                ret     nz
+                xor     (ix+SG_LDY)             ; sign of the product
+                ret     m
                 jr      rs_visible
 rs_bf_y0:
                 ; dot = -ldx * (py - ly)
-                ld      hl,(sg_ptr)
-                ld      de,SG_LX+2
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
+                ld      e,(ix+SG_LY)
+                ld      d,(ix+SG_LY+1)
                 ld      hl,(pl_y)
                 or      a
                 sbc     hl,de
@@ -1110,242 +1078,188 @@ rs_bf_y0:
                 or      l
                 ret     z
                 ld      a,h
-                ld      (pos_dy+1),a
-                ld      hl,(sg_ptr)
-                ld      de,SG_LX+4
-                add     hl,de
-                ld      a,(hl)                  ; ldx
-                ld      b,a
-                ld      a,(pos_dy+1)
-                xor     b
-                bit     7,a
-                ret     z                       ; product positive -> dot < 0
+                xor     (ix+SG_LDX)
+                ret     p                       ; product positive -> dot < 0
 rs_visible:
-                ld      a,(frame_segs)
-                inc     a
-                ld      (frame_segs),a
+                ld      hl,frame_segs
+                inc     (hl)
 
                 ; --- seg fields ----------------------------------------
-                ld      hl,(sg_ptr)
-                ld      a,(hl)
-                ld      (sg_v1),a
-                inc     hl
-                ld      a,(hl)
-                ld      (sg_v2),a
-                inc     hl
-                ld      c,(hl)                  ; vhi
-                inc     hl
-                inc     hl
-                ld      a,(hl)
+                ld      a,(ix+SG_FH)
                 ld      (sg_fh),a
-                inc     hl
-                ld      a,(hl)
+                ld      a,(ix+SG_CH)
                 ld      (sg_ch),a
-                inc     hl
-                ld      a,(hl)
+                ld      a,(ix+SG_BFH)
                 ld      (sg_bfh),a
-                inc     hl
-                ld      a,(hl)
+                ld      a,(ix+SG_BCH)
                 ld      (sg_bch),a
-                ld      a,c
+                ld      a,(ix+SG_VHI)
+                ld      c,a
                 and     1
-                ld      (sg_v1+1),a
+                ld      h,a
+                ld      l,(ix+SG_V1)
+                ld      (sg_v1),hl
                 ld      a,c
                 rrca
                 and     1
-                ld      (sg_v2+1),a
+                ld      h,a
+                ld      l,(ix+SG_V2)
+                ld      (sg_v2),hl
 
                 ; --- vertices ------------------------------------------
                 ld      hl,(sg_v1)
                 call    vertex_get
                 ld      hl,(vc_ptr)
                 ld      (sg_c1),hl
+                push    hl
                 ld      hl,(sg_v2)
                 call    vertex_get
                 ld      hl,(vc_ptr)
                 ld      (sg_c2),hl
+                push    hl
+                pop     iy                      ; IY = v2's record
+                pop     ix                      ; IX = v1's
 
-                ; near-plane verdicts
-                ld      hl,(sg_c1)
-                ld      de,VC_TVY
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (cr_vy1),de
-                ld      hl,(cr_vy1)
-                ld      de,NEAR_VERDICT
-                call    cmp_s16
-                ld      a,0
-                jp      nc,rs_c1ok
-                inc     a
-rs_c1ok:        ld      (sg_n1),a
-                ld      hl,(sg_c2)
-                ld      de,VC_TVY
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (cr_vy2),de
-                ld      hl,(cr_vy2)
-                ld      de,NEAR_VERDICT
-                call    cmp_s16
-                ld      a,0
-                jp      nc,rs_c2ok
-                inc     a
-rs_c2ok:        ld      (sg_n2),a
-                ld      a,(sg_n1)
+                ; near-plane verdicts: tvy < NEAR_VERDICT, signed
+                ld      l,(ix+VC_TVY)
+                ld      h,(ix+VC_TVY+1)
+                ld      (cr_vy1),hl
+                call    rs_near
                 ld      b,a
-                ld      a,(sg_n2)
-                and     b
+                ld      l,(iy+VC_TVY)
+                ld      h,(iy+VC_TVY+1)
+                ld      (cr_vy2),hl
+                call    rs_near
+                ld      c,a
+                ld      (sg_n2),a
+                ld      a,b
+                ld      (sg_n1),a
+                and     c
                 ret     nz                      ; both behind the near plane
 
-                ld      hl,(sg_c1)
-                ld      de,VC_TVX
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (cr_vx1),de
-                ld      hl,(sg_c2)
-                ld      de,VC_TVX
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (cr_vx2),de
+                ld      l,(ix+VC_TVX)
+                ld      h,(ix+VC_TVX+1)
+                ld      (cr_vx1),hl
+                ld      l,(iy+VC_TVX)
+                ld      h,(iy+VC_TVX+1)
+                ld      (cr_vx2),hl
 
-                ld      a,(sg_n1)
+                ld      a,b
                 or      a
-                jp      nz,rs_clip1
-                ld      a,(sg_n2)
+                jr      nz,rs_clip1
+                ld      a,c
                 or      a
-                jp      nz,rs_clip2
-                ; both in front: take the cached columns
+                jr      nz,rs_clip2
+                ; both in front: the cached columns
                 ld      hl,(cr_vy1)
                 call    recip
+                ld      (sg_s1),a
                 ld      a,(rc_m8)
                 ld      (sg_m1),a
-                ld      a,(rc_s)
-                ld      (sg_s1),a
-                ld      hl,(sg_c1)
-                ld      de,VC_SX
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (sg_sx1),de
-                jp      rs_do2
+                ld      l,(ix+VC_SX)
+                ld      h,(ix+VC_SX+1)
+                ld      (sg_sx1),hl
+                jr      rs_do2
 rs_clip1:
                 ; v1 is behind: cross toward v2
                 call    near_cross_seg1
                 ret     nc
                 ld      hl,NEAR_CROSS
                 call    recip
+                ld      (sg_s1),a
                 ld      a,(rc_m8)
                 ld      (sg_m1),a
-                ld      a,(rc_s)
-                ld      (sg_s1),a
                 ld      hl,(bb_cx)
                 call    project_x
                 ld      (sg_sx1),hl
 rs_do2:
                 ld      hl,(cr_vy2)
                 call    recip
+                ld      (sg_s2),a
                 ld      a,(rc_m8)
                 ld      (sg_m2),a
-                ld      a,(rc_s)
-                ld      (sg_s2),a
-                ld      hl,(sg_c2)
-                ld      de,VC_SX
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (sg_sx2),de
-                jp      rs_havex
+                ld      l,(iy+VC_SX)
+                ld      h,(iy+VC_SX+1)
+                ld      (sg_sx2),hl
+                jr      rs_havex
 rs_clip2:
                 ; v2 is behind: cross toward v1
                 ld      hl,(cr_vy1)
                 call    recip
+                ld      (sg_s1),a
                 ld      a,(rc_m8)
                 ld      (sg_m1),a
-                ld      a,(rc_s)
-                ld      (sg_s1),a
-                ld      hl,(sg_c1)
-                ld      de,VC_SX
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (sg_sx1),de
+                ld      l,(ix+VC_SX)
+                ld      h,(ix+VC_SX+1)
+                ld      (sg_sx1),hl
                 call    near_cross_seg2
                 ret     nc
                 ld      hl,NEAR_CROSS
                 call    recip
+                ld      (sg_s2),a
                 ld      a,(rc_m8)
                 ld      (sg_m2),a
-                ld      a,(rc_s)
-                ld      (sg_s2),a
                 ld      hl,(bb_cx)
                 call    project_x
                 ld      (sg_sx2),hl
 rs_havex:
-                ; a zero-width seg spans no columns
+                ; order the two columns; a zero-width seg spans none
                 ld      hl,(sg_sx1)
                 ld      de,(sg_sx2)
                 or      a
                 sbc     hl,de
                 ret     z
-                ld      hl,(sg_sx1)
-                ld      de,(sg_sx2)
-                call    cmp_s16
-                jr      c,rs_order
-                ld      hl,(sg_sx2)
-                ld      (sg_xlo),hl
-                ld      hl,(sg_sx1)
-                ld      (sg_xhi),hl
+                jp      pe,rs_ovf
+                jp      m,rs_lt
+rs_ge:          ld      hl,(sg_sx2)             ; sx1 > sx2
+                ld      de,(sg_sx1)
                 jr      rs_range
-rs_order:
-                ld      hl,(sg_sx1)
-                ld      (sg_xlo),hl
-                ld      hl,(sg_sx2)
-                ld      (sg_xhi),hl
+rs_ovf:         jp      m,rs_ge
+rs_lt:          ld      hl,(sg_sx1)             ; sx1 < sx2
+                ld      de,(sg_sx2)
 rs_range:
-                ld      hl,(sg_xhi)
-                bit     7,h
+                ; HL = xlo, DE = xhi
+                bit     7,d
                 ret     nz                      ; entirely left of the screen
-                ld      hl,(sg_xlo)
-                ld      de,RENDER_W
-                call    cmp_s16
-                ret     nc                      ; entirely right of it
-                ; clamp for the occlusion queries
-                ld      hl,(sg_xlo)
                 bit     7,h
-                jr      z,rs_lo_ok
-                ld      hl,0
-rs_lo_ok:       ld      a,l
-                ld      (cl_lo),a
+                jr      nz,rs_lo0
+                ld      a,h
+                or      a
+                ret     nz                      ; entirely right of it
+                ld      a,l
+                jr      rs_lo1
+rs_lo0:         xor     a
+rs_lo1:         ld      (cl_lo),a
+                ld      b,a
+                ld      a,d
+                or      a
+                ld      a,e
+                jr      z,rs_hi1
+                ld      a,RENDER_W-1
+rs_hi1:         ld      (cl_hi),a
+                ld      c,a
                 xor     a
                 ld      (cl_lo+1),a
-                ld      hl,(sg_xhi)
-                ld      de,RENDER_W-1
-                or      a
-                sbc     hl,de
-                ld      hl,(sg_xhi)             ; SBC left the difference in HL
-                jr      c,rs_hi_ok
-                ld      hl,RENDER_W-1
-rs_hi_ok:       ld      a,l
-                ld      (cl_hi),a
-                xor     a
                 ld      (cl_hi+1),a
-                ld      a,(cl_lo)
-                ld      b,a
-                ld      a,(cl_hi)
-                ld      c,a
                 call    sp_hasgap
                 ret     nc
                 jp      render_seg_body
+
+; rs_near : HL = tvy -> A = 1 when it is short of the near plane.
+rs_near:
+                ld      a,h
+                or      a
+                jr      nz,rs_nbig
+                ld      a,l
+                cp      NEAR_VERDICT
+                sbc     a,a                     ; -1 when below
+                and     1
+                ret
+rs_nbig:
+                rla                             ; carry = sign
+                sbc     a,a
+                and     1
+                ret
 
 near_cross_seg1:
                 ld      hl,(cr_vx1)
