@@ -409,6 +409,39 @@ ct_bb0          EQU     VARS_BASE+646
 cl_lfnp         EQU     VARS_BASE+648
 qe_y1           EQU     VARS_BASE+650
 qe_y2           EQU     VARS_BASE+652
+; --- fused draw + tighten ---------------------------------------------------
+fu_side         EQU     VARS_BASE+654   ; 1 = top boundary, 0 = bottom
+fu_emit         EQU     VARS_BASE+655
+fu_ox0          EQU     VARS_BASE+656   ; the span's overlap with the op range
+fu_ox1          EQU     VARS_BASE+657
+fu_t0           EQU     VARS_BASE+658   ; columns at or past the near boundary
+fu_t1           EQU     VARS_BASE+659
+fu_g0           EQU     VARS_BASE+660   ; fu_ge's result
+fu_g1           EQU     VARS_BASE+661
+fu_r0           EQU     VARS_BASE+662   ; the run
+fu_r1           EQU     VARS_BASE+663
+fu_k0           EQU     VARS_BASE+664
+fu_k1           EQU     VARS_BASE+665
+fu_c            EQU     VARS_BASE+666
+fu_v0           EQU     VARS_BASE+667
+fu_v1           EQU     VARS_BASE+668
+se_prev         EQU     VARS_BASE+670
+fu_tfn          EQU     VARS_BASE+672   ; the two armed boundary lines
+fu_bfn          EQU     VARS_BASE+676
+sg_emitt        EQU     VARS_BASE+680
+sg_emitb        EQU     VARS_BASE+681
+sg_swap         EQU     VARS_BASE+682
+fu_x0           EQU     VARS_BASE+683   ; the piece one line is applied over
+fu_x1           EQU     VARS_BASE+684
+fu_tp           EQU     VARS_BASE+686   ; its top / bottom boundary functions
+fu_bp           EQU     VARS_BASE+688
+fu_otp          EQU     VARS_BASE+690
+fu_obp          EQU     VARS_BASE+692
+fu_stage        EQU     VARS_BASE+694   ; 1 = stage a piece, 0 = emit a span
+fu_np           EQU     VARS_BASE+695
+fu_ax0          EQU     VARS_BASE+696
+fu_ax1          EQU     VARS_BASE+697
+fu_pb           EQU     VARS_BASE+698   ; 3 x (x0, x1, topfn, botfn)
 lf_absx         EQU     VARS_BASE+550
 ds_cx1          EQU     VARS_BASE+551
 ds_cx2          EQU     VARS_BASE+552

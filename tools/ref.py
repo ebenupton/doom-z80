@@ -283,30 +283,89 @@ class Spans:
                 new.append((ihi + 1, xlast, tfn, bfn))
         self.spans = new
 
-    def tighten(self, lo, hi, sx1, sx2, yt1, yt2, yb1, yb2):
-        ilo, ihi = max(0, lo), min(W, hi) - 1
-        if ilo > ihi:
-            return
-        ntf = linfn(yt1, yt2, sx1, sx2)
-        nbf = linfn(yb1, yb2, sx1, sx2)
+    def fuse_seg(self, tfn, bfn, x1, x2, emit_t, emit_b):
+        """Clip both of a seg's boundary lines to the span list, draw them,
+        and make them the new boundaries - all in one walk.
+
+        A line that was drawn is, by construction, inside the aperture on
+        every column it lit: there max(old_top, line) is just the line, so
+        the tighten is a copy rather than a piecewise max with a crossover
+        search.  Columns where the line ran past the far boundary close;
+        columns where it never reached the near one keep what they had.  The
+        bottom line then meets whatever the top line left behind, which is
+        what a second pass over the list would have shown it.
+        """
         new = []
-        for xlo, xlast, tfn, bfn in self.spans:
-            if xlast < ilo or xlo > ihi:
-                new.append((xlo, xlast, tfn, bfn))
+        for (xlo, xlast, sp_t, sp_b) in self.spans:
+            ox0, ox1 = max(xlo, x1), min(xlast, x2)
+            if ox0 > ox1:
+                new.append((xlo, xlast, sp_t, sp_b))
                 continue
-            if xlo < ilo:
-                new.append((xlo, ilo - 1, tfn, bfn))
-            ox0, ox1 = max(xlo, ilo), min(xlast, ihi)
-            for tx0, tx1, tf in pw(tfn, ntf, ox0, ox1, True):
-                for bx0, bx1, bf in pw(bfn, nbf, tx0, tx1, False):
-                    if bx1 < bx0:
-                        continue
-                    d = (bf[0] - tf[0], bf[1] - tf[1])
-                    if evd(d, bx0) > 0 or evd(d, bx1) > 0:
-                        new.append((bx0, bx1, tf, bf))
-            if xlast > ihi:
-                new.append((ihi + 1, xlast, tfn, bfn))
-        self.spans = new
+            if xlo < ox0:
+                new.append((xlo, ox0 - 1, sp_t, sp_b))
+            for (a, b, tf, bf) in self._apply(tfn, ox0, ox1, sp_t, sp_b,
+                                              True, emit_t):
+                new.extend(self._apply(bfn, a, b, tf, bf, False, emit_b))
+            if xlast > ox1:
+                new.append((ox1 + 1, xlast, sp_t, sp_b))
+        # A fuse splits at the seg's own column range whether or not the
+        # boundaries changed there, so abutting pieces that ended up
+        # identical are coalesced again.
+        self.spans = []
+        for sp in new:
+            if self.spans:
+                p = self.spans[-1]
+                if p[1] + 1 == sp[0] and p[2] == sp[2] and p[3] == sp[3]:
+                    self.spans[-1] = (p[0], sp[1], p[2], p[3])
+                    continue
+            self.spans.append(sp)
+
+    def _apply(self, fn, x0, x1, tfn, bfn, side, emit):
+        """One line against one trapezoid piece: draw the visible run and
+        return the pieces that survive, the run carrying the line."""
+        ya, ta_, ba_ = ev(fn, x0), ev(tfn, x0), ev(bfn, x0)
+        yb, tb_, bb_ = ev(fn, x1), ev(tfn, x1), ev(bfn, x1)
+        t0, t1 = ge_range(ya - ta_, yb - tb_,
+                          (fn[0] - tfn[0], fn[1] - tfn[1]), x0, x1)
+        b0, b1 = ge_range(ba_ - ya, bb_ - yb,
+                          (bfn[0] - fn[0], bfn[1] - fn[1]), x0, x1)
+        r0, r1 = max(t0, b0), min(t1, b1)
+        if emit and r0 <= r1:
+            if r0 != x0:
+                ya, ta_, ba_ = ev(fn, r0), ev(tfn, r0), ev(bfn, r0)
+            if r1 != x1:
+                yb, tb_, bb_ = ev(fn, r1), ev(tfn, r1), ev(bfn, r1)
+            ea = ta_ if ya < ta_ else (ba_ if ya > ba_ else ya)
+            eb = tb_ if yb < tb_ else (bb_ if yb > bb_ else yb)
+            self.out.append((r0, ea, r1, eb))
+
+        above = lambda x: x < t0 or x > t1
+        pieces = []
+        if r0 <= r1:
+            if r0 > x0:
+                pieces.append((x0, r0 - 1, above(x0)))
+            pieces.append((r0, r1, None))
+            if r1 < x1:
+                pieces.append((r1 + 1, x1, above(x1)))
+        elif above(x0) == above(x1):
+            pieces.append((x0, x1, above(x0)))
+        else:
+            c = max(x0 + 1, min(x1, t0 if above(x0) else b0))
+            pieces.append((x0, c - 1, above(x0)))
+            pieces.append((c, x1, above(x1)))
+
+        out = []
+        for a, b, kind in pieces:
+            if kind is None:
+                nt, nb = (fn, bfn) if side else (tfn, fn)
+            elif kind == side:
+                nt, nb = tfn, bfn
+            else:
+                continue                    # the line ran past the far side
+            d = (nb[0] - nt[0], nb[1] - nt[1])
+            if evd(d, a) > 0 or evd(d, b) > 0:
+                out.append((a, b, nt, nb))
+        return out
 
 
 def evd(d, x):
@@ -373,6 +432,26 @@ def cross_col(d, xa, xb):
             if xc < xa:
                 return None
     return xc
+
+
+def ge_range(v0, v1, d, x0, x1):
+    """The sub-interval of [x0, x1] on which the linear d(x) is >= 0, given
+    its already-known values v0, v1 at the two ends.
+
+    The ends are compared as evaluated boundaries rather than as a difference,
+    which keeps the flat-boundary short circuit; the difference is only formed
+    when they disagree and a crossing has to be divided out.  d disagrees in
+    sign at most once, so the answer is one contiguous piece anchored at an
+    end.  Empty comes back as (x0+1, x0).
+    """
+    if v0 >= 0 and v1 >= 0:
+        return x0, x1
+    if v0 < 0 and v1 < 0:
+        return x0 + 1, x0
+    xc = cross_col(d, x0, x1)
+    if xc is None:
+        return x0 + 1, x0
+    return (xc, x1) if v0 < 0 else (x0, xc)
 
 
 def clip_to_trap(fn, x1, x2, xlo, xlast, tfn, bfn):
@@ -819,20 +898,14 @@ class Renderer:
         if need_bt:
             bt1 = project_y(bch - vz, m1, s1)
             bt2 = project_y(bch - vz, m2, s2)
-            lines.append((sx1, bt1, sx2, bt2))
             if ch > vz:
                 lines.append((sx1, ft1, sx2, ft2))
-        elif bch > ch:
-            lines.append((sx1, ft1, sx2, ft2))
 
         if need_bb:
             bb1 = project_y(bfh - vz, m1, s1)
             bb2 = project_y(bfh - vz, m2, s2)
-            lines.append((sx1, bb1, sx2, bb2))
             if fh < vz:
                 lines.append((sx1, fb1, sx2, fb2))
-        elif bfh < fh:
-            lines.append((sx1, fb1, sx2, fb2))
 
         # Verticals bound the visible step faces at each endpoint.
         if not sg["no_vt1"]:
@@ -848,14 +921,20 @@ class Renderer:
 
         self.spans.draw(lines)
 
+        # The two boundary lines are drawn by the fuse itself, after every
+        # unarmed line has been clipped against the aperture they narrow.
         tt1 = bt1 if need_bt else ft1
         tt2 = bt2 if need_bt else ft2
         tb1 = bb1 if need_bb else fb1
         tb2 = bb2 if need_bb else fb2
-        self.spans.tighten(x_lo, x_hi + 1, sx1, sx2,
-                           max(ft1, tt1), max(ft2, tt2),
-                           min(fb1, tb1), min(fb2, tb2))
-
+        if sx1 < sx2:
+            ntf = linfn(max(ft1, tt1), max(ft2, tt2), sx1, sx2)
+            nbf = linfn(min(fb1, tb1), min(fb2, tb2), sx1, sx2)
+        else:
+            ntf = linfn(max(ft2, tt2), max(ft1, tt1), sx2, sx1)
+            nbf = linfn(min(fb2, tb2), min(fb1, tb1), sx2, sx1)
+        self.spans.fuse_seg(ntf, nbf, x_lo, x_hi,
+                            need_bt or bch > ch, need_bb or bfh < fh)
 
 # ---------------------------------------------------------------------------
 # Rasterisation (for comparison against the Z80 framebuffer)

@@ -5,7 +5,7 @@ const { run } = require("./bench.js");
 
 const BUCKETS = new Set(["mul_u8","mul_s8_u8","mul_s16_u8","divs","fpmul8","mul_s8_s8",
   "rns_ahl","rns_hl","rns3_ahl","rns8_ahl","ev_at","linfn","pw","pw_diff","sp_alive",
-  "sp_hasgap","sp_marksolid","sp_tighten","flush_edges","ct_span","ct_edge","queue_edge","sp_drawv","cross_col","cl_apply",
+  "sp_hasgap","sp_marksolid","sp_fuse","fu_ge","fu_line","fu_out","fu_okeep","fu_orun","fu_above","sp_begin","sp_commit","pw_diff","pw_evd","sp_emit_range","sp_emit_range2","flush_edges","ct_span","ct_edge","queue_edge","sp_drawv","cross_col","cl_apply",
   "cl_at","cl_clampx","cl_clampy","to_view","rot_sin","rot_cos","recip","project_x",
   "project_y","view_setup","build_prod","bbox_range","bb_edge","near_cross","vertex_get",
   "point_on_side","render_seg","render_seg_body","walk","sp_emit","sp_commit","cmp_s16",
@@ -71,7 +71,7 @@ const n = frames - 1;
 console.log(`profiled ${n} walkthrough frames, ${(grand / n / 1000).toFixed(0)}k T/frame\n`);
 console.log("routine            incl T/f   %      self T/f    calls/f   T/call");
 const rows = [...incl.entries()].sort((a, b) => b[1] - a[1]);
-for (const [k, v] of rows.slice(0, 24)) {
+for (const [k, v] of rows.slice(0, 34)) {
   const c = (calls.get(k) || 0) / n;
   console.log(`  ${k.padEnd(16)} ${(v / n).toFixed(0).padStart(8)} ${(100 * v / grand).toFixed(1).padStart(5)}%` +
               ` ${((self.get(k) || 0) / n).toFixed(0).padStart(9)}  ${c.toFixed(1).padStart(8)} ${(v / n / (c || 1)).toFixed(0).padStart(8)}`);

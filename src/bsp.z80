@@ -1273,9 +1273,8 @@ rsb_nbb0:
                 call    hdelta
                 call    project_y
                 ld      (sg_bt2),hl
-                ld      hl,(sg_bt1)
-                ld      de,(sg_bt2)
-                call    emit_edge
+                ld      a,1
+                ld      (sg_emitt),a
                 ld      a,(sg_ch)
                 call    hdelta
                 jp      m,rsb_botpart
@@ -1285,15 +1284,16 @@ rsb_nbb0:
                 call    emit_edge
                 jr      rsb_botpart
 rsb_nobt:
+                xor     a
+                ld      (sg_emitt),a
                 ld      a,(sg_ch)
                 ld      b,a
                 ld      a,(sg_bch)
                 sub     b
                 jp      m,rsb_botpart
                 jr      z,rsb_botpart
-                ld      hl,(sg_ft1)
-                ld      de,(sg_ft2)
-                call    emit_edge
+                ld      a,1
+                ld      (sg_emitt),a
 rsb_botpart:
                 ld      a,(sg_needbb)
                 or      a
@@ -1308,9 +1308,8 @@ rsb_botpart:
                 call    hdelta
                 call    project_y
                 ld      (sg_bb2),hl
-                ld      hl,(sg_bb1)
-                ld      de,(sg_bb2)
-                call    emit_edge
+                ld      a,1
+                ld      (sg_emitb),a
                 ld      a,(sg_fh)
                 call    hdelta
                 jp      p,rsb_verts
@@ -1319,15 +1318,16 @@ rsb_botpart:
                 call    emit_edge
                 jr      rsb_verts
 rsb_nobb:
+                xor     a
+                ld      (sg_emitb),a
                 ld      a,(sg_bfh)
                 ld      b,a
                 ld      a,(sg_fh)
                 sub     b
                 jp      m,rsb_verts
                 jr      z,rsb_verts
-                ld      hl,(sg_fb1)
-                ld      de,(sg_fb2)
-                call    emit_edge
+                ld      a,1
+                ld      (sg_emitb),a
 rsb_verts:
                 call    flush_edges
                 ; step-face verticals at each endpoint
@@ -1418,12 +1418,61 @@ rsb_tb_f:
                 ld      hl,(sg_fb2)
                 ld      (cl_yb2),hl
 rsb_tgo:
-                ld      hl,(sg_sx1)
-                ld      (cl_sx1),hl
-                ld      hl,(sg_sx2)
-                ld      (cl_sx2),hl
                 call    set_op_range
-                jp      sp_tighten
+                ld      hl,(sg_sx1)
+                ld      de,(sg_sx2)
+                call    cmp_s16
+                ld      a,0
+                jr      c,rsb_sw0
+                inc     a
+rsb_sw0:        ld      (sg_swap),a
+                ; the two armed lines are drawn by the fuse itself, after
+                ; every unarmed line has met the aperture they narrow
+                ld      hl,cl_yt1
+                ld      de,fu_tfn
+                call    rsb_armfn
+                ld      hl,cl_yb1
+                ld      de,fu_bfn
+                call    rsb_armfn
+                jp      sp_fuse
+
+; rsb_armfn : HL -> the pair (y at sx1, y at sx2), DE -> the fn buffer.
+rsb_armfn:
+                push    de
+                ld      a,(sg_swap)
+                or      a
+                jr      nz,rsb_af_s
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                inc     hl
+                ld      (cl_ly1),de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cl_ly2),de
+                ld      hl,(sg_sx1)
+                ld      (cl_lx1),hl
+                ld      hl,(sg_sx2)
+                ld      (cl_lx2),hl
+                jr      rsb_af_go
+rsb_af_s:
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                inc     hl
+                ld      (cl_ly2),de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cl_ly1),de
+                ld      hl,(sg_sx2)
+                ld      (cl_lx1),hl
+                ld      hl,(sg_sx1)
+                ld      (cl_lx2),hl
+rsb_af_go:
+                pop     hl
+                jp      linfn
 
 ; --- one-sided wall --------------------------------------------------------
 rsb_solid:
