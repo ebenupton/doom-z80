@@ -1810,7 +1810,7 @@ sp_drawv:
                 ; order y
                 ld      hl,(dl_y1)
                 ld      de,(dl_y2)
-                call    cmp_s16
+                CMP16F
                 jr      c,dv_ordered
                 jr      z,dv_ordered
                 ld      hl,(dl_y1)
@@ -1994,7 +1994,7 @@ fe_prepare:
                 jp      z,fe_clear
                 ld      hl,(sg_sx1)
                 ld      de,(sg_sx2)
-                call    cmp_s16
+                CMP16F
                 jr      c,fe_ord
                 ld      hl,(sg_sx2)
                 ld      (fe_x1),hl

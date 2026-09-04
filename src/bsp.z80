@@ -312,12 +312,12 @@ bb_s0:
                 ; --- where does the viewer sit relative to the box? -------
                 ld      hl,(pl_x)
                 ld      de,(bb_left)
-                call    cmp_s16
+                CMP16F
                 jr      c,bb_bx0
                 jr      z,bb_bx0                ; px <= left
                 ld      hl,(pl_x)
                 ld      de,(bb_right)
-                call    cmp_s16
+                CMP16F
                 ld      a,1
                 jr      c,bb_bxd                ; px < right
                 inc     a
@@ -326,11 +326,11 @@ bb_bx0:         xor     a
 bb_bxd:         ld      (bb_bx),a
                 ld      hl,(pl_y)
                 ld      de,(bb_top)
-                call    cmp_s16
+                CMP16F
                 jr      nc,bb_by0               ; py >= top
                 ld      hl,(pl_y)
                 ld      de,(bb_bot)
-                call    cmp_s16
+                CMP16F
                 ld      a,2
                 jr      c,bb_byd                ; py < bot
                 jr      z,bb_byd                ; py == bot
@@ -864,6 +864,8 @@ vertex_get:
                 cp      (hl)
                 ret     z
                 ld      (hl),a
+                push    hl
+                pop     ix                      ; IX = the entry
                 ; Miss this frame - but the rotation of this vertex is the
                 ; same for as long as the angle is, and the frame's whole
                 ; contribution is the ref term the transform adds last.  So a
@@ -871,7 +873,11 @@ vertex_get:
                 call    vx_slot
                 and     c
                 jr      z,vg_cold
-                call    vx_addr
+                ld      hl,(vg_idx)
+                add     hl,hl
+                add     hl,hl
+                ld      de,VXCACHE_BASE
+                add     hl,de
                 ld      e,(hl)
                 inc     hl
                 ld      d,(hl)
@@ -879,15 +885,17 @@ vertex_get:
                 push    hl
                 ld      hl,(vs_rx)
                 add     hl,de
-                ld      (tv_tvx),hl
+                ld      (ix+VC_TVX),l
+                ld      (ix+VC_TVX+1),h
                 pop     hl
                 ld      e,(hl)
                 inc     hl
                 ld      d,(hl)
                 ld      hl,(vs_ry)
                 add     hl,de
-                ld      (tv_tvy),hl
-                jp      vg_have
+                ld      (ix+VC_TVY),l
+                ld      (ix+VC_TVY+1),h
+                jp      vg_project
 vg_cold:
                 ld      a,(hl)
                 or      c
@@ -908,7 +916,6 @@ vg_cold:
                 ld      (tv_wy),de
                 ; to_view, inlined: one caller, and the call and return were
                 ; a fortieth of what the rotation itself costs
-                ; bx = rot_sin(wx) - rot_cos(wy)
                 ld      de,(tv_wx)
                 call    rot_sin
                 ld      (vs_acc),hl
@@ -917,11 +924,11 @@ vg_cold:
                 call    rot_cos
                 call    sub_pushed
                 call    rns3_ahl
+                ld      (ix+VC_TVX),l           ; L(w), before the ref term
+                ld      (ix+VC_TVX+1),h
                 ld      de,(vs_rx)
                 add     hl,de
                 ld      (tv_tvx),hl
-
-                ; by = rot_cos(wx) + rot_sin(wy)
                 ld      de,(tv_wx)
                 call    rot_cos
                 ld      (vs_acc),hl
@@ -930,67 +937,51 @@ vg_cold:
                 call    rot_sin
                 call    add_pushed
                 call    rns3_ahl
+                ld      (ix+VC_TVY),l
+                ld      (ix+VC_TVY+1),h
                 ld      de,(vs_ry)
                 add     hl,de
-                ld      (tv_tvy),hl
-
-                call    vx_addr
-                push    hl
-                ld      hl,(tv_tvx)
-                ld      de,(vs_rx)
-                or      a
-                sbc     hl,de
-                ex      de,hl
-                pop     hl
-                ld      (hl),e
-                inc     hl
-                ld      (hl),d
-                inc     hl
-                push    hl
-                ld      hl,(tv_tvy)
-                ld      de,(vs_ry)
-                or      a
-                sbc     hl,de
-                ex      de,hl
-                pop     hl
-                ld      (hl),e
-                inc     hl
-                ld      (hl),d
-vg_have:
-                ld      hl,(vc_ptr)
-                ld      de,VC_TVX
+                push    hl                      ; tvy
+                ; bank L(w) for the epoch, then finish the entry
+                ld      hl,(vg_idx)
+                add     hl,hl
+                add     hl,hl
+                ld      de,VXCACHE_BASE
                 add     hl,de
-                ld      de,(tv_tvx)
-                ld      (hl),e
+                ld      a,(ix+VC_TVX)
+                ld      (hl),a
                 inc     hl
-                ld      (hl),d
+                ld      a,(ix+VC_TVX+1)
+                ld      (hl),a
                 inc     hl
-                ld      de,(tv_tvy)
-                ld      (hl),e
+                ld      a,(ix+VC_TVY)
+                ld      (hl),a
                 inc     hl
-                ld      (hl),d
-                ; project when in front of the near plane
-                ld      hl,(tv_tvy)
-                ld      de,NEAR_VERDICT
-                call    cmp_s16
-                jr      nc,vg_front
-                ld      hl,0
-                jr      vg_store
-vg_front:
-                ld      hl,(tv_tvy)
-                call    recip
+                ld      a,(ix+VC_TVY+1)
+                ld      (hl),a
                 ld      hl,(tv_tvx)
-                call    project_x
-vg_store:
-                ex      de,hl
-                ld      hl,(vc_ptr)
-                ld      bc,VC_SX
-                add     hl,bc
-                ld      (hl),e
-                inc     hl
-                ld      (hl),d
+                ld      (ix+VC_TVX),l
+                ld      (ix+VC_TVX+1),h
+                pop     hl
+                ld      (ix+VC_TVY),l
+                ld      (ix+VC_TVY+1),h
+vg_project:
+                ; HL = tvy: project when in front of the near plane
+                call    rs_near
+                or      a
+                jr      z,vg_front
+                xor     a
+                ld      (ix+VC_SX),a
+                ld      (ix+VC_SX+1),a
                 ret
-
+vg_front:
+                call    recip
+                ld      l,(ix+VC_TVX)
+                ld      h,(ix+VC_TVX+1)
+                call    project_x
+                ld      (ix+VC_SX),l
+                ld      (ix+VC_SX+1),h
+                ret
 
 ; ---------------------------------------------------------------------------
 ; render_seg : HL = seg index.
@@ -1509,11 +1500,11 @@ rsb_tighten:
                 jr      z,rsb_tt_f
                 ld      hl,(sg_ft1)
                 ld      de,(sg_bt1)
-                call    max_hl_de
+                MAX16
                 ld      (cl_yt1),hl
                 ld      hl,(sg_ft2)
                 ld      de,(sg_bt2)
-                call    max_hl_de
+                MAX16
                 ld      (cl_yt2),hl
                 jr      rsb_tb
 rsb_tt_f:
@@ -1527,11 +1518,11 @@ rsb_tb:
                 jr      z,rsb_tb_f
                 ld      hl,(sg_fb1)
                 ld      de,(sg_bb1)
-                call    min_hl_de
+                MIN16
                 ld      (cl_yb1),hl
                 ld      hl,(sg_fb2)
                 ld      de,(sg_bb2)
-                call    min_hl_de
+                MIN16
                 ld      (cl_yb2),hl
                 jr      rsb_tgo
 rsb_tb_f:
@@ -1543,7 +1534,7 @@ rsb_tgo:
                 call    set_op_range
                 ld      hl,(sg_sx1)
                 ld      de,(sg_sx2)
-                call    cmp_s16
+                CMP16F
                 ld      a,0
                 jr      c,rsb_sw0
                 inc     a
@@ -1658,17 +1649,6 @@ set_op_range:
 ; emit_edge : HL = y at sx1, DE = y at sx2; clip and emit the sloped edge.
 emit_edge:
                 jp      queue_edge
-
-max_hl_de:
-                call    cmp_s16
-                ret     nc
-                ex      de,hl
-                ret
-min_hl_de:
-                call    cmp_s16
-                ret     c
-                ex      de,hl
-                ret
 
 ; ---------------------------------------------------------------------------
 ; DOOM's R_CheckBBox corner table, offsets pre-doubled into the bounds array

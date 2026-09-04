@@ -258,6 +258,46 @@ rh_fin:
 ; The Z80's SBC sets carry for an unsigned borrow, so the signed verdict is
 ; the sign flag corrected by overflow.
 ; ---------------------------------------------------------------------------
+; CMP16F : signed HL vs DE for the flags alone - carry when HL < DE, zero
+; when equal.  Flipping both sign bits turns it into the unsigned subtract,
+; so no overflow test and no call; HL, D and A are spent.
+                MACRO   CMP16F
+                ld      a,h
+                xor     $80
+                ld      h,a
+                ld      a,d
+                xor     $80
+                ld      d,a
+                or      a
+                sbc     hl,de
+                ENDM
+
+; MAX16 / MIN16 : HL = the signed max / min of HL and DE.
+                MACRO   MAX16
+                push    hl
+                or      a
+                sbc     hl,de
+                pop     hl
+                jp      pe,.ovf
+                jp      p,.done
+                jr      .take
+.ovf:           jp      m,.done
+.take:          ex      de,hl
+.done:
+                ENDM
+                MACRO   MIN16
+                push    hl
+                or      a
+                sbc     hl,de
+                pop     hl
+                jp      pe,.ovf
+                jp      m,.done
+                jr      .take
+.ovf:           jp      p,.done
+.take:          ex      de,hl
+.done:
+                ENDM
+
 cmp_s16:
                 push    hl
                 or      a
