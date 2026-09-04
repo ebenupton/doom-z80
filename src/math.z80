@@ -182,34 +182,60 @@ neg_ahl:
 ; taken a byte at a time.
 ; corrupts B, C, DE
 rns_ahl:
-                dec     b
-                jr      z,ra_fin
+                ; the shift count picks its entry in an unrolled chain for
+                ; the engine's range (the reciprocal's S is at most 10);
+                ; wider shifts take the byte-at-a-time loop
                 ld      c,a
-ra_b8:
+                ld      a,10
+                sub     b
+                jr      c,ra_slow
+                ld      b,a
+                add     a,a
+                add     a,b
+                add     a,a                     ; * 6 bytes a step
+                add     a,ra_chain & 255
+                ld      (ra_jp+1),a
+                ld      a,c
+ra_jp:          jp      ra_chain
+ra_slow:
                 ld      a,b
-                cp      8
-                jr      c,ra_bits
                 sub     8
                 ld      b,a
                 ld      l,h
                 ld      h,c
                 ld      a,c
                 rla
-                sbc     a,a
+                sbc     a,a                     ; A:HL >> 8
                 ld      c,a
                 ld      a,b
-                or      a
-                jr      nz,ra_b8
+                cp      11
+                jr      c,ra_fast               ; B is now in the chain's range
                 ld      a,c
-                jr      ra_fin
-ra_bits:
-                ld      a,c
-ra_loop:
+                jr      ra_slow
+ra_fast:        ld      a,c
+                jr      rns_ahl
+
+; rns_hl : HL = (HL + 1<<(B-1)) >> B, arithmetic, 16-bit.  B in 1..16.
+; corrupts A, B
+rns_hl:
+                ld      a,16
+                sub     b
+                add     a,a
+                add     a,a                     ; * 4 bytes a step
+                add     a,rh_chain & 255
+                ld      (rh_jp+1),a
+rh_jp:          jp      rh_chain
+
+                ; the chains, kept off a page boundary
+                IF      ($ & 255) > 256-80
+                ALIGN   256
+                ENDIF
+ra_chain:
+                DUP     9
                 sra     a
                 rr      h
                 rr      l
-                djnz    ra_loop
-ra_fin:
+                EDUP
                 ld      c,a
                 ld      de,1
                 add     hl,de
@@ -219,39 +245,20 @@ ra_fin:
                 rr      h
                 rr      l
                 ret
-
-; rns_hl : HL = (HL + 1<<(B-1)) >> B, arithmetic, 16-bit.  B in 1..16.
-; corrupts A, B
-rns_hl:
-                dec     b
-                jr      z,rh_fin
-rh_b8:
-                ld      a,b
-                cp      8
-                jr      c,rh_bits
-                sub     8
-                ld      b,a
-                ld      l,h
-                ld      a,h
-                rla
-                sbc     a,a
-                ld      h,a
-                ld      a,b
-                or      a
-                jr      nz,rh_b8
-                jr      rh_fin
-rh_bits:
-                or      a
-                jr      z,rh_fin
-rh_loop:
+                ASSERT  (ra_chain >> 8) == (($ - 1) >> 8), "ra_chain crosses a page"
+                IF      ($ & 255) > 256-70
+                ALIGN   256
+                ENDIF
+rh_chain:
+                DUP     15
                 sra     h
                 rr      l
-                djnz    rh_loop
-rh_fin:
+                EDUP
                 inc     hl
                 sra     h
                 rr      l
                 ret
+                ASSERT  (rh_chain >> 8) == (($ - 1) >> 8), "rh_chain crosses a page"
 
 ; ---------------------------------------------------------------------------
 ; cmp_s16 : carry set when HL < DE, signed.  HL and DE are preserved.

@@ -65,7 +65,7 @@ dv_ok:
                 ; against 75, over fewer bits.
                 ld      a,b
                 or      a
-                jr      nz,dv_wide
+                jp      nz,dv_wide
                 ld      a,d
                 or      a
                 jr      nz,dv_by3
@@ -109,19 +109,79 @@ dv_by3:
 ; div8b : one byte of dividend in L against the divisor in C, with the running
 ; remainder in A.  L comes back as the quotient byte, A as the new remainder.
 div8b:
-                ld      b,8
                 or      a
-db_lp:
                 rl      l
                 rla
-                jr      c,db_s
+                jr      c,db_s0
                 cp      c
-                jr      c,db_n
-db_s:           sub     c
+                ccf
+                jr      nc,db_n0
+db_s0:         sub     c
                 scf
-                jr      db_h
-db_n:           or      a
-db_h:           djnz    db_lp
+db_n0:
+                rl      l
+                rla
+                jr      c,db_s1
+                cp      c
+                ccf
+                jr      nc,db_n1
+db_s1:         sub     c
+                scf
+db_n1:
+                rl      l
+                rla
+                jr      c,db_s2
+                cp      c
+                ccf
+                jr      nc,db_n2
+db_s2:         sub     c
+                scf
+db_n2:
+                rl      l
+                rla
+                jr      c,db_s3
+                cp      c
+                ccf
+                jr      nc,db_n3
+db_s3:         sub     c
+                scf
+db_n3:
+                rl      l
+                rla
+                jr      c,db_s4
+                cp      c
+                ccf
+                jr      nc,db_n4
+db_s4:         sub     c
+                scf
+db_n4:
+                rl      l
+                rla
+                jr      c,db_s5
+                cp      c
+                ccf
+                jr      nc,db_n5
+db_s5:         sub     c
+                scf
+db_n5:
+                rl      l
+                rla
+                jr      c,db_s6
+                cp      c
+                ccf
+                jr      nc,db_n6
+db_s6:         sub     c
+                scf
+db_n6:
+                rl      l
+                rla
+                jr      c,db_s7
+                cp      c
+                ccf
+                jr      nc,db_n7
+db_s7:         sub     c
+                scf
+db_n7:
                 rl      l
                 ret
 
@@ -763,98 +823,85 @@ swb_l:
 ; in : B = lo, C = hi (already clamped to 0..255).  Carry set if a gap exists.
 ; ---------------------------------------------------------------------------
 sp_hasgap:
-                ld      a,b
-                ld      (hg_lo),a
-                ld      a,c
-                ld      (hg_hi),a
-                ld      hl,(sp_head)
+                ; B = lo, C = hi (bytes, lo <= hi): carry when some column
+                ; in [lo, hi] is still open.  IX walks the list.
+                ld      ix,(sp_head)
 hg_loop:
-                ld      a,h
-                or      l
-                jr      z,hg_none
-                ld      (cl_span),hl
-                ld      a,(hg_hi)
-                ld      c,a
-                ld      a,(hl)                  ; xlo
+                ld      a,ixh
+                or      ixl
+                ret     z                       ; end of the list, carry clear
+                ld      a,(ix+SP_XLO)
                 cp      c
                 jr      z,hg_over
-                jr      nc,hg_none              ; sorted: past the range
+                ret     nc                      ; sorted: past the range
 hg_over:
-                inc     hl
-                ld      a,(hg_lo)
-                ld      c,a
-                ld      a,(hl)                  ; xlast
-                cp      c
-                jr      c,hg_next
-                ; clamp the overlap to [max(xlo,lo), min(xlast,hi)]
-                ld      b,a                     ; B = xlast
-                ld      hl,(cl_span)
-                ld      a,(hl)
-                cp      c
+                ld      a,(ix+SP_XLAST)
+                cp      b
+                jr      c,hg_next               ; xlast < lo
+                ld      a,(ix+SP_OPEN)
+                or      a
+                jr      nz,hg_yes
+                ; the aperture is monotone, so its two ends decide it
+                ld      a,(ix+SP_XLO)
+                cp      b
                 jr      nc,hg_l1
-                ld      a,c
-hg_l1:          ld      (hg_clo),a
-                ld      a,(hg_hi)
-                ld      c,a
                 ld      a,b
+hg_l1:          ld      d,a                     ; D = max(xlo, lo)
+                ld      a,(ix+SP_XLAST)
                 cp      c
                 jr      c,hg_l2
                 ld      a,c
-hg_l2:          ld      (hg_chi),a
-                ; an aperture that is open at both ends of the span is open
-                ; right across it, so any overlap is a gap
-                ld      hl,(cl_span)
-                ld      de,SP_OPEN
-                add     hl,de
-                ld      a,(hl)
-                or      a
-                jr      nz,hg_yes
-                ld      a,(hg_clo)
+hg_l2:          ld      e,a                     ; E = min(xlast, hi)
+                push    bc
+                push    de
+                ld      a,d
                 call    hg_alive
+                pop     de
+                pop     bc
                 jr      c,hg_yes
-                ld      a,(hg_chi)
+                push    bc
+                ld      a,e
                 call    hg_alive
+                pop     bc
                 jr      c,hg_yes
 hg_next:
-                ld      hl,(cl_span)
-                ld      de,SP_NEXT
-                add     hl,de
-                ld      a,(hl)
-                inc     hl
-                ld      h,(hl)
-                ld      l,a
-                jp      hg_loop
-hg_none:
-                or      a
-                ret
+                ld      l,(ix+SP_NEXT)
+                ld      h,(ix+SP_NEXT+1)
+                push    hl
+                pop     ix
+                jr      hg_loop
 hg_yes:
                 scf
                 ret
 
-; hg_alive : carry set when column A of the span at cl_span is inside its
-; aperture.
+; hg_alive : IX = a span, A = a column -> carry when its top is above its
+; bottom there.
 hg_alive:
-                ld      (hg_col),a
-                ld      hl,(cl_span)
-                ld      de,SP_TA
-                add     hl,de
-                ld      a,(hg_col)
-                call    ev_at
-                ld      (hg_top),a
-                ld      hl,(cl_span)
-                ld      de,SP_BA
-                add     hl,de
-                ld      a,(hg_col)
-                call    ev_at
-                ld      hl,hg_top
-                cp      (hl)
-                jr      c,hg_a_no
-                jr      z,hg_a_no
-                scf
+                ld      e,a
+                push    ix
+                pop     hl
+                ld      bc,SP_TA
+                add     hl,bc
+                push    hl
+                push    de
+                ld      a,e
+                call    ev_at                   ; A = top
+                pop     de
+                pop     hl
+                ld      c,a
+                push    bc
+                inc     hl
+                inc     hl
+                inc     hl
+                inc     hl                      ; SP_BA
+                ld      a,e
+                call    ev_at                   ; A = bottom
+                pop     bc
+                ld      e,a
+                ld      a,c
+                cp      e                       ; carry: top < bottom
                 ret
-hg_a_no:
-                or      a
-                ret
+
 
 ; ---------------------------------------------------------------------------
 ; sp_marksolid : delete columns [cl_lo, cl_hi) from the span list.
