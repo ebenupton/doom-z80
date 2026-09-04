@@ -320,87 +320,168 @@ ph_last:
 ; ---------------------------------------------------------------------------
 ; plot_shallow : |dy| < dx.  C = x1, B = y1.
 ; ---------------------------------------------------------------------------
+; plot_shallow : |dy| < dx >= 1.  C = x1, B = y1.
+;
+; Eight copies of the pixel step, one per bit of the byte, so the mask is an
+; immediate in a SET and the byte pointer only moves once every eight pixels.
+; The read-modify-write and the rotate that cost 39 T-states between them
+; become one 15 T-state SET, and with the error in A rather than shuttled
+; through E the whole step is 37 T-states instead of 74.  Most of a wireframe
+; frame's sloped pixels come through here - 880 of them a frame against 21
+; for the steep path - and they are near-horizontal, so the scanline step the
+; unrolling makes dearer is paid about one time in six.
+; ---------------------------------------------------------------------------
 plot_shallow:
-                ld      a,(ln_dy)
-                ld      (psd_dy+1),a
-                ld      (psu_dy+1),a
-                ld      a,(ln_dx)
-                ld      (psd_dx+1),a
-                ld      (psu_dx+1),a
-                call    addr_of                 ; HL = byte, A = mask
-                ld      c,a
-                ld      a,(ln_dx)
-                ld      d,a
-                srl     a
-                ld      e,a                     ; E = err = dx >> 1
-                inc     d
-                ld      b,d                     ; B = dx + 1 pixels
+                ld      a,c
+                and     7
+                add     a,a
+                ld      l,a
+                ld      h,0
+                ld      de,PSJT
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (ps_go+1),de
+                ld      hl,ps_sl_d
                 ld      a,(ln_sy)
                 inc     a
-                jr      z,ps_loop_u
-; Two copies of the loop, one per vertical direction, with the scanline step
-; written out inline: a CALL/RET per pixel was costing more than the plot.
-ps_loop_d:
-                ld      a,(hl)
-                or      c
-                ld      (hl),a
-                dec     b
-                ret     z
-                rrc     c
-                jr      nc,psd_nox
-                inc     l
-psd_nox:
-                ld      a,e
-psd_dy:         sub     0
-                ld      e,a
-                jr      nc,ps_loop_d
-psd_dx:         add     a,0
-                ld      e,a
-                inc     h
+                jr      nz,ps_dsel
+                ld      hl,ps_sl_u
+ps_dsel:
+                ld      (ps_sl+1),hl
+                call    addr_of                 ; HL = byte, C and B consumed
                 ld      a,h
                 and     7
-                jr      nz,ps_loop_d
+                ld      c,a
+                ld      a,(ln_sy)
+                inc     a
+                jr      z,ps_cu
+                ld      a,8
+                sub     c
+                ld      c,a                     ; rows to the cell boundary
+                jr      ps_cd
+ps_cu:          inc     c
+ps_cd:
+                ld      a,(ln_dy)
+                ld      d,a
+                ld      a,(ln_dx)
+                ld      e,a
+                inc     a
+                ld      b,a                     ; B = dx + 1 pixels
+                ld      a,e
+                srl     a                       ; A = err = dx >> 1
+ps_go:          jp      0
+
+cp7:            set     7,(hl)
+                dec     b
+                jr      z,ps_ret
+                sub     d
+                jr      c,ys7
+cp6:            set     6,(hl)
+                dec     b
+                jr      z,ps_ret
+                sub     d
+                jr      c,ys6
+cp5:            set     5,(hl)
+                dec     b
+                jr      z,ps_ret
+                sub     d
+                jr      c,ys5
+cp4:            set     4,(hl)
+                dec     b
+                jr      z,ps_ret
+                sub     d
+                jr      c,ys4
+cp3:            set     3,(hl)
+                dec     b
+                jr      z,ps_ret
+                sub     d
+                jr      c,ys3
+cp2:            set     2,(hl)
+                dec     b
+                jr      z,ps_ret
+                sub     d
+                jr      c,ys2
+cp1:            set     1,(hl)
+                dec     b
+                jr      z,ps_ret
+                sub     d
+                jr      c,ys1
+cp0:            set     0,(hl)
+                dec     b
+                jr      z,ps_ret
+                sub     d
+                jr      c,ys0
+                inc     l
+                jp      cp7
+ps_ret:         ret
+
+ys7:            add     a,e
+                call    ps_sl
+                jp      cp6
+ys6:            add     a,e
+                call    ps_sl
+                jp      cp5
+ys5:            add     a,e
+                call    ps_sl
+                jp      cp4
+ys4:            add     a,e
+                call    ps_sl
+                jp      cp3
+ys3:            add     a,e
+                call    ps_sl
+                jp      cp2
+ys2:            add     a,e
+                call    ps_sl
+                jp      cp1
+ys1:            add     a,e
+                call    ps_sl
+                jp      cp0
+ys0:            add     a,e
+                call    ps_sl
+                inc     l
+                jp      cp7
+
+; ps_sl : one scanline, in whichever direction the line runs.  C counts the
+; rows left inside the character cell, so the cell-crossing fixup - the only
+; part that needs A - is paid once in eight.
+ps_sl:          jp      0
+ps_sl_d:
+                inc     h
+                dec     c
+                ret     nz
+                ld      c,8
+                ex      af,af'
                 ld      a,l
                 add     a,32
                 ld      l,a
-                jr      c,ps_loop_d
+                jr      c,psd_r
                 ld      a,h
                 sub     8
                 ld      h,a
-                jr      ps_loop_d
-ps_loop_u:
-                ld      a,(hl)
-                or      c
-                ld      (hl),a
-                dec     b
-                ret     z
-                rrc     c
-                jr      nc,psu_nox
-                inc     l
-psu_nox:
-                ld      a,e
-psu_dy:         sub     0
-                ld      e,a
-                jr      nc,ps_loop_u
-psu_dx:         add     a,0
-                ld      e,a
-                ld      a,h
-                and     7
-                jr      z,psu_up2
+psd_r:          ex      af,af'
+                ret
+ps_sl_u:
                 dec     h
-                jr      ps_loop_u
-psu_up2:
+                dec     c
+                ret     nz
+                ld      c,8
+                ex      af,af'
                 ld      a,h
-                add     a,7
+                add     a,8
                 ld      h,a
                 ld      a,l
                 sub     32
                 ld      l,a
-                jr      nc,ps_loop_u
+                jr      nc,psu_r
                 ld      a,h
                 sub     8
                 ld      h,a
-                jr      ps_loop_u
+psu_r:          ex      af,af'
+                ret
+
+PSJT:           DW      cp7, cp6, cp5, cp4, cp3, cp2, cp1, cp0
 
 ; ---------------------------------------------------------------------------
 ; plot_steep : |dy| >= dx >= 1.  C = x1, B = y1.

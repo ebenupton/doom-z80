@@ -198,13 +198,17 @@ def build(md):
         sx = 128.0 - 128.0 * math.tan(psi * 2 * math.pi / 65536)
         angtox[k] = max(0, min(255, int(round(sx))))
 
-    tables = bytearray(0x610)          # $8800..$8E0F
+    # Packed tight after the page-aligned pair: the atan and column tables
+    # are indexed with a 16-bit add, so only the reciprocal, sin and product
+    # planes need their own page - and the slack that bought paid for a page
+    # of code the engine had run out of.
+    tables = bytearray(0x585)          # $8800..$8D84
     tables[0x000:0x100] = recip_m8     # $8800
     tables[0x100:0x200] = recip_s      # $8900
     tables[0x200:0x241] = sin_mag      # $8A00
     tables[0x241:0x282] = sin_unity    # $8A41
-    tables[0x300:0x502] = atan         # $8B00
-    tables[0x510:0x611] = angtox       # $8D10
+    tables[0x282:0x484] = atan         # $8A82
+    tables[0x484:0x585] = angtox       # $8C84
 
     return b0, bytes(tables), bytes(nodebb)
 

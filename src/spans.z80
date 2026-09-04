@@ -1523,13 +1523,32 @@ fu_out:
                 ld      (fu_ax0),a
                 ld      a,d
                 ld      (fu_ax1),a
+                ; The inner extremes settle most apertures outright: an
+                ; inner top two rows clear of the inner bottom leaves the
+                ; piece open right across itself.  Two rows, because the
+                ; difference function and the two boundaries evaluated apart
+                ; each truncate their own shift and can disagree by one.
+                ld      a,(fu_o_ti)
+                inc     a
+                jr      z,fo_measure
+                ld      hl,fu_o_bi
+                cp      (hl)
+                jr      nc,fo_measure
+                ld      a,1
+                ld      (al_both),a
+                jr      fo_alive
+fo_measure:
                 ld      hl,(fu_otp)
                 ld      (tg_tp),hl
                 ld      hl,(fu_obp)
                 ld      (tg_bp),hl
-                ld      c,d
+                ld      a,(fu_ax0)
+                ld      b,a
+                ld      a,(fu_ax1)
+                ld      c,a
                 call    sp_alive
                 ret     nc
+fo_alive:
                 ld      a,(fu_stage)
                 or      a
                 jr      nz,fo_stage
