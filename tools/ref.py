@@ -587,6 +587,59 @@ def slope_t(num, den):
     return n // den
 
 
+# The bounding-box angles come from a log2 subtraction and one lookup rather
+# than a divide, as the BBC port does it:
+#
+#   ta(num, den) = ATANEXP[L(den) - L(num)]      (num < den)
+#   L(v) = L8[v] for v < 256, else L8[v >> 3] + 96 with the shifted-out
+#          half-bit averaging the two neighbouring entries
+#
+# ATANEXP[k] is the midpoint of the exact angle over the pairs that land in
+# bucket k, which minimises the worst-case bucket error; ANGEPS is that error,
+# and every box is widened by it.
+_L8 = [0] + [min(255, int(round(math.log2(v) * 32))) for v in range(1, 256)]
+
+
+def _lf(v):
+    if v < 256:
+        return _L8[v]
+    i = v >> 3
+    if (v & 4) and i < 255:
+        return ((_L8[i] + _L8[i + 1] + 1) >> 1) + 96
+    return _L8[i] + 96
+
+
+def _build_atanexp():
+    span = {}
+    for den in range(2, 2048):
+        for num in range(1, den):
+            k = min(255, max(0, _lf(den) - _lf(num)))
+            e = _ATAN[slope_t(num, den)]
+            lo, hi = span.get(k, (1 << 30, -1))
+            span[k] = (min(lo, e), max(hi, e))
+    out, eps, prev = [], 0, 8192
+    for k in range(256):
+        if k in span:
+            lo, hi = span[k]
+            a = (lo + hi) // 2
+            eps = max(eps, a - lo, hi - a)
+        else:
+            a = prev
+        prev = a
+        out.append(a)
+    return out, eps
+
+
+_ATANEXP, ANGEPS = _build_atanexp()
+
+
+def _ta(num, den):
+    """The angle for num/den (num <= den) through the log2 buckets."""
+    if num == 0:
+        return 0
+    return _ATANEXP[min(255, max(0, _lf(den) - _lf(num)))]
+
+
 def point_to_angle16(dx, dy):
     """atan2(dy, dx) as a 16-bit angle, folded through the first octant."""
     if dx == 0 and dy == 0:
@@ -594,21 +647,21 @@ def point_to_angle16(dx, dy):
     if dx >= 0:
         if dy >= 0:
             if dx > dy:
-                return _ATAN[slope_t(dy, dx)]
-            return 16384 - _ATAN[slope_t(dx, dy)]
+                return _ta(dy, dx)
+            return 16384 - _ta(dx, dy)
         dy = -dy
         if dx > dy:
-            return (-_ATAN[slope_t(dy, dx)]) & 0xffff
-        return (49152 + _ATAN[slope_t(dx, dy)]) & 0xffff
+            return (-_ta(dy, dx)) & 0xffff
+        return (49152 + _ta(dx, dy)) & 0xffff
     dx = -dx
     if dy >= 0:
         if dx > dy:
-            return 32768 - _ATAN[slope_t(dy, dx)]
-        return 16384 + _ATAN[slope_t(dx, dy)]
+            return 32768 - _ta(dy, dx)
+        return 16384 + _ta(dx, dy)
     dy = -dy
     if dx > dy:
-        return 32768 + _ATAN[slope_t(dy, dx)]
-    return 49152 - _ATAN[slope_t(dx, dy)]
+        return 32768 + _ta(dy, dx)
+    return 49152 - _ta(dx, dy)
 
 
 def silhouette(bb, px, py):
@@ -694,8 +747,10 @@ class Renderer:
         if sil is None:
             return 0, W - 1                     # viewpoint inside the box
         va = (self.ctx.ang << 8) & 0xffff
-        a1 = (point_to_angle16(sil[0][0] - px, sil[0][1] - py) - va) & 0xffff
-        a2 = (point_to_angle16(sil[1][0] - px, sil[1][1] - py) - va) & 0xffff
+        a1 = (point_to_angle16(sil[0][0] - px, sil[0][1] - py) - va
+              + ANGEPS) & 0xffff
+        a2 = (point_to_angle16(sil[1][0] - px, sil[1][1] - py) - va
+              - ANGEPS) & 0xffff
         span = (a1 - a2) & 0xffff
         if span >= 32768:
             return 0, W - 1                     # more than 180 degrees across

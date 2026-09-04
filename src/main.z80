@@ -18,7 +18,27 @@
                 include "spec.inc"
                 include "start.inc"
 
-                ORG     $8800
+; The row-address planes hold 160 entries in each of four pages, so each has
+; a 96-byte tail.  Bank 2 is the only bank that is always mapped and the
+; engine has long since filled it, so those tails carry code too.
+                ORG     ROWLO_A
+                DS      160, 0
+                include "spill1.z80"
+                ASSERT  $ <= ROWHI_A, "spill 1 overran the row plane"
+                DS      ROWHI_A-$, 0
+                DS      160, 0
+                include "spill2.z80"
+                ASSERT  $ <= ROWLO_B, "spill 2 overran the row plane"
+                DS      ROWLO_B-$, 0
+                DS      160, 0
+                include "spill3.z80"
+                ASSERT  $ <= ROWHI_B, "spill 3 overran the row plane"
+                DS      ROWHI_B-$, 0
+                DS      160, 0
+                include "spill4.z80"
+                ASSERT  $ <= $8800, "spill 4 overran the row plane"
+                DS      $8800-$, 0
+
                 INCBIN  "../build/tables.bin"
 
                 include "cold.z80"

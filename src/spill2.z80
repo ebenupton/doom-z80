@@ -1,0 +1,33 @@
+; --- spilled into the row-plane tail ---------------------------------------
+; vx_slot : HL -> this vertex's byte in the valid map, C = its bit, A = that
+; byte - so a hit is one AND and a miss one OR back.
+vx_slot:
+                ld      a,(vg_idx)
+                and     7
+                ld      e,a
+                ld      d,0
+                ld      hl,VXBIT
+                add     hl,de
+                ld      c,(hl)
+                ld      hl,(vg_idx)
+                srl     h
+                rr      l
+                srl     h
+                rr      l
+                srl     h
+                rr      l
+                ld      de,VXVALID
+                add     hl,de
+                ld      a,(hl)
+                ret
+
+; vx_addr : HL = this vertex's four bytes in the cache.
+vx_addr:
+                ld      hl,(vg_idx)
+                add     hl,hl
+                add     hl,hl
+                ld      de,VXCACHE_BASE
+                add     hl,de
+                ret
+
+VXBIT:          DB      1,2,4,8,16,32,64,128

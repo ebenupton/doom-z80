@@ -1,0 +1,38 @@
+; --- spilled into the row-plane tail ---------------------------------------
+; lf_log : HL = v (1..2047) -> HL = round(log2(v) * 32), the top three
+; octaves folded down by three with the shifted-out half-bit averaging the
+; two neighbouring entries.
+lf_log:
+                ld      a,h
+                or      a
+                jr      nz,lf_big
+                ld      h,L8TAB>>8
+                ld      l,(hl)
+                ld      h,0
+                ret
+lf_big:
+                srl     h
+                rr      l
+                srl     h
+                rr      l
+                srl     h
+                rr      l                       ; carry = the half bit
+                ld      h,L8TAB>>8
+                jr      nc,lf_flat
+                ld      a,l
+                inc     a
+                jr      z,lf_flat               ; no neighbour above 255
+                ld      a,(hl)
+                inc     l
+                add     a,(hl)
+                rra                             ; (a + b + 1) >> 1
+                adc     a,0
+                jr      lf_oct
+lf_flat:
+                ld      a,(hl)
+lf_oct:
+                ld      l,a
+                ld      h,0
+                ld      de,96
+                add     hl,de
+                ret

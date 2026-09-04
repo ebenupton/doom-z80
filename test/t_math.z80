@@ -1,5 +1,17 @@
                 DEVICE  ZXSPECTRUM128
                 include "spec.inc"
-                ORG     ORG_ADDR
+                ORG     ROWLO_A
+                DS      160, 0
+                include "spill1.z80"
+                DS      ROWHI_A-$, 0
+                DS      160, 0
+                include "spill2.z80"
+                DS      ROWLO_B-$, 0
+                DS      160, 0
+                include "spill3.z80"
+                DS      ROWHI_B-$, 0
+                DS      160, 0
+                include "spill4.z80"
+                DS      ORG_ADDR-$, 0
                 include "cold.z80"
                 include "math.z80"

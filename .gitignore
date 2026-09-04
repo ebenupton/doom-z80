@@ -6,3 +6,4 @@ build/frames.json
 build/screenshot.png
 data/DOOM1.WAD
 node_modules/
+tools/__pycache__/

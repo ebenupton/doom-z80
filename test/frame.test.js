@@ -8,6 +8,7 @@ const z = new ZHarness(R + 'test/t_view.z80');
 z.m.ram[0].set(fs.readFileSync(R + 'build/bank0.bin'), 0);
 z.pokeBytes(0x8800, fs.readFileSync(R + 'build/tables.bin'));
 z.m.ram[5].set(fs.readFileSync(R + 'build/nodebb.bin'), 0x6580 - 0x4000);
+z.m.ram[5].set(fs.readFileSync(R + 'build/l8.bin'), 0x6200 - 0x4000);
 z.m.applyPaging(0);              // bank 0 at $C000
 
 z.call('sq_init');

@@ -24,7 +24,8 @@ class ZHarness {
     this.sym = readSymbols(r.sym);
     this.m = new Spectrum128({ contention: opts.contention !== false });
     const data = fs.readFileSync(bin);
-    this.org = this.sym.get("ORG_ADDR");
+    this.org = this.sym.get("IMAGE_BASE");
+    if (this.org === undefined) this.org = this.sym.get("ORG_ADDR");
     if (this.org === undefined) this.org = 0x8400;
     for (let i = 0; i < data.length; i++) this.m.poke(this.org + i, data[i]);
     this.m.poke(SENTINEL, 0x76); // HALT

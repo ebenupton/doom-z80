@@ -371,6 +371,14 @@ bb_notin:
                 call    bb_corner_angle
                 ld      (bb_a2),hl
 
+                ld      hl,(bb_a1)              ; widen by the atanexp bucket
+                ld      de,ANGEPS               ; error, so the verdict is a
+                add     hl,de                   ; superset of the exact one
+                ld      (bb_a1),hl
+                ld      hl,(bb_a2)
+                ld      de,-ANGEPS
+                add     hl,de
+                ld      (bb_a2),hl
                 ld      de,(bb_a2)
                 ld      hl,(bb_a1)
                 or      a
@@ -585,6 +593,15 @@ cpm_miss:
                 ret
 
 ptoa:
+                ld      hl,(pa_dx)
+                ld      a,h
+                or      l
+                jr      nz,pa_go
+                ld      hl,(pa_dy)
+                ld      a,h
+                or      l
+                ret     z                       ; the corner is on the viewer
+pa_go:
                 xor     a
                 ld      (pa_oct),a
                 ld      hl,(pa_dx)
@@ -631,67 +648,45 @@ pa_dxgt:
                 ld      hl,(pa_dx)
                 ld      (pa_den),hl
 pa_norm:
-                ; Shift the divisor down into a byte and the numerator up by
-                ; the complement: full precision, and an eight-iteration
-                ; 16-by-8 divide.
-                ld      b,0
-                ld      hl,(pa_den)
-pn_l:
-                ld      a,h
-                or      a
-                jr      z,pn_done
-                srl     h
-                rr      l
-                inc     b
-                jr      pn_l
-pn_done:
-                ld      a,l
-                or      a
-                jr      z,pa_t256               ; both deltas were zero
-                ld      c,a                     ; C = divisor, 1..255
-                ld      a,8
-                sub     b
-                ld      b,a
+                ; The angle inside the octant is a log2 subtraction and one
+                ; lookup, not a divide: ta = ATANEXP[L(den) - L(num)].  The
+                ; bucket error is bounded, and bbox_range widens by it, so a
+                ; verdict can only ever be a superset of the exact one.
                 ld      hl,(pa_num)
-                or      a
-                jr      z,pn_noshl
-                cp      8                       ; the divisor is under 256 for
-                jr      nz,pn_shl               ; every corner in the map, so
-                ld      h,l                     ; this is the shift every time
-                ld      l,0
-                jr      pn_noshl
-pn_shl:
-                add     hl,hl
-                djnz    pn_shl
-pn_noshl:
                 ld      a,h
-                cp      c
-                jr      nc,pa_t256              ; quotient would reach 256
-                ld      b,8
-                or      a                       ; clear carry into the quotient
-pa_dl:
-                rl      l
-                rla
-                jr      c,pa_ds
-                cp      c
-                jr      c,pa_dn
-pa_ds:          sub     c
-                scf
-                jr      pa_dsh
-pa_dn:          or      a
-pa_dsh:         djnz    pa_dl
-                rl      l
+                or      l
+                jr      z,pa_zero
+                call    lf_log
+                ld      (pa_lnum),hl
+                ld      hl,(pa_den)
+                call    lf_log
+                ld      de,(pa_lnum)
+                or      a
+                sbc     hl,de
+                bit     7,h
+                jr      z,pa_kpos
+                ld      hl,0                    ; rounding jitter near num=den
+pa_kpos:
+                ld      a,h
+                or      a
+                jr      z,pa_kok
+                ld      l,255                   ; far-ratio tail
+pa_kok:
                 ld      h,0
-                jr      pa_look
-pa_t256:
-                ld      hl,256
-pa_look:
                 add     hl,hl
-                ld      de,ATANTAB
+                ld      de,ATANEXP
                 add     hl,de
-                ld      e,(hl)
+                ld      a,(hl)
                 inc     hl
-                ld      d,(hl)                  ; DE = the first-octant angle
+                ld      h,(hl)
+                ld      l,a
+                jp      pa_comb
+pa_zero:
+                ld      hl,0
+                jp      pa_comb
+
+pa_comb:
+                ex      de,hl                   ; DE = the first-octant angle
                 ld      a,(pa_oct)
                 ld      l,a
                 ld      h,0
@@ -969,38 +964,6 @@ vg_store:
                 ld      (hl),d
                 ret
 
-; vx_slot : HL -> this vertex's byte in the valid map, C = its bit, A = that
-; byte - so a hit is one AND and a miss one OR back.
-vx_slot:
-                ld      a,(vg_idx)
-                and     7
-                ld      e,a
-                ld      d,0
-                ld      hl,VXBIT
-                add     hl,de
-                ld      c,(hl)
-                ld      hl,(vg_idx)
-                srl     h
-                rr      l
-                srl     h
-                rr      l
-                srl     h
-                rr      l
-                ld      de,VXVALID
-                add     hl,de
-                ld      a,(hl)
-                ret
-
-; vx_addr : HL = this vertex's four bytes in the cache.
-vx_addr:
-                ld      hl,(vg_idx)
-                add     hl,hl
-                add     hl,hl
-                ld      de,VXCACHE_BASE
-                add     hl,de
-                ret
-
-VXBIT:          DB      1,2,4,8,16,32,64,128
 
 ; ---------------------------------------------------------------------------
 ; render_seg : HL = seg index.

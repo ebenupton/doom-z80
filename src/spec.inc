@@ -62,6 +62,8 @@ DLIST_END       EQU     DLIST_BASE + DLIST_MAX*4             ; $6200
 
 DLIST_END_PAGE  EQU     DLIST_END>>8
 
+L8TAB           EQU     $6200           ; 256 x u8: round(log2(v) * 32)
+
 ; project_y is a pure function of (h, M8, S), so a memo on the whole tuple
 ; survives frames and positions and a hit is bit-identical to the body by
 ; construction.  Direct-mapped, probed on h ^ M8, five parallel planes so the
@@ -105,8 +107,8 @@ RECIP_M8        EQU     $8800           ; normalised reciprocal mantissa - 256
 RECIP_S         EQU     $8900           ; its binade, (idx-1).bit_length()
 SIN_MAG         EQU     $8A00           ; 65 entries, one quadrant, 0.8 unsigned
 SIN_UNITY       EQU     $8A41           ; 65 flags: |sin| rounds up to 1.0
-ATANTAB         EQU     $8A82           ; 257 x u16: atan(t/256) as a 16-bit angle
-ANGTOX          EQU     $8C84           ; 257 x u8: screen column for a view angle
+ATANEXP         EQU     $8A82           ; 256 x u16: the angle for a log2 bucket
+ANGTOX          EQU     $8C82           ; 257 x u8: screen column for a view angle
 ; per-frame products i*sin_mag and i*cos_mag, as byte planes
 TSLO            EQU     $8E00
 TSHI            EQU     $8F00
@@ -122,7 +124,14 @@ CODE_BASE       EQU     $9200
 Y_BIAS          EQU     48
 
 CLIPANGLE       EQU     8192            ; 45 degrees in 16-bit angle units
+
+; Worst-case error of the log2/atanexp angle, in the same units.  Every
+; bounding box is widened by it, which makes each visibility verdict a
+; superset of the exact one - so the approximation costs culling, never
+; geometry.
+ANGEPS          EQU     195
 ORG_ADDR        EQU     CODE_BASE
+IMAGE_BASE      EQU     ROWLO_A         ; the assembled image starts here
 
 ; The span pool lives in bank 2 rather than with the other scratch: it is the
 ; hottest data in the clipper and bank 2 is uncontended.  The live spans are a
@@ -443,6 +452,7 @@ pa_dy           EQU     VARS_BASE+564
 pa_num          EQU     VARS_BASE+566
 pa_den          EQU     VARS_BASE+568
 pa_oct          EQU     VARS_BASE+570
+pa_lnum         EQU     VARS_BASE+750
 bb_a1           EQU     VARS_BASE+572
 bb_a2           EQU     VARS_BASE+574
 bb_span         EQU     VARS_BASE+576

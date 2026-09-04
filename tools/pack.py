@@ -187,11 +187,17 @@ def build(md):
     # ATAN[t] = atan(t/256) as a 16-bit angle (65536 = 360 degrees), so the
     # first octant maps onto 0..8192.  ANGTOX[k] is the screen column for the
     # view-relative angle (k<<6) - 8192, i.e. sx = 128 - 128*tan(psi).
-    atan = bytearray(257 * 2)
-    for t in range(257):
-        a = int(round(math.atan(t / 256.0) * 65536 / (2 * math.pi)))
-        atan[t * 2] = a & 0xff
-        atan[t * 2 + 1] = (a >> 8) & 0xff
+    # The angle within an octant comes from a log2 subtraction rather than a
+    # divide, as the BBC port does it.  ref.py owns the derivation - one
+    # source for the tables the engine and the reference both consume.
+    l8 = bytearray(ref._L8)
+    atan = bytearray(256 * 2)
+    for k, a in enumerate(ref._ATANEXP):
+        atan[k * 2] = a & 0xff
+        atan[k * 2 + 1] = (a >> 8) & 0xff
+    print(f"  atanexp:     EPSILON {ref.ANGEPS} angle units "
+          f"({ref.ANGEPS * 360 / 65536:.2f} degrees)")
+
     angtox = bytearray(257)
     for k in range(257):
         psi = (k << 6) - 8192
@@ -202,20 +208,20 @@ def build(md):
     # are indexed with a 16-bit add, so only the reciprocal, sin and product
     # planes need their own page - and the slack that bought paid for a page
     # of code the engine had run out of.
-    tables = bytearray(0x585)          # $8800..$8D84
+    tables = bytearray(0x583)          # $8800..$8D82
     tables[0x000:0x100] = recip_m8     # $8800
     tables[0x100:0x200] = recip_s      # $8900
     tables[0x200:0x241] = sin_mag      # $8A00
     tables[0x241:0x282] = sin_unity    # $8A41
-    tables[0x282:0x484] = atan         # $8A82
-    tables[0x484:0x585] = angtox       # $8C84
+    tables[0x282:0x482] = atan         # $8A82  ATANEXP
+    tables[0x482:0x583] = angtox       # $8C82
 
-    return b0, bytes(tables), bytes(nodebb)
+    return b0, bytes(tables), bytes(nodebb), bytes(l8)
 
 
 def main():
     md = ref.load_from_reference()
-    b0, tables, nodebb = build(md)
+    b0, tables, nodebb, l8 = build(md)
     outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build")
     os.makedirs(outdir, exist_ok=True)
 
@@ -226,6 +232,8 @@ def main():
         f.write(tables)
     with open(os.path.join(outdir, "nodebb.bin"), "wb") as f:
         f.write(nodebb)
+    with open(os.path.join(outdir, "l8.bin"), "wb") as f:
+        f.write(l8)
 
     sx, sy, sa, eye = md.start
     meta = {

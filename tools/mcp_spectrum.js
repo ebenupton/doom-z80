@@ -50,7 +50,8 @@ const TOOLS = {
       const m = freshMachine({ contention: args.contention !== false });
       m.ram[0].set(fs.readFileSync(path.join(ROOT, "build/bank0.bin")), 0);
       m.ram[5].set(fs.readFileSync(path.join(ROOT, "build/nodebb.bin")), 0x6580 - 0x4000);
-      m.ram[2].set(fs.readFileSync(path.join(ROOT, "build/doom.bin")), 0x8800 - 0x8000);
+      m.ram[5].set(fs.readFileSync(path.join(ROOT, "build/l8.bin")), 0x6200 - 0x4000);
+      m.ram[2].set(fs.readFileSync(path.join(ROOT, "build/doom.bin")), 0x8400 - 0x8000);
       const st = m.cpu.getState();
       st.pc = symbols.get("START");
       st.sp = 0xbff0;
