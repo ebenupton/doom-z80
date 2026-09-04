@@ -30,7 +30,7 @@ tap: data
 
 test: data
 	$(PY) tools/genvec.py
-	NFRAMES=200 $(PY) tools/genframes.py
+	NFRAMES=1000 $(PY) tools/genframes.py
 	$(NODE) test/math.test.js
 	$(NODE) test/raster.test.js
 	$(NODE) test/view.test.js
