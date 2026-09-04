@@ -90,18 +90,31 @@ a linear top and bottom boundary:
 span = [xlo, xlast]   top(x) = ta·x + tb,  bot(x) = ba·x + bb
 ```
 
-One-sided walls `mark_solid` their columns away; portals `tighten`, taking the
-pointwise max of the old and new tops and the min of the bottoms, splitting a
-span wherever those cross. A frame holds a few dozen spans rather than the
-per-column arrays DOOM uses. Lines are Cyrus-Beck clipped against each span
-they cross.
+A frame holds a handful of spans rather than the per-column arrays DOOM uses:
+three on average, ten at the worst viewpoint in the corpus.
 
-Two things make this affordable. Piecewise comparisons run on the *difference*
-function `f − g`, so parallel boundaries — which includes the very common
-both-flat case — need no multiply at all, and a crossover is one divide rather
-than a search. And the parametric clipper skips a divide outright whenever the
-result provably cannot bind: `p > 0 ∧ q ≥ p` means `t ≥ 256`, and `p < 0 ∧ q > 0`
-means `t ≤ 0`. That took division from 12% of the frame to 6%.
+Drawing and occlusion are the same pass. A boundary line that was drawn is,
+by construction, inside the aperture on every column it lit — so on those
+columns `max(old_top, line)` *is* the line, and the tighten is a copy rather
+than a piecewise maximum with a crossover search. Columns where the line ran
+past the far boundary close; columns where it never reached the near one keep
+what they had. One walk of the span list therefore clips the seg's edges,
+emits them, and narrows the aperture behind them, with the bottom line meeting
+whatever the top line left. One-sided walls take the same walk and end it with
+`mark_solid` instead.
+
+Clipping is done in column space, not parametrically. A line is reduced once
+to `y(x) = ((A·x) >> 8) + B`, and each span's two boundaries are evaluated at
+the two ends of the overlap — once per span, shared by every edge of the seg.
+Evaluating boundaries directly rather than as differences from the line keeps
+the flat-boundary short circuit, which over a third of them take, and leaves
+the exact aperture in hand so the endpoint clamp costs nothing extra. A divide
+is reached only when the two ends disagree and a crossing has to be found.
+
+Each span also records whether its aperture is open at both ends. The aperture
+is linear, so that means open right across the span, and `has_gap` — the most
+called query in the traversal — answers from the flag without evaluating
+either boundary.
 
 ## Rasterisation
 
@@ -131,8 +144,12 @@ unconditionally and only the far child pays a bounding-box test. Testing the
 near box as well — which the BBC port does — prunes under 7% of subtrees here
 while doubling the culling cost; dropping it took 19% off the frame.
 
-Bounding boxes are stored quantised to quarter-prescale bytes, so the
-reference quantises them identically and the two agree by construction. Each
+Visibility is decided in angle space, as DOOM does it: the two silhouette
+corners of the box go through `R_PointToAngle` (octant fold, one 16-by-8
+divide, `ATANTAB`), the span is clipped to the ±45° field of view, and
+`ANGTOX` maps the surviving angles to columns. Bounding boxes are stored
+quantised to quarter-prescale bytes, so the reference quantises them
+identically and the two agree by construction. Each
 corner in front of the near plane is projected exactly once (the obvious
 edge-walk projects every corner twice), and a straddling edge contributes its
 near-plane crossing.
@@ -174,25 +191,44 @@ saturated rather than allowed to wrap, for the same reason: a column at
 
 ## Speed
 
-Honest numbers, measured on the emulator with ULA contention modelled:
+Honest numbers, measured on the emulator with ULA contention modelled, over
+the tracked 109-frame walkthrough of E1M1:
 
 | | T-states/frame | fps |
 |---|---|---|
-| looking at a near wall | 214k | 16.6 |
-| typical interior | ~900k | 3.9 |
-| the start view (long corridor) | 2.6M | 1.35 |
-| average over a 109-frame walkthrough | 1.89M | 1.9 |
+| best frame (facing a near wall) | 142k | 24.9 |
+| median | 1.06M | 3.3 |
+| mean | 1.12M | 3.2 |
+| worst frame (the long start corridor) | 1.92M | 1.9 |
 
-Optimisation so far has taken the average frame from 4.29M to 2.60M T-states
-(‑39%) over a fixed 200-viewpoint corpus, and 1.84M to 0.96M (‑48%) over the
-angle sweep at the level start. The profile is now flat — no routine is above 9% — which is
-usually the sign that the remaining wins are structural rather than local.
+The tracked comparison is against the BBC port's own recorded baseline: the
+same 18 viewpoints, its 6502 cycles beside these T-states, with parity meaning
+T ≤ cycles × 1.773 (3.5469MHz against 2MHz). Both figures cover the same work
+— traversal, clipping and line drawing, but not the screen clear, which sits
+outside the BBC harness's counted region too.
 
-The BBC port reaches 7fps on a 2MHz 6502, and the gap is not the CPU: it uses
-angle-space bounding-box culling (zero multiplies, `SlopeDiv` plus
-`tantoangle`) where this port projects corners, plus rotation- and
-translation-coherence caches across frames. Those are the next things to
-build, and between them they are worth most of the difference.
+| | 6502 cycles / Z80 T | fps |
+|---|---|---|
+| BBC Micro port | 2,956,217 | 12.2 |
+| this port | 16,471,988 | 3.9 |
+
+That is 3.14× off parity, from 3.72× when the engine first ran. What has come
+out since: the fused draw-and-tighten walk, span-major clipping, angle-space
+bounding-box culling, and the flat-aperture short circuit in `has_gap`.
+
+The profile is flat — no routine is above 8% — which is the usual sign that
+what remains is structural. The three that look worth the most:
+
+- **8-bit biased screen space.** The BBC port pre-clips lines to the screen in
+  s16 and then does every span comparison on `u8` values biased by 48. Here
+  everything downstream is `s16`, and signed 16-bit comparison alone is 5% of
+  the frame.
+- **A linked span pool.** Every occlusion update rebuilds the whole array into
+  a second pool and swaps; a linked list would let a split touch two spans and
+  leave the rest alone.
+- **Rotation- and translation-coherence caches.** The BBC port caches the
+  bounding-box angle test across frames while the view is coherent; the two
+  `R_PointToAngle` calls per node are 5% of the frame here.
 
 ## The toolchain
 
@@ -221,7 +257,7 @@ engine you cannot finish.
 | `src/spec.inc` | memory map: banks, tables, every variable |
 | `src/math.z80` | quarter-square multiply, signed helpers, `rns`, `cmp_s16` |
 | `src/view.z80` | trig, per-frame product tables, view transform, projection |
-| `src/spans.z80` | division, trapezoid spans, piecewise min/max, Cyrus-Beck |
+| `src/spans.z80` | division, trapezoid spans, the fused draw-and-tighten walk |
 | `src/bsp.z80` | traversal, bbox culling, seg pipeline |
 | `src/raster.z80` | display-list rasteriser, row tables, buffer clear |
 | `src/main.z80` | boot, frame loop, paging, input, movement |

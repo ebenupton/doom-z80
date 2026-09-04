@@ -7,6 +7,8 @@ const { assemble, readSymbols } = require("./zbuild.js");
 const { Spectrum128, TSTATES_PER_FRAME } = require("./spectrum.js");
 const ROOT = path.resolve(__dirname, "..");
 const RATIO = 3546900 / 2000000;
+// The BBC baseline counts its own line drawing inside render_frame (only the
+// screen clear sits outside), so the rasteriser has to be in this figure too.
 
 const base = JSON.parse(fs.readFileSync(process.env.DOOM_BBC_REF || "/tmp/doom_bbc_ref" +
                                         "/baseline.json", "utf8")).cycles;
@@ -46,6 +48,16 @@ for (const f of frames) {
   m.poke(0xbff8, 0x76); m.poke(0xbfee, 0xf8); m.poke(0xbfef, 0xbf);
   const t0 = m.tstates;
   for (;;) { m.step(); if (m.cpu.getState().halted) break; }
+  // rasterise the display list into the spare screen bank
+  m.applyPaging(0x17);
+  for (const [entry, a] of [[S.get("raster_select"), 1], [S.get("dl_render"), 0]]) {
+    const s3 = m.cpu.getState();
+    s3.pc = entry; s3.a = a; s3.sp = 0xbfee; s3.halted = false;
+    m.cpu.setState(s3);
+    m.poke(0xbfee, 0xf8); m.poke(0xbfef, 0xbf);
+    for (;;) { m.step(); if (m.cpu.getState().halted) break; }
+  }
+  m.applyPaging(0x10);
   const t = m.tstates - t0;
   const c = base[f.key];
   sumC += c; sumT += t;
