@@ -514,7 +514,43 @@ rp_ok:
 ;   sy = 80 - rns(h*M8 + (h << 8), S)
 ; ---------------------------------------------------------------------------
 project_y:
+                ; The whole input tuple is the key, so an entry survives
+                ; frames and positions and a hit is the body's own answer by
+                ; construction.  A live reciprocal never has S = 0, so the S
+                ; plane doubles as the valid flag and nothing needs clearing.
                 ld      (py_h),a
+                ld      hl,rc_m8
+                xor     (hl)
+                and     127
+                ld      (py_idx),a
+                ld      c,a
+                or      128
+                ld      b,a
+                ld      h,VYC_M8>>8
+                ld      l,b
+                ld      a,(rc_m8)
+                cp      (hl)
+                jr      nz,py_miss
+                ld      h,VYC_S>>8
+                ld      l,c
+                ld      a,(rc_s)
+                cp      (hl)
+                jr      nz,py_miss
+                ld      h,VYC_H>>8
+                ld      l,c
+                ld      a,(py_h)
+                cp      (hl)
+                jr      nz,py_miss
+                ld      h,VYC_L>>8
+                ld      l,b
+                ld      e,(hl)
+                ld      h,VYC_HI>>8
+                ld      l,c
+                ld      d,(hl)
+                ex      de,hl
+                ret
+py_miss:
+                ld      a,(py_h)
                 ld      h,a
                 ld      a,(rc_m8)
                 ld      l,a
@@ -530,6 +566,30 @@ project_y:
                 ld      hl,HALF_H
                 or      a
                 sbc     hl,de
+                ld      (py_res),hl
+                ld      a,(py_idx)
+                ld      c,a
+                or      128
+                ld      b,a
+                ld      h,VYC_H>>8
+                ld      l,c
+                ld      a,(py_h)
+                ld      (hl),a
+                ld      h,VYC_M8>>8
+                ld      l,b
+                ld      a,(rc_m8)
+                ld      (hl),a
+                ld      h,VYC_L>>8
+                ld      a,(py_res)
+                ld      (hl),a
+                ld      h,VYC_HI>>8
+                ld      l,c
+                ld      a,(py_res+1)
+                ld      (hl),a
+                ld      h,VYC_S>>8
+                ld      a,(rc_s)
+                ld      (hl),a                  ; last: it is the valid flag
+                ld      hl,(py_res)
                 ret
 
 ; ---------------------------------------------------------------------------

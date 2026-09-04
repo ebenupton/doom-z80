@@ -16,7 +16,7 @@ const sym = readSymbols(r.sym);
 
 const m = new Spectrum128({ contention: flag("--contention", "1") !== "0" });
 m.ram[0].set(fs.readFileSync(path.join(ROOT, "build/bank0.bin")), 0);
-m.ram[5].set(fs.readFileSync(path.join(ROOT, "build/nodebb.bin")), 0x6408 - 0x4000);
+m.ram[5].set(fs.readFileSync(path.join(ROOT, "build/nodebb.bin")), 0x6580 - 0x4000);
 const img = fs.readFileSync(path.join(ROOT, "build/doom.bin"));
 m.ram[2].set(img, 0x8800 - 0x8000);
 

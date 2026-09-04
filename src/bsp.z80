@@ -855,9 +855,13 @@ d168_n:
 ; ---------------------------------------------------------------------------
 vertex_get:
                 ld      (vg_idx),hl
+                ld      d,h
+                ld      e,l
                 add     hl,hl
                 add     hl,hl
                 add     hl,hl
+                or      a
+                sbc     hl,de                   ; seven bytes an entry
                 ld      de,VCACHE_BASE
                 add     hl,de
                 ld      (vc_ptr),hl

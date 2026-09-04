@@ -198,73 +198,6 @@ dv_sat:
                 jr      dv_sign_apply
 
 ; ---------------------------------------------------------------------------
-; fpmul8 : HL = (DE * HL) >> 8, both signed 16-bit, truncated to s16.
-;   (a*b)>>8 = 256*(ahi*bhi) + ahi*blo + alo*bhi + (alo*blo >> 8)
-; ---------------------------------------------------------------------------
-fpmul8:
-                ld      (fm_a),de
-                ld      (fm_b),hl
-                ld      h,e
-                ld      a,(fm_b)
-                ld      l,a
-                call    mul_u8                  ; alo * blo
-                ld      l,h
-                ld      h,0
-                ld      (fm_acc),hl
-                ld      a,(fm_a+1)
-                ld      h,a
-                ld      a,(fm_b)
-                ld      l,a
-                call    mul_s8_u8               ; ahi * blo
-                ld      de,(fm_acc)
-                add     hl,de
-                ld      (fm_acc),hl
-                ld      a,(fm_b+1)
-                ld      h,a
-                ld      a,(fm_a)
-                ld      l,a
-                call    mul_s8_u8               ; bhi * alo
-                ld      de,(fm_acc)
-                add     hl,de
-                ld      (fm_acc),hl
-                ld      a,(fm_a+1)
-                ld      h,a
-                ld      a,(fm_b+1)
-                ld      l,a
-                call    mul_s8_s8               ; ahi * bhi (low byte only)
-                ld      a,l
-                ld      hl,(fm_acc)
-                add     a,h
-                ld      h,a
-                ret
-
-; mul_s8_s8 : HL = (signed H) * (signed L)
-mul_s8_s8:
-                ld      a,l
-                ld      (fm_t),a
-                ld      a,h
-                ld      (fm_t+1),a
-                call    mul_u8
-                ld      a,(fm_t+1)
-                bit     7,a
-                jr      z,ms8_1
-                ld      a,(fm_t)
-                ld      d,a
-                ld      a,h
-                sub     d
-                ld      h,a
-ms8_1:
-                ld      a,(fm_t)
-                bit     7,a
-                ret     z
-                ld      a,(fm_t+1)
-                ld      d,a
-                ld      a,h
-                sub     d
-                ld      h,a
-                ret
-
-; ---------------------------------------------------------------------------
 ; ev_at : HL = pointer to (slope s16, intercept s16), A = column 0..255
 ;         -> A = y, biased by Y_BIAS and clamped to a byte.
 ;
@@ -462,8 +395,23 @@ lf_narrow:
                 call    lf_mulcol
                 jr      lf_haveprod
 lf_wide:
+                ; An anchor column outside a byte: (slope*x)>>8 splits into
+                ; slope*xh + ((slope*xl)>>8), both 16-by-8.  E1M1 never gets
+                ; here - linfn anchors on whichever endpoint is nearer the
+                ; screen - so it costs nothing to spend two calls on it.
+                push    hl
                 ld      de,(lf_slope_v)
-                call    fpmul8                  ; HL = (slope * x) >> 8
+                ld      a,l
+                call    mul_s16_u8
+                ld      l,h
+                ld      h,a
+                ld      (lf_wtmp),hl
+                pop     hl
+                ld      de,(lf_slope_v)
+                ld      a,h
+                call    mul_s16_u8_signed
+                ld      de,(lf_wtmp)
+                add     hl,de
 lf_haveprod:
                 ex      de,hl
                 ld      hl,(lf_y)

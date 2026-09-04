@@ -57,12 +57,23 @@ CPM_BASE        EQU     $5B00           ; 32 x (dx, dy, angle, valid, pad)
 CPM_VALID       EQU     6
 
 DLIST_BASE      EQU     $5C00           ; display list: 4 bytes per segment
-DLIST_MAX       EQU     512
-DLIST_END       EQU     DLIST_BASE + DLIST_MAX*4             ; $6400
+DLIST_MAX       EQU     384                                  ; worst of 1000 is 318
+DLIST_END       EQU     DLIST_BASE + DLIST_MAX*4             ; $6200
 
 DLIST_END_PAGE  EQU     DLIST_END>>8
 
-NODEBB          EQU     $6408           ; dl_emit may write one slot past the end           ; 195 x 8 quarter-prescale bounds
+; project_y is a pure function of (h, M8, S), so a memo on the whole tuple
+; survives frames and positions and a hit is bit-identical to the body by
+; construction.  Direct-mapped, probed on h ^ M8, five parallel planes so the
+; index is one byte; S is never 0 on a live reciprocal, so it doubles as the
+; valid flag and the map needs no clearing.
+VYC_H           EQU     $6300           ; 128 entries
+VYC_M8          EQU     $6380
+VYC_S           EQU     $6400
+VYC_L           EQU     $6480
+VYC_HI          EQU     $6500
+
+NODEBB          EQU     $6580           ; 195 x 8 quarter-prescale bounds           ; 195 x 8 quarter-prescale bounds
 
 NVERTS          EQU     455
 
@@ -72,16 +83,16 @@ NVERTS          EQU     455
 ; exactly the vs_rx / vs_ry the transform adds last.  L(w) is stored once per
 ; vertex per angle epoch and every warm read is two adds; an angle change is
 ; the only thing that can invalidate it, and it wipes the whole valid map.
-VXCACHE_BASE    EQU     $6A20           ; NVERTS x 4, indexed by vertex
-VXVALID         EQU     $7140           ; one bit per vertex
+VXCACHE_BASE    EQU     $6BA0           ; NVERTS x 4, indexed by vertex
+VXVALID         EQU     $72C0           ; one bit per vertex
 VXVALID_LEN     EQU     (NVERTS+7)/8
 
-VCACHE_BASE     EQU     $7180           ; NVERTS x 8, indexed by vertex
-VCACHE_ENT      EQU     8
+VCACHE_BASE     EQU     $7300           ; NVERTS x 7, indexed by vertex
+VCACHE_ENT      EQU     7
 VC_STAMP        EQU     0               ; frame generation; 0 = empty
-VC_TVX          EQU     2               ; view-space counts, s16
-VC_TVY          EQU     4
-VC_SX           EQU     6               ; projected screen column, s16
+VC_TVX          EQU     1               ; view-space counts, s16
+VC_TVY          EQU     3
+VC_SX           EQU     5               ; projected screen column, s16
 
 ; --- bank 2 ($8000-$BFFF): code and hot tables -----------------------------
 SQ_LO           EQU     $8000           ; quarter-square f(n)=n*n/4, low bytes
@@ -118,7 +129,7 @@ ORG_ADDR        EQU     CODE_BASE
 ; sorted singly-linked list and the unused slots a free chain, so an occlusion
 ; update edits the spans it touches and leaves the rest where they are - there
 ; is no second pool and nothing to swap.
-SPANS_BASE      EQU     $BA4A
+SPANS_BASE      EQU     $BA44
 SPANS_MAX       EQU     24              ; measured peak is 10
 SPAN_SIZE       EQU     16
 SLOT_SIZE       EQU     18
@@ -199,6 +210,8 @@ vs_t1           EQU     VARS_BASE+72
 vs_t2           EQU     VARS_BASE+74
 vs_acc          EQU     VARS_BASE+76    ; 3 bytes
 py_h            EQU     VARS_BASE+80
+py_idx          EQU     VARS_BASE+85
+py_res          EQU     VARS_BASE+86
 px_frac         EQU     VARS_BASE+81
 px_vx           EQU     VARS_BASE+82
 px_m8           EQU     VARS_BASE+83
@@ -509,6 +522,7 @@ ct_have         EQU     VARS_BASE+730
 fu_hv           EQU     VARS_BASE+731   ; ct_*0 hold this span's boundaries   ; the walk supplied the boundary values
 fu_pb           EQU     VARS_BASE+732   ; 3 x (x0, x1, fns, extremes)
 lf_absx         EQU     VARS_BASE+550
+lf_wtmp         EQU     VARS_BASE+88
 ds_cx1          EQU     VARS_BASE+551
 ds_cx2          EQU     VARS_BASE+552
 ct_col          EQU     VARS_BASE+553
