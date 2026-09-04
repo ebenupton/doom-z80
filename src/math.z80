@@ -261,6 +261,19 @@ rh_fin:
 ; CMP16F : signed HL vs DE for the flags alone - carry when HL < DE, zero
 ; when equal.  Flipping both sign bits turns it into the unsigned subtract,
 ; so no overflow test and no call; HL, D and A are spent.
+; BB_DELTA : A = a quarter-prescale bound byte -> HL = 4*A - BC, with the
+; flags of the subtraction (bbox_range classifies the viewer from them).
+                MACRO   BB_DELTA
+                ld      l,a
+                rla
+                sbc     a,a
+                ld      h,a
+                add     hl,hl
+                add     hl,hl
+                or      a
+                sbc     hl,bc
+                ENDM
+
                 MACRO   CMP16F
                 ld      a,h
                 xor     $80

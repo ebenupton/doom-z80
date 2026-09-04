@@ -279,158 +279,129 @@ bbox_range:
                 sbc     hl,de                   ; nid * 16
                 srl     h
                 rr      l                       ; nid * 8
-                ld      de,NODEBB
-                add     hl,de
                 ld      a,(bsp_side)
                 or      a
                 jr      z,bb_s0
-                ld      de,4
-                add     hl,de
-bb_s0:
-                ld      a,(hl)
-                inc     hl
+                ld      de,NODEBB+4
+                jr      bb_s1
+bb_s0:          ld      de,NODEBB
+bb_s1:          add     hl,de
                 push    hl
-                call    sx4
-                ld      (bb_top),hl
-                pop     hl
-                ld      a,(hl)
-                inc     hl
-                push    hl
-                call    sx4
-                ld      (bb_bot),hl
-                pop     hl
-                ld      a,(hl)
-                inc     hl
-                push    hl
-                call    sx4
-                ld      (bb_left),hl
-                pop     hl
-                ld      a,(hl)
-                call    sx4
-                ld      (bb_right),hl
+                pop     ix                      ; IX -> top, bottom, left, right
 
-                ; --- where does the viewer sit relative to the box? -------
-                ld      hl,(pl_x)
-                ld      de,(bb_left)
-                CMP16F
-                jr      c,bb_bx0
-                jr      z,bb_bx0                ; px <= left
-                ld      hl,(pl_x)
-                ld      de,(bb_right)
-                CMP16F
-                ld      a,1
-                jr      c,bb_bxd                ; px < right
-                inc     a
-                jr      bb_bxd
-bb_bx0:         xor     a
-bb_bxd:         ld      (bb_bx),a
-                ld      hl,(pl_y)
-                ld      de,(bb_top)
-                CMP16F
-                jr      nc,bb_by0               ; py >= top
-                ld      hl,(pl_y)
-                ld      de,(bb_bot)
-                CMP16F
-                ld      a,2
-                jr      c,bb_byd                ; py < bot
-                jr      z,bb_byd                ; py == bot
-                dec     a                       ; py > bot
+                ; --- the bounds go straight to viewer-relative deltas: the
+                ; position test wants their signs, and the corner angles
+                ; want the deltas themselves.  Each pair is taken with the
+                ; deciding bound last, so its flags are the ones still live.
+                ld      bc,(pl_y)
+                ld      a,(ix+1)
+                BB_DELTA
+                ld      (bb_bot),hl
+                ld      e,2                     ; py <= bottom
+                jp      p,bb_by1
+                ld      e,1                     ; between the two
+bb_by1:         ld      a,(ix+0)
+                BB_DELTA
+                ld      (bb_top),hl
+                jr      z,bb_by0
+                jp      m,bb_by0
                 jr      bb_byd
-bb_by0:         xor     a
+bb_by0:         ld      e,0                     ; py >= top
 bb_byd:
+                ld      bc,(pl_x)
+                ld      a,(ix+3)
+                BB_DELTA
+                ld      (bb_right),hl
+                ld      d,2                     ; px >= right
+                jr      z,bb_bx1
+                jp      m,bb_bx1
+                ld      d,1
+bb_bx1:         ld      a,(ix+2)
+                BB_DELTA
+                ld      (bb_left),hl
+                jp      m,bb_bxd
+                ld      d,0                     ; px <= left
+bb_bxd:
+                ld      a,e
                 add     a,a
                 add     a,a
-                ld      b,a
-                ld      a,(bb_bx)
-                add     a,b                     ; boxpos = by*4 + bx
+                add     a,d                     ; boxpos = by*4 + bx
                 cp      5
-                jr      nz,bb_notin
-                ; viewpoint inside the box: it spans the whole screen
-                xor     a
-                ld      (bb_lo),a
-                ld      a,RENDER_W-1
-                ld      (bb_hi),a
-                scf
-                ret
-bb_notin:
+                jp      z,bb_full               ; the viewer is inside the box
                 add     a,a
                 add     a,a                     ; * 4 bytes per entry
                 ld      e,a
                 ld      d,0
                 ld      hl,CHECKCOORD
                 add     hl,de
-                ld      (bb_cc),hl
 
-                ; --- angles of the two extremes -------------------------
-                ld      hl,(bb_cc)
+                ; --- angles of the two extremes, widened by the atanexp
+                ; bucket error so the verdict is a superset of the exact one
+                push    hl
                 call    bb_corner_angle
-                ld      (bb_a1),hl
-                ld      hl,(bb_cc)
+                ld      de,ANGEPS
+                add     hl,de
+                ex      (sp),hl                 ; a1 down, the table pointer up
                 inc     hl
                 inc     hl
                 call    bb_corner_angle
-                ld      (bb_a2),hl
-
-                ld      hl,(bb_a1)              ; widen by the atanexp bucket
-                ld      de,ANGEPS               ; error, so the verdict is a
-                add     hl,de                   ; superset of the exact one
-                ld      (bb_a1),hl
-                ld      hl,(bb_a2)
                 ld      de,-ANGEPS
                 add     hl,de
-                ld      (bb_a2),hl
-                ld      de,(bb_a2)
-                ld      hl,(bb_a1)
+                ex      de,hl                   ; DE = a2
+                pop     hl                      ; HL = a1
+                push    de
+                push    hl
                 or      a
-                sbc     hl,de
-                ld      (bb_span),hl
-                bit     7,h
-                jp      nz,bb_full              ; more than 180 degrees across
+                sbc     hl,de                   ; the span
+                jp      m,bb_full2              ; more than 180 degrees across
+                ld      b,h
+                ld      c,l                     ; BC = span
 
-                ; clip the left edge to the field of view
-                ld      hl,(bb_a1)
+                ; clip the left edge to the field of view; u = angle + CLIP
+                ; is the form the column lookup wants anyway
+                pop     hl
                 ld      de,CLIPANGLE
                 add     hl,de
-                ld      de,2*CLIPANGLE
-                or      a
-                sbc     hl,de
-                jr      c,bb_c1ok
+                ex      de,hl                   ; DE = u1
+                ld      hl,-2*CLIPANGLE
+                add     hl,de
+                jr      nc,bb_c1ok              ; u1 < 2*CLIP: inside
+                ld      a,h
+                or      l
                 jr      z,bb_c1ok
-                ld      de,(bb_span)            ; HL = tspan - 2*CLIP
                 or      a
-                sbc     hl,de
-                jp      nc,bb_invisible
-                ld      hl,CLIPANGLE
-                ld      (bb_a1),hl
+                sbc     hl,bc
+                jr      nc,bb_invisible1
+                ld      de,2*CLIPANGLE
 bb_c1ok:
-                ; clip the right edge
-                ld      hl,CLIPANGLE
-                ld      de,(bb_a2)
+                ; and the right edge
+                pop     hl                      ; a2
+                push    de                      ; u1
+                ld      de,CLIPANGLE
+                add     hl,de
+                ex      de,hl                   ; DE = u2
+                ld      hl,2*CLIPANGLE
                 or      a
-                sbc     hl,de
+                sbc     hl,de                   ; CLIP - a2
+                push    de
                 ld      de,2*CLIPANGLE
                 or      a
                 sbc     hl,de
+                pop     de
                 jr      c,bb_c2ok
                 jr      z,bb_c2ok
-                ld      de,(bb_span)
                 or      a
-                sbc     hl,de
-                jp      nc,bb_invisible
-                ld      hl,-CLIPANGLE
-                ld      (bb_a2),hl
+                sbc     hl,bc
+                jr      nc,bb_invisible1
+                ld      de,0
 bb_c2ok:
-                ld      hl,(bb_a1)
-                call    bb_angtox               ; the lookup uses B as a counter
-                ld      (bb_sx1),a
-                ld      hl,(bb_a2)
                 call    bb_angtox
                 ld      c,a
-                ld      a,(bb_sx1)
+                pop     de
+                call    bb_angtox
                 ld      b,a
                 ; order, then widen a column each side to absorb the table's
                 ; quantisation - the range may only ever be too wide
-                ld      a,b
                 cp      c
                 jr      c,bb_ord
                 ld      a,c
@@ -449,6 +420,9 @@ bb_lo0:         ld      (bb_lo),a
 bb_hi0:         ld      (bb_hi),a
                 scf
                 ret
+bb_full2:
+                pop     hl
+                pop     hl
 bb_full:
                 xor     a
                 ld      (bb_lo),a
@@ -456,66 +430,42 @@ bb_full:
                 ld      (bb_hi),a
                 scf
                 ret
-bb_invisible:
+bb_invisible1:
+                pop     hl
                 or      a
                 ret
 
-; sx4 : HL = A sign-extended, multiplied by four (bounds are stored in
-; quarter-prescale bytes).
-sx4:
-                ld      l,a
-                rla
-                sbc     a,a
-                ld      h,a
-                add     hl,hl
-                add     hl,hl
-                ret
-
-; bb_angtox : HL = view-relative angle -> A = screen column
+; bb_angtox : DE = view-relative angle + CLIPANGLE, 0..2*CLIPANGLE -> A =
+; the screen column.  The shift by six is a shift up by two read a byte
+; high, with the carry catching the 257th entry.
 bb_angtox:
-                ld      de,CLIPANGLE
-                add     hl,de
-                ld      b,6
-ba_sh:          srl     h
-                rr      l
-                djnz    ba_sh
-                ld      de,ANGTOX
+                ex      de,hl
+                add     hl,hl
+                add     hl,hl
+                ld      l,h
+                ld      h,0
+                jr      nc,ba_lo
+                inc     h
+ba_lo:          ld      de,ANGTOX
                 add     hl,de
                 ld      a,(hl)
                 ret
 
-; bb_corner_angle : HL -> a CHECKCOORD pair; returns the corner's angle
-; relative to the view direction.
+; bb_corner_angle : HL -> a CHECKCOORD pair, the low bytes of the corner's
+; two deltas; returns the corner's angle relative to the view direction.
 bb_corner_angle:
                 ld      a,(hl)
                 inc     hl
-                ld      c,(hl)
-                push    bc
+                ld      l,(hl)
+                ld      h,bb_top>>8
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)                  ; DE = dy
                 ld      l,a
-                ld      h,0
-                ld      de,bb_top
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      hl,(pl_x)
-                ex      de,hl
-                or      a
-                sbc     hl,de
-                ld      (pa_dx),hl
-                pop     bc
-                ld      l,c
-                ld      h,0
-                ld      de,bb_top
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      hl,(pl_y)
-                ex      de,hl
-                or      a
-                sbc     hl,de
-                ld      (pa_dy),hl
+                ld      a,(hl)
+                inc     l
+                ld      h,(hl)
+                ld      l,a                     ; HL = dx
                 call    ptoa_memo
                 ld      a,(pl_ang)
                 ld      d,a
@@ -525,144 +475,136 @@ bb_corner_angle:
                 ret
 
 ; ---------------------------------------------------------------------------
-; ptoa : (pa_dx, pa_dy) -> HL = 16-bit angle, atan2 folded through the first
-; octant.  No multiplies: one 8-bit divide and a table lookup.
-; ---------------------------------------------------------------------------
-; ---------------------------------------------------------------------------
-; ptoa_memo : the corner angle, from the memo when this delta pair has been
-; through before.  R_PointToAngle is a pure function of the pair, so an entry
-; can never go stale - and sibling boxes, and a box and its parent, keep
-; handing the same corners back.
+; ptoa_memo : HL = dx, DE = dy -> HL = the corner's angle, from the memo when
+; this delta pair has been through before.  R_PointToAngle is a pure
+; function of the pair, so an entry can never go stale - and sibling boxes,
+; and a box and its parent, keep handing the same corners back.
 ; ---------------------------------------------------------------------------
 ptoa_memo:
-                ld      a,(pa_dx)
-                ld      hl,pa_dy
-                xor     (hl)
+                ld      a,l
+                xor     e
                 and     31
                 add     a,a
                 add     a,a
                 add     a,a
-                ld      l,a                     ; a page-aligned table, so the
-                ld      h,CPM_BASE>>8           ; slot is one shift chain
-                ld      (cpm_p),hl
-                ld      de,(pa_dx)
-                ld      a,e
-                cp      (hl)
+                ld      c,a                     ; a page-aligned table, so the
+                ld      b,CPM_BASE>>8           ; slot is one shift chain
+                ld      a,(bc)
+                cp      l
                 jr      nz,cpm_miss
-                inc     l
-                ld      a,d
-                cp      (hl)
+                inc     c
+                ld      a,(bc)
+                cp      h
                 jr      nz,cpm_miss
-                inc     l
-                ld      de,(pa_dy)
-                ld      a,e
-                cp      (hl)
+                inc     c
+                ld      a,(bc)
+                cp      e
                 jr      nz,cpm_miss
-                inc     l
-                ld      a,d
-                cp      (hl)
+                inc     c
+                ld      a,(bc)
+                cp      d
                 jr      nz,cpm_miss
-                ld      a,CPM_VALID-3
-                add     a,l
-                ld      l,a
-                ld      a,(hl)
+                ld      a,c
+                add     a,CPM_VALID-3
+                ld      c,a
+                ld      a,(bc)
                 or      a
                 jr      z,cpm_miss
-                dec     l
-                ld      d,(hl)
-                dec     l
-                ld      e,(hl)
-                ex      de,hl
+                dec     c
+                ld      a,(bc)
+                ld      h,a
+                dec     c
+                ld      a,(bc)
+                ld      l,a
                 ret
 cpm_miss:
-                ld      hl,pa_dx                ; bank the raw pair: ptoa folds
-                ld      de,(cpm_p)              ; it in place
-                ld      bc,4
-                ldir
+                ld      a,c
+                and     $f8
+                ld      c,a                     ; back to the slot's start
+                ld      a,l
+                ld      (bc),a
+                inc     c
+                ld      a,h
+                ld      (bc),a
+                inc     c
+                ld      a,e
+                ld      (bc),a
+                inc     c
+                ld      a,d
+                ld      (bc),a
+                inc     c
+                push    bc
                 call    ptoa
-                ex      de,hl
-                ld      hl,(cpm_p)
-                ld      bc,4
-                add     hl,bc
-                ld      (hl),e
-                inc     hl
-                ld      (hl),d
-                inc     hl
-                ld      (hl),1
-                ex      de,hl
+                pop     bc
+                ld      a,l
+                ld      (bc),a
+                inc     c
+                ld      a,h
+                ld      (bc),a
+                inc     c
+                ld      a,1
+                ld      (bc),a
                 ret
 
+; ---------------------------------------------------------------------------
+; ptoa : HL = dx, DE = dy -> HL = 16-bit angle, atan2 folded through the
+; first octant.  No multiplies and no divide: the angle inside the octant is
+; a log2 subtraction and one lookup, ta = ATANEXP[L(den) - L(num)].  The
+; bucket error is bounded, and bbox_range widens by it, so a verdict can
+; only ever be a superset of the exact one.
+; ---------------------------------------------------------------------------
 ptoa:
-                ld      hl,(pa_dx)
+                ld      c,0                     ; the octant
+                bit     7,h
+                jr      z,pa_xp
+                xor     a
+                sub     l
+                ld      l,a
+                sbc     a,a
+                sub     h
+                ld      h,a
+                ld      c,4
+pa_xp:          bit     7,d
+                jr      z,pa_yp
+                xor     a
+                sub     e
+                ld      e,a
+                sbc     a,a
+                sub     d
+                ld      d,a
+                set     1,c
+pa_yp:          ; HL = |dx|, DE = |dy|
                 ld      a,h
                 or      l
                 jr      nz,pa_go
-                ld      hl,(pa_dy)
-                ld      a,h
-                or      l
+                ld      a,d
+                or      e
                 ret     z                       ; the corner is on the viewer
 pa_go:
-                xor     a
-                ld      (pa_oct),a
-                ld      hl,(pa_dx)
-                bit     7,h
-                jr      z,pa_xp
-                ex      de,hl
-                ld      hl,0
+                push    hl
                 or      a
                 sbc     hl,de
-                ld      (pa_dx),hl
-                ld      a,4
-                ld      (pa_oct),a
-pa_xp:
-                ld      hl,(pa_dy)
-                bit     7,h
-                jr      z,pa_yp
-                ex      de,hl
-                ld      hl,0
-                or      a
-                sbc     hl,de
-                ld      (pa_dy),hl
-                ld      a,(pa_oct)
-                or      2
-                ld      (pa_oct),a
-pa_yp:
-                ld      hl,(pa_dx)
-                ld      de,(pa_dy)
-                or      a
-                sbc     hl,de
+                pop     hl
                 jr      z,pa_dyge
                 jr      nc,pa_dxgt
 pa_dyge:
-                ld      hl,(pa_dx)
-                ld      (pa_num),hl
-                ld      hl,(pa_dy)
-                ld      (pa_den),hl
-                ld      a,(pa_oct)
-                or      1
-                ld      (pa_oct),a
-                jr      pa_norm
+                inc     c                       ; the octant is even here
+                jr      pa_norm                 ; num = dx, den = dy
 pa_dxgt:
-                ld      hl,(pa_dy)
-                ld      (pa_num),hl
-                ld      hl,(pa_dx)
-                ld      (pa_den),hl
+                ex      de,hl                   ; num = dy, den = dx
 pa_norm:
-                ; The angle inside the octant is a log2 subtraction and one
-                ; lookup, not a divide: ta = ATANEXP[L(den) - L(num)].  The
-                ; bucket error is bounded, and bbox_range widens by it, so a
-                ; verdict can only ever be a superset of the exact one.
-                ld      hl,(pa_num)
                 ld      a,h
                 or      l
                 jr      z,pa_zero
+                push    de
                 call    lf_log
-                ld      (pa_lnum),hl
-                ld      hl,(pa_den)
+                pop     de
+                push    hl
+                ex      de,hl
                 call    lf_log
-                ld      de,(pa_lnum)
+                pop     de
                 or      a
-                sbc     hl,de
+                sbc     hl,de                   ; L(den) - L(num)
                 bit     7,h
                 jr      z,pa_kpos
                 ld      hl,0                    ; rounding jitter near num=den
@@ -680,20 +622,15 @@ pa_kok:
                 inc     hl
                 ld      h,(hl)
                 ld      l,a
-                jp      pa_comb
+                jr      pa_comb
 pa_zero:
                 ld      hl,0
-                jp      pa_comb
-
 pa_comb:
                 ex      de,hl                   ; DE = the first-octant angle
-                ld      a,(pa_oct)
-                ld      l,a
+                ld      l,c
                 ld      h,0
                 add     hl,hl
-                ld      b,0
-                ld      c,a
-                add     hl,bc                   ; octant * 3
+                add     hl,hl                   ; octant * 4
                 ld      bc,OCTTAB
                 add     hl,bc
                 ld      c,(hl)
@@ -708,33 +645,28 @@ pa_comb:
                 add     hl,de
                 ret
 pa_neg:
-                or      a
                 sbc     hl,de
                 ret
 
-; Per-octant base angle and whether the first-octant value is subtracted.
 OCTTAB:
                 DW      0
-                DB      0
+                DB      0,0
                 DW      16384
-                DB      1
+                DB      1,0
                 DW      0
-                DB      1
+                DB      1,0
                 DW      49152
-                DB      0
+                DB      0,0
                 DW      32768
-                DB      1
+                DB      1,0
                 DW      16384
-                DB      0
+                DB      0,0
                 DW      32768
-                DB      0
+                DB      0,0
                 DW      49152
-                DB      1
+                DB      1,0
 
-; ---------------------------------------------------------------------------
-; near_cross : crossing of the near plane by the segment from (cr_vx1, cr_vy1)
-; - the clipped endpoint - toward (cr_vx2, cr_vy2).  Carry set, bb_cx = cx.
-; ---------------------------------------------------------------------------
+
 near_cross:
                 ld      hl,(cr_vy2)
                 ld      de,(cr_vy1)
@@ -1655,18 +1587,19 @@ emit_edge:
                 jp      queue_edge
 
 ; ---------------------------------------------------------------------------
-; DOOM's R_CheckBBox corner table, offsets pre-doubled into the bounds array
-; (top = 0, bottom = 2, left = 4, right = 6).  Entry 5 is "viewpoint inside".
+; DOOM's R_CheckBBox corner table, each corner named by the low address
+; bytes of its x delta and its y delta (top, bottom, left, right lie in one
+; page).  Entry 5 is "viewpoint inside".
 ; ---------------------------------------------------------------------------
 CHECKCOORD:
-                DB      6,0,4,2
-                DB      6,0,4,0
-                DB      6,2,4,0
-                DB      0,0,0,0
-                DB      4,0,4,2
-                DB      0,0,0,0
-                DB      6,2,6,0
-                DB      0,0,0,0
-                DB      4,0,6,2
-                DB      4,2,6,2
-                DB      4,2,6,0
+                DB      (bb_top+6)&255,(bb_top+0)&255,(bb_top+4)&255,(bb_top+2)&255
+                DB      (bb_top+6)&255,(bb_top+0)&255,(bb_top+4)&255,(bb_top+0)&255
+                DB      (bb_top+6)&255,(bb_top+2)&255,(bb_top+4)&255,(bb_top+0)&255
+                DB      (bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255
+                DB      (bb_top+4)&255,(bb_top+0)&255,(bb_top+4)&255,(bb_top+2)&255
+                DB      (bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255
+                DB      (bb_top+6)&255,(bb_top+2)&255,(bb_top+6)&255,(bb_top+0)&255
+                DB      (bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255
+                DB      (bb_top+4)&255,(bb_top+0)&255,(bb_top+6)&255,(bb_top+2)&255
+                DB      (bb_top+4)&255,(bb_top+2)&255,(bb_top+6)&255,(bb_top+2)&255
+                DB      (bb_top+4)&255,(bb_top+2)&255,(bb_top+6)&255,(bb_top+0)&255

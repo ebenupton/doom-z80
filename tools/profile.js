@@ -10,7 +10,7 @@ const BUCKETS = new Set(["mul_u8","mul_s8_u8","mul_s16_u8","divs","fpmul8","mul_
   "project_y","view_setup","build_prod","bbox_range","bb_edge","near_cross","vertex_get",
   "point_on_side","render_seg","rs_visible","rs_havex","rs_bf_x0","rs_bf_y0","render_seg_body","rsb_p2","rsb_tighten","rsb_solid","walk","sp_emit","sp_commit","cmp_s16",
   "sincos_lookup","div16_8","dl_emit","dl_render","plot_line","raster_clear","sp_reset",
-  "ptoa","ptoa_memo","bb_corner_angle","bb_angtox","sx4","walk_child","walk_ss","emit_edge","mul_u8","plot_vert","addr_of","find_eye_height","update_world_pos","view_setup"]);
+  "ptoa","ptoa_memo","bb_corner_angle","bb_angtox","walk_child","walk_ss","emit_edge","mul_u8","plot_vert","addr_of","find_eye_height","update_world_pos","view_setup"]);
 
 const { sym, m } = run(1);   // build + boot once
 const bucketAddr = new Map();
