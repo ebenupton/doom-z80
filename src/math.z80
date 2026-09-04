@@ -1,0 +1,302 @@
+; ---------------------------------------------------------------------------
+; Fixed-point primitives.
+;
+; The only multiply primitive is an 8x8 -> 16 quarter-square lookup:
+;
+;       a*b = f(a+b) - f(|a-b|),   f(n) = floor(n*n/4)
+;
+; which is exact for all unsigned bytes because a+b and a-b share parity.
+; Two 512-entry byte planes hold f: SQ_LO and SQ_HI, page aligned so the
+; 9-bit sum index costs one ADC on the page byte.
+; ---------------------------------------------------------------------------
+
+; --- build the quarter-square tables ---------------------------------------
+; f(0) = 0 and f(n) - f(n-1) = n>>1, so the whole table is one running add.
+sq_init:
+                ld      hl,0                    ; f(n)
+                ld      bc,SQ_LO                ; write pointer
+                ld      de,0                    ; n
+sq2_loop:
+                ld      a,l
+                ld      (bc),a
+                inc     b
+                inc     b
+                ld      a,h
+                ld      (bc),a
+                dec     b
+                dec     b
+                inc     bc
+                inc     de                      ; n
+                push    de
+                srl     d
+                rr      e                       ; DE = n>>1
+                add     hl,de                   ; f(n) = f(n-1) + (n>>1)
+                pop     de
+                ld      a,d
+                cp      2
+                jr      nz,sq2_loop
+                ret
+
+; ---------------------------------------------------------------------------
+; mul_u8 : HL = H * L   (unsigned 8x8 -> 16)
+; corrupts A, BC, DE
+; ~139 T-states including CALL/RET.
+; ---------------------------------------------------------------------------
+mul_u8:
+                ld      a,h
+                sub     l
+                jr      nc,mu_pos
+                neg
+mu_pos:
+                ld      c,a
+                ld      b,SQ_LO>>8              ; BC -> SQ_LO[|a-b|]
+                ld      a,h
+                add     a,l
+                ld      l,a
+                ld      a,SQ_LO>>8
+                adc     a,0
+                ld      h,a                     ; HL -> SQ_LO[a+b]
+                ld      a,(bc)
+                ld      e,a
+                ld      a,(hl)
+                sub     e
+                ld      e,a                     ; low byte of product
+                inc     h
+                inc     h
+                inc     b
+                inc     b
+                ld      a,(bc)
+                ld      d,a
+                ld      a,(hl)
+                sbc     a,d
+                ld      d,a
+                ex      de,hl
+                ret
+
+; ---------------------------------------------------------------------------
+; mul_s8_u8 : HL = (signed H) * (unsigned L)
+; The unsigned product over-counts by 256*L when H is negative.
+; ---------------------------------------------------------------------------
+mul_s8_u8:
+                bit     7,h
+                jr      nz,ms_neg
+                jp      mul_u8
+ms_neg:
+                push    hl                      ; mul_u8 corrupts BC and DE
+                call    mul_u8
+                pop     de                      ; E = the unsigned multiplier
+                ld      a,h
+                sub     e
+                ld      h,a
+                ret
+
+; ---------------------------------------------------------------------------
+; mul_s16_u8 : AHL(s24) = DE(s16) * A(u8)
+;
+; Vertex coordinates are prescaled to +/-326, so DE's high byte is almost
+; always 0 or -1; those cases skip the high partial entirely.
+; in : DE = s16 multiplicand, A = unsigned multiplier
+; out: A:HL = signed 24-bit product   (A = bits 16-23)
+; corrupts BC, DE
+; ---------------------------------------------------------------------------
+mul_s16_u8:
+                ld      (m16_mult),a
+                ld      c,a                     ; C = multiplier
+                ld      a,d
+                or      a
+                jr      z,ms16_hi0              ; 0 <= DE < 256
+                inc     a
+                jr      z,ms16_him1             ; DE high byte = $FF
+                dec     a                       ; restore
+                ; --- general case: high and low partials ---
+                ld      h,a
+                ld      l,c
+                push    de
+                call    mul_s8_u8               ; HL = dhi * mult (signed)
+                ld      b,h                     ; B:C = high partial
+                ld      c,l
+                pop     de
+                push    bc
+                ld      h,e
+                ld      a,(m16_mult)
+                ld      l,a
+                call    mul_u8                  ; HL = dlo * mult (unsigned)
+                pop     bc
+                ld      a,h
+                add     a,c
+                ld      h,a
+                ld      a,b
+                adc     a,0
+                ret
+
+ms16_hi0:
+                ld      h,e
+                ld      l,c
+                call    mul_u8
+                xor     a
+                ret
+
+ms16_him1:
+                ld      h,e
+                ld      l,c
+                call    mul_u8                  ; HL = dlo * mult (unsigned)
+                ld      a,(m16_mult)            ; mul_u8 corrupted C
+                ld      c,a
+                ld      a,h
+                sub     c                       ; subtract mult<<8
+                ld      h,a
+                ld      a,0
+                sbc     a,0                     ; sign extend
+                ret
+
+; ---------------------------------------------------------------------------
+; neg_ahl : A:HL = -A:HL
+; ---------------------------------------------------------------------------
+neg_ahl:
+                push    af
+                xor     a
+                sub     l
+                ld      l,a
+                ld      a,0
+                sbc     a,h
+                ld      h,a
+                pop     bc                      ; B = old A
+                ld      a,0
+                sbc     a,b
+                ret
+
+; ---------------------------------------------------------------------------
+; rns_ahl : A:HL = (A:HL + 1<<(B-1)) >> B, arithmetic.  B in 1..24.
+; Uses rns(p,s) == ((p >> (s-1)) + 1) >> 1, exact for arithmetic shifts, so
+; there is no wide rounding constant to build. Shifts of eight or more are
+; taken a byte at a time.
+; corrupts B, C, DE
+rns_ahl:
+                dec     b
+                jr      z,ra_fin
+                ld      c,a
+ra_b8:
+                ld      a,b
+                cp      8
+                jr      c,ra_bits
+                sub     8
+                ld      b,a
+                ld      l,h
+                ld      h,c
+                ld      a,c
+                rla
+                sbc     a,a
+                ld      c,a
+                ld      a,b
+                or      a
+                jr      nz,ra_b8
+                ld      a,c
+                jr      ra_fin
+ra_bits:
+                ld      a,c
+ra_loop:
+                sra     a
+                rr      h
+                rr      l
+                djnz    ra_loop
+ra_fin:
+                ld      c,a
+                ld      de,1
+                add     hl,de
+                ld      a,c
+                adc     a,0
+                sra     a
+                rr      h
+                rr      l
+                ret
+
+; rns_hl : HL = (HL + 1<<(B-1)) >> B, arithmetic, 16-bit.  B in 1..16.
+; corrupts A, B
+rns_hl:
+                dec     b
+                jr      z,rh_fin
+rh_b8:
+                ld      a,b
+                cp      8
+                jr      c,rh_bits
+                sub     8
+                ld      b,a
+                ld      l,h
+                ld      a,h
+                rla
+                sbc     a,a
+                ld      h,a
+                ld      a,b
+                or      a
+                jr      nz,rh_b8
+                jr      rh_fin
+rh_bits:
+                or      a
+                jr      z,rh_fin
+rh_loop:
+                sra     h
+                rr      l
+                djnz    rh_loop
+rh_fin:
+                inc     hl
+                sra     h
+                rr      l
+                ret
+
+; ---------------------------------------------------------------------------
+; cmp_s16 : carry set when HL < DE, signed.  HL and DE are preserved.
+; The Z80's SBC sets carry for an unsigned borrow, so the signed verdict is
+; the sign flag corrected by overflow.
+; ---------------------------------------------------------------------------
+cmp_s16:
+                push    hl
+                or      a
+                sbc     hl,de
+                jp      pe,cs_ovf
+                jp      m,cs_lt
+cs_ge:
+                pop     hl
+                scf
+                ccf                             ; clear carry, keep Z from the SBC
+                ret
+cs_lt:
+                pop     hl
+                scf
+                ret
+cs_ovf:
+                jp      m,cs_ge
+                pop     hl
+                scf
+                ret
+
+; ---------------------------------------------------------------------------
+; Specialised round-to-nearest shifts for the two counts the engine uses most.
+; ---------------------------------------------------------------------------
+; rns3_ahl : A:HL = rns(A:HL, 3)
+rns3_ahl:
+                sra     a
+                rr      h
+                rr      l
+                sra     a
+                rr      h
+                rr      l                       ; >> 2
+                ld      c,a
+                ld      de,1
+                add     hl,de
+                ld      a,c
+                adc     a,0
+                sra     a
+                rr      h
+                rr      l
+                ret
+
+; rns8_ahl : A:HL = rns(A:HL, 8) == (A:HL + 128) >> 8
+rns8_ahl:
+                ld      de,128
+                add     hl,de
+                adc     a,0
+                ld      l,h
+                ld      h,a
+                rla
+                sbc     a,a                     ; sign extend into A
+                ret

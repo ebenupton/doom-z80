@@ -1,0 +1,8 @@
+{
+  "mcpServers": {
+    "spectrum": {
+      "command": "node",
+      "args": ["tools/mcp_spectrum.js"]
+    }
+  }
+}

@@ -1,0 +1,43 @@
+; ---------------------------------------------------------------------------
+; Tape boot stub.
+;
+; BASIC loads this to $8000 and calls it; it then pulls the remaining three
+; blocks off tape itself, paging bank 0 in for the geometry block, and jumps
+; into the engine. It sits in the memory the quarter-square tables will later
+; occupy, so nothing has to be reserved for it.
+; ---------------------------------------------------------------------------
+                DEVICE  ZXSPECTRUM128
+                include "spec.inc"
+
+LD_BYTES        EQU     $0556
+
+                ORG     $8000
+BOOT:
+                di
+                ld      sp,$7ff0
+                ; bank 0 at $C000, 48K ROM paged so LD_BYTES is reachable
+                ld      a,BANK_GEOM or P7_ROM48
+                ld      bc,PORT_7FFD
+                out     (c),a
+                ld      ix,GEO_BASE
+                ld      de,16384
+                call    load_block
+                ld      ix,NODEBB
+                ld      de,1560
+                call    load_block
+                ld      ix,CODE_IMAGE
+                ld      de,IMAGE_LEN
+                call    load_block
+                jp      ENGINE_START
+
+load_block:
+                ld      a,$ff                   ; expect a data block
+                scf
+                ei
+                call    LD_BYTES
+                di
+                ret     c
+lb_fail:
+                ld      a,2                     ; red border on a load error
+                out     ($fe),a
+                jr      lb_fail

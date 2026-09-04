@@ -1,0 +1,444 @@
+; ---------------------------------------------------------------------------
+; Display-list rasteriser.
+;
+; The clipper emits 4-byte records (x1, y1, x2, y2), y already in render space
+; (0..159) and x in 0..255. Pass 2 walks that list and ORs pixels into the back
+; buffer. Nothing else touches the framebuffer, so the geometry bank stays
+; paged in for all of pass 1 and only pass 2 needs the screen bank at $C000.
+;
+; Plot paths, by shape:
+;   vertical    x1 == x2. Wall edges are exactly vertical and dominate a DOOM
+;               wireframe, so this loop is unrolled over a character cell: INC H
+;               steps down a scanline and the cell-crossing fixup is paid once
+;               per eight pixels instead of once per pixel.
+;   horizontal  y1 == y2. Whole bytes go out as LD (HL),$FF - under two
+;               T-states a pixel - with masked ends.
+;   general     Bresenham along the major axis.
+;
+; Row addresses come from 160-entry byte planes, so a lookup is two loads.
+; ---------------------------------------------------------------------------
+
+; --- init: build the four row planes and the mask tables -------------------
+raster_init:
+                ld      b,RENDER_H
+                ld      c,0                     ; render row
+ri_loop:
+                ld      a,c
+                add     a,RENDER_Y0             ; screen row
+                ld      e,a
+                and     $c0
+                rrca
+                rrca
+                rrca                            ; (y & $C0) >> 3
+                ld      d,a
+                ld      a,e
+                and     $07
+                or      d
+                or      $40                     ; bitmap base $4000
+                ld      d,a                     ; D = address high byte
+                ld      a,e
+                and     $38
+                rlca
+                rlca                            ; (y & $38) << 2
+                ld      e,a                     ; E = address low byte
+
+                ld      h,ROWLO_A>>8
+                ld      l,c
+                ld      (hl),e
+                inc     h
+                ld      (hl),d                  ; ROWHI_A
+                inc     h
+                ld      (hl),e                  ; ROWLO_B
+                inc     h
+                ld      a,d
+                or      $80                     ; buffer B: same offset, bank 7
+                ld      (hl),a                  ; ROWHI_B
+
+                inc     c
+                djnz    ri_loop
+                ret
+
+; ---------------------------------------------------------------------------
+; raster_select : A = 0 for buffer A, non-zero for buffer B.
+; ---------------------------------------------------------------------------
+raster_select:
+                or      a
+                ld      a,ROWLO_A>>8
+                jr      z,rs_set
+                ld      a,ROWLO_B>>8
+rs_set:
+                ld      (rsel1+1),a
+                ret
+
+; ---------------------------------------------------------------------------
+; raster_clear : blank the whole 6144-byte bitmap of the back buffer.
+; PUSH writes two bytes per 11 T-states.  A = 0 for buffer A, else buffer B.
+; Interrupts must be disabled: SP walks through the screen.
+; ---------------------------------------------------------------------------
+raster_clear:
+                ld      (rc_sp+1),sp
+                or      a
+                ld      a,$58                   ; one past buffer A's bitmap
+                jr      z,rc_go
+                ld      a,$d8                   ; ... and buffer B's
+rc_go:
+                ld      h,a
+                ld      l,0
+                ld      sp,hl
+                ld      hl,0
+                ld      b,192                   ; 192 * 32 bytes = 6144
+rc_loop:
+                DUP     16
+                push    hl
+                EDUP
+                djnz    rc_loop
+rc_sp:          ld      sp,0
+                ret
+
+; ---------------------------------------------------------------------------
+; dl_render : rasterise every record in the display list.
+; ---------------------------------------------------------------------------
+dl_render:
+                ld      hl,(dlist_ptr)
+                ld      (dl_end+1),hl
+                ld      hl,DLIST_BASE
+dl_loop:
+                ld      a,h
+dl_end:         ld      de,0
+                cp      d
+                jr      nz,dl_go
+                ld      a,l
+                cp      e
+                ret     z
+dl_go:
+                ld      c,(hl)                  ; x1
+                inc     hl
+                ld      b,(hl)                  ; y1
+                inc     hl
+                ld      e,(hl)                  ; x2
+                inc     hl
+                ld      d,(hl)                  ; y2
+                inc     hl
+                push    hl
+                call    plot_line
+                pop     hl
+                jr      dl_loop
+
+; ---------------------------------------------------------------------------
+; plot_line : C = x1, B = y1, E = x2, D = y2   (y in 0..RENDER_H-1)
+; ---------------------------------------------------------------------------
+plot_line:
+                ld      a,c
+                cp      e
+                jp      z,plot_vert
+                jr      c,pl_ordered
+                ld      a,c                     ; order by x
+                ld      c,e
+                ld      e,a
+                ld      a,b
+                ld      b,d
+                ld      d,a
+pl_ordered:
+                ld      a,e
+                sub     c
+                ld      (ln_dx),a
+                ld      l,a                     ; L = dx (>= 1)
+                ld      a,d
+                sub     b                       ; dy
+                jp      z,plot_horiz
+                jr      nc,pl_dypos
+                neg
+                ld      h,a
+                ld      a,$ff                   ; sy = -1
+                jr      pl_dyset
+pl_dypos:
+                ld      h,a
+                ld      a,1
+pl_dyset:
+                ld      (ln_sy),a
+                ld      a,h
+                ld      (ln_dy),a
+                cp      l
+                jp      c,plot_shallow          ; |dy| < dx
+                jp      plot_steep
+
+; ---------------------------------------------------------------------------
+; addr_of : C = x, B = y  ->  HL = screen byte, A = single-pixel mask.
+; ---------------------------------------------------------------------------
+addr_of:
+rsel1:          ld      h,ROWLO_A>>8
+                ld      l,b
+                ld      e,(hl)
+                inc     h
+                ld      d,(hl)                  ; DE = row base address
+                ld      a,c
+                rrca
+                rrca
+                rrca
+                and     $1f                     ; x >> 3
+                add     a,e
+                ld      l,a
+                ld      a,0
+                adc     a,d
+                ld      h,a
+                ld      a,c
+                and     7
+                push    hl
+                ld      hl,BITTAB
+                add     a,l
+                ld      l,a
+                ld      a,(hl)
+                pop     hl
+                ret
+
+; ---------------------------------------------------------------------------
+; plot_vert : C = x, B = y1, D = y2
+; ---------------------------------------------------------------------------
+plot_vert:
+                ld      a,b
+                cp      d
+                jr      c,pv_ord
+                jr      z,pv_ord
+                ld      a,b
+                ld      b,d
+                ld      d,a
+pv_ord:
+                ld      a,d
+                sub     b
+                inc     a
+                ld      (pv_count),a
+                call    addr_of                 ; HL = byte, A = mask
+                ld      c,a
+                ld      a,b
+                and     7
+                ld      d,a                     ; D = line within the cell
+                ld      a,(pv_count)
+                ld      b,a                     ; B = pixels left
+pv_next:
+                ld      a,8
+                sub     d
+                cp      b
+                jr      c,pv_n2
+                ld      a,b
+pv_n2:
+                ld      e,a                     ; E = pixels this cell (1..8)
+                ld      a,b
+                sub     e
+                ld      b,a                     ; B = remaining
+                ld      a,8
+                sub     e
+                add     a,a
+                add     a,a                     ; (8 - n) * 4
+                add     a,PV8 & $ff
+                ld      (pv_jp+1),a
+pv_jp:          jp      PV8
+
+                ALIGN   32
+PV8:
+                DUP     8
+                ld      a,(hl)
+                or      c
+                ld      (hl),a
+                inc     h
+                EDUP
+                ld      a,b
+                or      a
+                ret     z
+                ; the cell was completed: fix up the address
+                ld      a,l
+                add     a,32
+                ld      l,a
+                jr      c,pv_cell
+                ld      a,h
+                sub     8
+                ld      h,a
+pv_cell:
+                ld      d,0
+                jr      pv_next
+
+; ---------------------------------------------------------------------------
+; plot_horiz : C = x1, B = y, E = x2  (x1 < x2)
+; ---------------------------------------------------------------------------
+plot_horiz:
+                ld      a,c
+                ld      (ph_x1),a
+                ld      a,e
+                ld      (ph_x2),a
+                call    addr_of                 ; HL = byte holding x1
+                ld      a,(ph_x1)
+                and     7
+                ld      de,MASKR
+                add     a,e
+                ld      e,a
+                ld      a,(de)
+                ld      c,a                     ; C = mask from x1 rightwards
+                ld      a,(ph_x2)
+                and     7
+                ld      de,MASKL
+                add     a,e
+                ld      e,a
+                ld      a,(de)
+                ld      b,a                     ; B = mask up to and incl. x2
+                ld      a,(ph_x2)
+                and     $f8
+                ld      d,a
+                ld      a,(ph_x1)
+                and     $f8
+                ld      e,a
+                ld      a,d
+                sub     e
+                rrca
+                rrca
+                rrca
+                and     $1f
+                ld      d,a                     ; D = bytes spanned - 1
+                or      a
+                jr      nz,ph_multi
+                ld      a,c
+                and     b
+                or      (hl)
+                ld      (hl),a
+                ret
+ph_multi:
+                ld      a,(hl)
+                or      c
+                ld      (hl),a
+                inc     l
+                dec     d
+                jr      z,ph_last
+ph_mid:
+                ld      (hl),$ff
+                inc     l
+                dec     d
+                jr      nz,ph_mid
+ph_last:
+                ld      a,(hl)
+                or      b
+                ld      (hl),a
+                ret
+
+; ---------------------------------------------------------------------------
+; plot_shallow : |dy| < dx.  C = x1, B = y1.
+; ---------------------------------------------------------------------------
+plot_shallow:
+                ld      a,(ln_dy)
+                ld      (ps_dy+1),a
+                ld      a,(ln_dx)
+                ld      (ps_dx+1),a
+                ld      a,(ln_sy)
+                inc     a
+                ld      hl,ps_step_down
+                jr      nz,ps_setstep
+                ld      hl,ps_step_up
+ps_setstep:
+                ld      (ps_call+1),hl
+                call    addr_of                 ; HL = byte, A = mask
+                ld      c,a
+                ld      a,(ln_dx)
+                ld      d,a
+                srl     a
+                ld      e,a                     ; E = err = dx >> 1
+                inc     d
+                ld      b,d                     ; B = dx + 1 pixels
+ps_loop:
+                ld      a,(hl)
+                or      c
+                ld      (hl),a
+                dec     b
+                ret     z
+                rrc     c
+                jr      nc,ps_nox
+                inc     l
+ps_nox:
+                ld      a,e
+ps_dy:          sub     0
+                ld      e,a
+                jr      nc,ps_loop
+ps_dx:          add     a,0
+                ld      e,a
+ps_call:        call    ps_step_down
+                jr      ps_loop
+
+ps_step_down:
+                inc     h
+                ld      a,h
+                and     7
+                ret     nz
+                ld      a,l
+                add     a,32
+                ld      l,a
+                ret     c
+                ld      a,h
+                sub     8
+                ld      h,a
+                ret
+ps_step_up:
+                ld      a,h
+                and     7
+                jr      z,psu_cross
+                dec     h
+                ret
+psu_cross:
+                ld      a,h
+                add     a,7
+                ld      h,a
+                ld      a,l
+                sub     32
+                ld      l,a
+                ret     nc
+                ld      a,h
+                sub     8
+                ld      h,a
+                ret
+
+; ---------------------------------------------------------------------------
+; plot_steep : |dy| >= dx >= 1.  C = x1, B = y1.
+; ---------------------------------------------------------------------------
+plot_steep:
+                ld      a,(ln_dx)
+                ld      (pt_dx+1),a
+                ld      a,(ln_dy)
+                ld      (pt_dy+1),a
+                ld      a,(ln_sy)
+                inc     a
+                ld      hl,ps_step_down
+                jr      nz,pt_setstep
+                ld      hl,ps_step_up
+pt_setstep:
+                ld      (pt_call+1),hl
+                call    addr_of
+                ld      c,a
+                ld      a,(ln_dy)
+                ld      d,a
+                srl     a
+                ld      e,a                     ; err = dy >> 1
+                inc     d
+                ld      b,d                     ; B = dy + 1 pixels
+pt_loop:
+                ld      a,(hl)
+                or      c
+                ld      (hl),a
+                dec     b
+                ret     z
+                ld      a,e
+pt_dx:          sub     0
+                ld      e,a
+                jr      nc,pt_noy
+pt_dy:          add     a,0
+                ld      e,a
+                rrc     c
+                jr      nc,pt_noy
+                inc     l
+pt_noy:
+pt_call:        call    ps_step_down
+                jr      pt_loop
+
+; ---------------------------------------------------------------------------
+; Pixel mask tables.
+; ---------------------------------------------------------------------------
+                ALIGN   8
+BITTAB:         DB      $80,$40,$20,$10,$08,$04,$02,$01
+                ALIGN   8
+MASKR:          DB      $ff,$7f,$3f,$1f,$0f,$07,$03,$01   ; from x rightwards
+                ALIGN   8
+MASKL:          DB      $80,$c0,$e0,$f0,$f8,$fc,$fe,$ff   ; up to and incl. x

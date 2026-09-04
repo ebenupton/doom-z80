@@ -1,0 +1,1434 @@
+; ---------------------------------------------------------------------------
+; BSP traversal and seg rendering.
+;
+; Front-to-back walk of DOOM's tree: at each node the near child is visited
+; first, then the far one, and either is skipped when its bounding box either
+; falls outside the frustum or lands entirely on columns the span list has
+; already closed. When the span list empties, the frame is finished and the
+; walk unwinds immediately.
+;
+; Everything here runs with bank 0 paged at $C000, so vertices, segs,
+; subsectors, sectors and nodes are all directly addressable.
+; ---------------------------------------------------------------------------
+
+; ---------------------------------------------------------------------------
+; render_frame : build this frame's display list.
+; ---------------------------------------------------------------------------
+render_frame:
+                call    view_setup
+                call    sp_reset
+                ld      hl,DLIST_BASE
+                ld      (dlist_ptr),hl
+                xor     a
+                ld      (frame_nodes),a
+                ld      (frame_ss),a
+                ld      (frame_segs),a
+                ld      hl,(bsp_root)
+                jp      walk
+
+; ---------------------------------------------------------------------------
+; walk : HL = child id.  Bit 15 marks a subsector.
+; ---------------------------------------------------------------------------
+walk:
+                ld      a,(sp_count)
+                or      a
+                ret     z                       ; screen fully occluded
+                bit     7,h
+                jp      nz,walk_ss
+
+                ld      a,(frame_nodes)
+                inc     a
+                ld      (frame_nodes),a
+                ; node address = NODES + nid * 16
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                ld      de,NODES
+                add     hl,de
+                ld      (bsp_node),hl
+                call    point_on_side           ; A = 0 or 1
+                ld      c,a
+                ld      hl,(bsp_node)
+                ; DOOM's order: descend the near child unconditionally, then
+                ; bounding-box test only the far one.  The recursion overwrites
+                ; bsp_node, so it and the side ride on the stack.
+                push    hl
+                push    bc
+                ld      de,ND_CHILD0
+                or      a
+                jr      z,wk_n0
+                ld      de,ND_CHILD1
+wk_n0:
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ex      de,hl
+                call    walk
+                ld      a,(sp_count)
+                or      a
+                jr      z,walk_pop
+                pop     bc
+                pop     hl
+                push    hl
+                push    bc
+                ld      (bsp_node),hl
+                ld      a,c
+                xor     1
+                call    walk_child
+walk_pop:
+                pop     bc
+                pop     hl
+                ret
+
+; walk_child : A = which side (0 or 1) of the node at bsp_node to descend.
+walk_child:
+                ld      (bsp_side),a
+                call    bbox_range              ; carry set when visible
+                ret     nc
+                ld      a,(bb_lo)
+                ld      b,a
+                ld      a,(bb_hi)
+                ld      c,a
+                call    sp_hasgap
+                ret     nc
+                ld      hl,(bsp_node)
+                ld      a,(bsp_side)
+                ld      de,ND_CHILD0
+                or      a
+                jr      z,wc_c0
+                ld      de,ND_CHILD1
+wc_c0:
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ex      de,hl
+                jp      walk
+
+; ---------------------------------------------------------------------------
+; walk_ss : HL = subsector id with bit 15 set.
+; ---------------------------------------------------------------------------
+walk_ss:
+                res     7,h
+                ld      a,(frame_ss)
+                inc     a
+                ld      (frame_ss),a
+                ; SSEC + ssid * 3
+                ld      d,h
+                ld      e,l
+                add     hl,hl
+                add     hl,de                   ; * 3
+                ld      de,SSEC
+                add     hl,de
+                ld      a,(hl)
+                ld      (ss_cnt),a
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (ss_seg),de
+ss_loop:
+                ld      a,(ss_cnt)
+                or      a
+                ret     z
+                dec     a
+                ld      (ss_cnt),a
+                ld      hl,(ss_seg)
+                push    hl
+                call    render_seg
+                pop     hl
+                inc     hl
+                ld      (ss_seg),hl
+                jr      ss_loop
+
+; ---------------------------------------------------------------------------
+; point_on_side : DOOM's R_PointOnSide against the node at bsp_node.
+; Returns A = 0 (front) or 1 (back).
+; ---------------------------------------------------------------------------
+point_on_side:
+                ld      hl,(bsp_node)
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                push    hl
+                ld      hl,(pl_wx)
+                or      a
+                sbc     hl,de
+                ld      (pos_dx),hl
+                pop     hl
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                push    hl
+                ld      hl,(pl_wy)
+                or      a
+                sbc     hl,de
+                ld      (pos_dy),hl
+                pop     hl
+                inc     hl
+                ld      a,(hl)                  ; rdx
+                ld      (pos_ndx),a
+                inc     hl
+                ld      a,(hl)                  ; rdy
+                ld      (pos_ndy),a
+
+                ld      a,(pos_ndx)
+                or      a
+                jr      nz,pos_notx0
+                ; vertical partition
+                ld      hl,(pos_dx)
+                ld      a,h
+                or      l
+                jr      z,pos_dxle
+                bit     7,h
+                jr      nz,pos_dxle
+                ; dx > 0
+                ld      a,(pos_ndy)
+                bit     7,a
+                ld      a,0
+                ret     z
+                ld      a,1
+                ret
+pos_dxle:
+                ld      a,(pos_ndy)
+                or      a
+                ld      a,0
+                ret     z
+                bit     7,a
+                ld      a,1
+                ret     z
+                ld      a,0
+                ret
+pos_notx0:
+                ld      a,(pos_ndy)
+                or      a
+                jr      nz,pos_general
+                ; horizontal partition
+                ld      hl,(pos_dy)
+                ld      a,h
+                or      l
+                jr      z,pos_dyle
+                bit     7,h
+                jr      nz,pos_dyle
+                ld      a,(pos_ndx)
+                bit     7,a
+                ld      a,1
+                ret     z
+                ld      a,0
+                ret
+pos_dyle:
+                ld      a,(pos_ndx)
+                bit     7,a
+                ld      a,0
+                ret     z
+                ld      a,1
+                ret
+pos_general:
+                ; left = ndy * dx, right = dy * ndx; front when right < left
+                ld      de,(pos_dx)
+                ld      a,(pos_ndy)
+                call    mul_s16_u8_signed
+                ld      (pos_l),hl
+                ld      (pos_l+2),a
+                ld      de,(pos_dy)
+                ld      a,(pos_ndx)
+                call    mul_s16_u8_signed
+                ; compute left - right as s24
+                ld      c,a
+                ld      de,(pos_l)
+                ex      de,hl
+                or      a
+                sbc     hl,de
+                ld      a,(pos_l+2)
+                sbc     a,c
+                bit     7,a
+                ld      a,0
+                ret     z                       ; left - right >= 0 -> front
+                ld      a,1
+                ret
+
+; mul_s16_u8_signed : A:HL = DE (s16) * A (s8, sign honoured)
+mul_s16_u8_signed:
+                bit     7,a
+                jr      nz,msg_neg
+                jp      mul_s16_u8
+msg_neg:
+                neg
+                call    mul_s16_u8
+                jp      neg_ahl
+
+; ---------------------------------------------------------------------------
+; bbox_range : screen column range of one child's bounding box.
+; in : A = 0 or 1, bsp_node set.  out: carry set and bb_lo/bb_hi valid.
+;
+; The four corners go through the full transform. Corners behind the near
+; plane are replaced by the crossing point of the bbox edge they lie on, so a
+; box straddling the camera still yields a tight range instead of the whole
+; screen.
+; ---------------------------------------------------------------------------
+bbox_range:
+                ; NODEBB + nid*8 + side*4; recover nid from the node pointer
+                ld      hl,(bsp_node)
+                ld      de,NODES
+                or      a
+                sbc     hl,de                   ; nid * 16
+                srl     h
+                rr      l                       ; nid * 8
+                ld      de,NODEBB
+                add     hl,de
+                ld      a,(bsp_side)
+                or      a
+                jr      z,bb_s0
+                ld      de,4
+                add     hl,de
+bb_s0:
+                ld      a,(hl)
+                inc     hl
+                push    hl
+                call    sx4
+                ld      (bb_top),hl
+                pop     hl
+                ld      a,(hl)
+                inc     hl
+                push    hl
+                call    sx4
+                ld      (bb_bot),hl
+                pop     hl
+                ld      a,(hl)
+                inc     hl
+                push    hl
+                call    sx4
+                ld      (bb_left),hl
+                pop     hl
+                ld      a,(hl)
+                call    sx4
+                ld      (bb_right),hl
+
+                ; transform the four corners
+                ld      hl,(bb_left)
+                ld      (tv_wx),hl
+                ld      hl,(bb_top)
+                ld      (tv_wy),hl
+                call    to_view
+                ld      hl,(tv_tvx)
+                ld      (bb_pts),hl
+                ld      hl,(tv_tvy)
+                ld      (bb_pts+2),hl
+                ld      hl,(bb_right)
+                ld      (tv_wx),hl
+                call    to_view
+                ld      hl,(tv_tvx)
+                ld      (bb_pts+4),hl
+                ld      hl,(tv_tvy)
+                ld      (bb_pts+6),hl
+                ld      hl,(bb_bot)
+                ld      (tv_wy),hl
+                call    to_view
+                ld      hl,(tv_tvx)
+                ld      (bb_pts+8),hl
+                ld      hl,(tv_tvy)
+                ld      (bb_pts+10),hl
+                ld      hl,(bb_left)
+                ld      (tv_wx),hl
+                call    to_view
+                ld      hl,(tv_tvx)
+                ld      (bb_pts+12),hl
+                ld      hl,(tv_tvy)
+                ld      (bb_pts+14),hl
+
+                ; --- fold the corners in front of the near plane -------
+                ld      hl,$7fff
+                ld      (bb_lo16),hl
+                ld      hl,$8000
+                ld      (bb_hi16),hl
+                xor     a
+                ld      (bb_any),a
+                ld      (bb_n),a
+bb_cloop:
+                ld      a,(bb_n)
+                add     a,a
+                add     a,a
+                ld      e,a
+                ld      d,0
+                ld      hl,bb_pts
+                add     hl,de
+                ld      (bb_pa),hl
+                inc     hl
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)                  ; DE = tvy
+                bit     7,d
+                jr      nz,bb_cnext             ; behind the camera
+                ld      a,d
+                or      a
+                jr      nz,bb_cfront
+                ld      a,e
+                cp      NEAR_VERDICT
+                jr      c,bb_cnext
+bb_cfront:
+                ld      hl,(bb_pa)
+                call    bb_project
+bb_cnext:
+                ld      a,(bb_n)
+                inc     a
+                ld      (bb_n),a
+                cp      4
+                jr      c,bb_cloop
+                ld      a,(bb_any)
+                or      a
+                jp      z,bb_invisible
+
+                ; --- fold the near-plane crossing of every straddling edge --
+                xor     a
+                ld      (bb_n),a
+bb_eloop:
+                ld      a,(bb_n)
+                add     a,a
+                add     a,a
+                ld      e,a
+                ld      d,0
+                ld      hl,bb_pts
+                add     hl,de
+                ld      (bb_pa),hl
+                ld      a,(bb_n)
+                inc     a
+                and     3
+                add     a,a
+                add     a,a
+                ld      e,a
+                ld      d,0
+                ld      hl,bb_pts
+                add     hl,de
+                ld      (bb_pb),hl
+                call    bb_edge
+                ld      a,(bb_n)
+                inc     a
+                ld      (bb_n),a
+                cp      4
+                jr      c,bb_eloop
+
+                ; clamp and reject if wholly off-screen
+                ld      hl,(bb_hi16)
+                bit     7,h
+                jp      nz,bb_invisible         ; hi < 0
+                ld      hl,(bb_lo16)
+                ld      de,RENDER_W
+                call    cmp_s16
+                jr      nc,bb_invisible         ; lo >= 256
+                ld      hl,(bb_lo16)
+                bit     7,h
+                jr      z,bb_lok
+                ld      hl,0
+bb_lok:
+                ld      a,l
+                ld      (bb_lo),a
+                ld      hl,(bb_hi16)
+                ld      de,RENDER_W-1
+                or      a
+                sbc     hl,de
+                ld      hl,(bb_hi16)            ; SBC left the difference in HL
+                jr      c,bb_hok
+                ld      hl,RENDER_W-1
+bb_hok:
+                ld      a,l
+                ld      (bb_hi),a
+                scf
+                ret
+bb_invisible:
+                or      a
+                ret
+
+; sx4 : HL = sign-extended A, multiplied by 4
+sx4:
+                ld      l,a
+                rla
+                sbc     a,a
+                ld      h,a
+                add     hl,hl
+                add     hl,hl
+                ret
+
+; bb_edge : if this edge straddles the near plane, project its crossing.
+bb_edge:
+                ld      hl,(bb_pa)
+                ld      de,2
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      hl,NEAR_VERDICT
+                ex      de,hl
+                call    cmp_s16
+                ld      a,0
+                jr      nc,bb_a_ok
+                inc     a
+bb_a_ok:        ld      (bb_ac),a
+                ld      hl,(bb_pb)
+                ld      de,2
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      hl,NEAR_VERDICT
+                ex      de,hl
+                call    cmp_s16
+                ld      a,0
+                jr      nc,bb_b_ok
+                inc     a
+bb_b_ok:        ld      (bb_bc),a
+                ld      a,(bb_ac)
+                ld      b,a
+                ld      a,(bb_bc)
+                cp      b
+                ret     z                       ; both sides agree: not straddling
+                or      a
+                jr      nz,bb_b_clip
+bb_a_clip:
+                ld      hl,(bb_pa)
+                ld      de,(bb_pb)
+                call    bb_cross_pt
+                ret     nc
+                jp      bb_project_cx
+bb_b_clip:
+                ld      hl,(bb_pb)
+                ld      de,(bb_pa)
+                call    bb_cross_pt
+                ret     nc
+                jp      bb_project_cx
+
+; bb_project : HL = pointer to (tvx, tvy); project and fold into the range.
+bb_project:
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (bb_cx),de
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ex      de,hl
+bb_project2:
+                call    recip
+                ld      hl,(bb_cx)
+                call    project_x
+bb_fold:
+                ld      de,(bb_lo16)
+                call    cmp_s16
+                jr      nc,bb_f2
+                ld      (bb_lo16),hl
+bb_f2:
+                ld      de,(bb_hi16)
+                call    cmp_s16
+                jr      c,bb_f3
+                ld      (bb_hi16),hl
+bb_f3:
+                ld      a,1
+                ld      (bb_any),a
+                ret
+
+; bb_project_cx : project the crossing point already staged in bb_cx.
+bb_project_cx:
+                ld      hl,NEAR_CROSS
+                jr      bb_project2
+
+; bb_cross_pt : near-plane crossing of the edge from the clipped endpoint at
+; HL toward the endpoint at DE.  Carry set and bb_cx valid on success.
+bb_cross_pt:
+                ld      (cr_p1),hl
+                ld      (cr_p2),de
+                ld      hl,(cr_p1)
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cr_vx1),de
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cr_vy1),de
+                ld      hl,(cr_p2)
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cr_vx2),de
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cr_vy2),de
+                jp      near_cross
+
+; ---------------------------------------------------------------------------
+; near_cross : crossing of the near plane by the segment from (cr_vx1, cr_vy1)
+; - the clipped endpoint - toward (cr_vx2, cr_vy2).  Carry set, bb_cx = cx.
+; ---------------------------------------------------------------------------
+near_cross:
+                ld      hl,(cr_vy2)
+                ld      de,(cr_vy1)
+                or      a
+                sbc     hl,de
+                ld      a,h
+                or      l
+                jp      z,nc_fail
+                bit     7,h
+                jp      nz,nc_fail
+                ld      (nc_d),hl
+                ld      hl,NEAR_CROSS
+                ld      de,(cr_vy1)
+                or      a
+                sbc     hl,de
+                ld      (nc_n),hl               ; n > 0 because vy1 < 16
+nc_norm:
+                ld      hl,(nc_d)
+                ld      a,h
+                or      a
+                jr      z,nc_small
+                srl     h
+                rr      l
+                ld      (nc_d),hl
+                ld      hl,(nc_n)
+                srl     h
+                rr      l
+                ld      (nc_n),hl
+                jr      nc_norm
+nc_small:
+                ld      a,l
+                or      a
+                jr      z,nc_use2               ; d became 0: take v2
+                ld      c,a                     ; C = d (1..255)
+                ld      hl,(nc_n)
+                ld      a,h
+                or      a
+                jr      nz,nc_use2              ; n >= 256 > d
+                ld      a,l
+                cp      c
+                jr      nc,nc_use2              ; n >= d -> t >= 256
+                ; t = ((n << 8) + (d >> 1)) / d
+                ld      h,a
+                ld      l,0
+                ld      a,c
+                srl     a
+                ld      e,a
+                ld      d,0
+                add     hl,de
+                call    div16_8                 ; L = quotient
+                ld      a,l
+                ld      (nc_t),a
+                ld      hl,(cr_vx2)
+                ld      de,(cr_vx1)
+                or      a
+                sbc     hl,de                   ; dvx
+                bit     7,h
+                jr      nz,nc_negdvx
+                ex      de,hl
+                ld      a,(nc_t)
+                call    mul_s16_u8
+                call    rns8_ahl
+                ld      de,(cr_vx1)
+                add     hl,de
+                jr      nc_done
+nc_negdvx:
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ex      de,hl                   ; DE = |dvx|
+                ld      a,(nc_t)
+                call    mul_s16_u8
+                call    rns8_ahl
+                ex      de,hl
+                ld      hl,(cr_vx1)
+                or      a
+                sbc     hl,de
+nc_done:
+                ld      (bb_cx),hl
+                scf
+                ret
+nc_use2:
+                ld      hl,(cr_vx2)
+                ld      (bb_cx),hl
+                scf
+                ret
+nc_fail:
+                or      a
+                ret
+
+; div16_8 : HL / C -> HL quotient, A remainder
+div16_8:
+                xor     a
+                ld      b,16
+d168_l:
+                add     hl,hl
+                rla
+                jr      c,d168_s
+                cp      c
+                jr      c,d168_n
+d168_s:
+                sub     c
+                inc     l
+d168_n:
+                djnz    d168_l
+                ret
+
+; ---------------------------------------------------------------------------
+; vertex_get : HL = vertex index -> vc_ptr points at its cache entry, which
+; holds the view-space position and, when in front of the near plane, the
+; projected column.
+; ---------------------------------------------------------------------------
+vertex_get:
+                ld      (vg_idx),hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                ld      de,VCACHE_BASE
+                add     hl,de
+                ld      (vc_ptr),hl
+                ld      a,(vc_stamp)
+                cp      (hl)
+                ret     z
+                ld      (hl),a
+                ; miss: fetch the prescaled world position
+                ld      hl,(vg_idx)
+                add     hl,hl
+                add     hl,hl
+                ld      de,VERTS
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (tv_wx),de
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (tv_wy),de
+                call    to_view
+                ld      hl,(vc_ptr)
+                ld      de,VC_TVX
+                add     hl,de
+                ld      de,(tv_tvx)
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                inc     hl
+                ld      de,(tv_tvy)
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                ; project when in front of the near plane
+                ld      hl,(tv_tvy)
+                ld      de,NEAR_VERDICT
+                call    cmp_s16
+                jr      nc,vg_front
+                ld      hl,0
+                jr      vg_store
+vg_front:
+                ld      hl,(tv_tvy)
+                call    recip
+                ld      hl,(tv_tvx)
+                call    project_x
+vg_store:
+                ex      de,hl
+                ld      hl,(vc_ptr)
+                ld      bc,VC_SX
+                add     hl,bc
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                ret
+
+; vc_field : HL = vc_ptr + A, returns the s16 there in HL
+vc_field:
+                ld      e,a
+                ld      d,0
+                ld      hl,(vc_ptr)
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ex      de,hl
+                ret
+
+; ---------------------------------------------------------------------------
+; render_seg : HL = seg index.
+; ---------------------------------------------------------------------------
+render_seg:
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                ld      de,SEGS
+                add     hl,de
+                ld      (sg_ptr),hl
+
+                ; --- back face -----------------------------------------
+                ; dot = ldy*(px - lx) - ldx*(py - ly) must be strictly
+                ; positive.  Three quarters of DOOM's linedefs are axis
+                ; aligned, and for those one term vanishes and the test
+                ; collapses to a sign comparison with no multiply at all.
+                ld      de,SG_FLAGS
+                add     hl,de
+                ld      a,(hl)
+                ld      (sg_flags),a
+                ld      hl,(sg_ptr)
+                ld      de,SG_LX
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                push    hl
+                ld      hl,(pl_x)
+                or      a
+                sbc     hl,de
+                ld      (pos_dx),hl             ; px - lx
+                pop     hl
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                push    hl
+                ld      hl,(pl_y)
+                or      a
+                sbc     hl,de
+                ld      (pos_dy),hl             ; py - ly
+                pop     hl
+                inc     hl
+                ld      a,(hl)                  ; ldx
+                ld      (pos_ndx),a
+                inc     hl
+                ld      a,(hl)                  ; ldy
+                ld      (pos_ndy),a
+
+                ld      a,(sg_flags)
+                and     SF_LDX0
+                jr      nz,rs_bf_x0
+                ld      a,(sg_flags)
+                and     SF_LDY0
+                jr      nz,rs_bf_y0
+                ; general case: two 16x8 products
+                ld      de,(pos_dx)
+                ld      a,(pos_ndy)
+                call    mul_s16_u8_signed
+                ld      (pos_l),hl
+                ld      (pos_l+2),a
+                ld      de,(pos_dy)
+                ld      a,(pos_ndx)
+                call    mul_s16_u8_signed
+                ld      c,a
+                ld      de,(pos_l)
+                ex      de,hl
+                or      a
+                sbc     hl,de
+                ld      a,(pos_l+2)
+                sbc     a,c
+                bit     7,a
+                ret     nz
+                or      h
+                or      l
+                ret     z
+                jr      rs_visible
+rs_bf_x0:
+                ; dot = ldy * (px - lx)
+                ld      hl,(pos_dx)
+                ld      a,h
+                or      l
+                ret     z
+                ld      a,(pos_ndy)
+                xor     h                       ; sign of the product
+                bit     7,a
+                ret     nz
+                jr      rs_visible
+rs_bf_y0:
+                ; dot = -ldx * (py - ly)
+                ld      hl,(pos_dy)
+                ld      a,h
+                or      l
+                ret     z
+                ld      a,(pos_ndx)
+                xor     h
+                bit     7,a
+                ret     z                       ; product positive -> dot < 0
+rs_visible:
+                ld      a,(frame_segs)
+                inc     a
+                ld      (frame_segs),a
+
+                ; --- seg fields ----------------------------------------
+                ld      hl,(sg_ptr)
+                ld      a,(hl)
+                ld      (sg_v1),a
+                inc     hl
+                ld      a,(hl)
+                ld      (sg_v2),a
+                inc     hl
+                ld      c,(hl)                  ; vhi
+                inc     hl
+                inc     hl
+                ld      a,(hl)
+                ld      (sg_fh),a
+                inc     hl
+                ld      a,(hl)
+                ld      (sg_ch),a
+                inc     hl
+                ld      a,(hl)
+                ld      (sg_bfh),a
+                inc     hl
+                ld      a,(hl)
+                ld      (sg_bch),a
+                ld      a,c
+                and     1
+                ld      (sg_v1+1),a
+                ld      a,c
+                rrca
+                and     1
+                ld      (sg_v2+1),a
+
+                ; --- vertices ------------------------------------------
+                ld      hl,(sg_v1)
+                call    vertex_get
+                ld      hl,(vc_ptr)
+                ld      (sg_c1),hl
+                ld      hl,(sg_v2)
+                call    vertex_get
+                ld      hl,(vc_ptr)
+                ld      (sg_c2),hl
+
+                ; near-plane verdicts
+                ld      hl,(sg_c1)
+                ld      de,VC_TVY
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cr_vy1),de
+                ld      hl,(cr_vy1)
+                ld      de,NEAR_VERDICT
+                call    cmp_s16
+                ld      a,0
+                jp      nc,rs_c1ok
+                inc     a
+rs_c1ok:        ld      (sg_n1),a
+                ld      hl,(sg_c2)
+                ld      de,VC_TVY
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cr_vy2),de
+                ld      hl,(cr_vy2)
+                ld      de,NEAR_VERDICT
+                call    cmp_s16
+                ld      a,0
+                jp      nc,rs_c2ok
+                inc     a
+rs_c2ok:        ld      (sg_n2),a
+                ld      a,(sg_n1)
+                ld      b,a
+                ld      a,(sg_n2)
+                and     b
+                ret     nz                      ; both behind the near plane
+
+                ld      hl,(sg_c1)
+                ld      de,VC_TVX
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cr_vx1),de
+                ld      hl,(sg_c2)
+                ld      de,VC_TVX
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cr_vx2),de
+
+                ld      a,(sg_n1)
+                or      a
+                jp      nz,rs_clip1
+                ld      a,(sg_n2)
+                or      a
+                jp      nz,rs_clip2
+                ; both in front: take the cached columns
+                ld      hl,(cr_vy1)
+                call    recip
+                ld      a,(rc_m8)
+                ld      (sg_m1),a
+                ld      a,(rc_s)
+                ld      (sg_s1),a
+                ld      hl,(sg_c1)
+                ld      de,VC_SX
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (sg_sx1),de
+                jp      rs_do2
+rs_clip1:
+                ; v1 is behind: cross toward v2
+                call    near_cross_seg1
+                ret     nc
+                ld      hl,NEAR_CROSS
+                call    recip
+                ld      a,(rc_m8)
+                ld      (sg_m1),a
+                ld      a,(rc_s)
+                ld      (sg_s1),a
+                ld      hl,(bb_cx)
+                call    project_x
+                ld      (sg_sx1),hl
+rs_do2:
+                ld      hl,(cr_vy2)
+                call    recip
+                ld      a,(rc_m8)
+                ld      (sg_m2),a
+                ld      a,(rc_s)
+                ld      (sg_s2),a
+                ld      hl,(sg_c2)
+                ld      de,VC_SX
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (sg_sx2),de
+                jp      rs_havex
+rs_clip2:
+                ; v2 is behind: cross toward v1
+                ld      hl,(cr_vy1)
+                call    recip
+                ld      a,(rc_m8)
+                ld      (sg_m1),a
+                ld      a,(rc_s)
+                ld      (sg_s1),a
+                ld      hl,(sg_c1)
+                ld      de,VC_SX
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (sg_sx1),de
+                call    near_cross_seg2
+                ret     nc
+                ld      hl,NEAR_CROSS
+                call    recip
+                ld      a,(rc_m8)
+                ld      (sg_m2),a
+                ld      a,(rc_s)
+                ld      (sg_s2),a
+                ld      hl,(bb_cx)
+                call    project_x
+                ld      (sg_sx2),hl
+rs_havex:
+                ; a zero-width seg spans no columns
+                ld      hl,(sg_sx1)
+                ld      de,(sg_sx2)
+                or      a
+                sbc     hl,de
+                ret     z
+                ld      hl,(sg_sx1)
+                ld      de,(sg_sx2)
+                call    cmp_s16
+                jr      c,rs_order
+                ld      hl,(sg_sx2)
+                ld      (sg_xlo),hl
+                ld      hl,(sg_sx1)
+                ld      (sg_xhi),hl
+                jr      rs_range
+rs_order:
+                ld      hl,(sg_sx1)
+                ld      (sg_xlo),hl
+                ld      hl,(sg_sx2)
+                ld      (sg_xhi),hl
+rs_range:
+                ld      hl,(sg_xhi)
+                bit     7,h
+                ret     nz                      ; entirely left of the screen
+                ld      hl,(sg_xlo)
+                ld      de,RENDER_W
+                call    cmp_s16
+                ret     nc                      ; entirely right of it
+                ; clamp for the occlusion queries
+                ld      hl,(sg_xlo)
+                bit     7,h
+                jr      z,rs_lo_ok
+                ld      hl,0
+rs_lo_ok:       ld      a,l
+                ld      (cl_lo),a
+                xor     a
+                ld      (cl_lo+1),a
+                ld      hl,(sg_xhi)
+                ld      de,RENDER_W-1
+                or      a
+                sbc     hl,de
+                ld      hl,(sg_xhi)             ; SBC left the difference in HL
+                jr      c,rs_hi_ok
+                ld      hl,RENDER_W-1
+rs_hi_ok:       ld      a,l
+                ld      (cl_hi),a
+                xor     a
+                ld      (cl_hi+1),a
+                ld      a,(cl_lo)
+                ld      b,a
+                ld      a,(cl_hi)
+                ld      c,a
+                call    sp_hasgap
+                ret     nc
+                jp      render_seg_body
+
+near_cross_seg1:
+                ld      hl,(cr_vx1)
+                ld      de,(cr_vy1)
+                jp      near_cross
+near_cross_seg2:
+                ; swap the endpoints so v2 is the clipped one
+                ld      hl,(cr_vx1)
+                ld      de,(cr_vx2)
+                ld      (cr_vx1),de
+                ld      (cr_vx2),hl
+                ld      hl,(cr_vy1)
+                ld      de,(cr_vy2)
+                ld      (cr_vy1),de
+                ld      (cr_vy2),hl
+                call    near_cross
+                push    af
+                ld      hl,(cr_vx1)
+                ld      de,(cr_vx2)
+                ld      (cr_vx1),de
+                ld      (cr_vx2),hl
+                ld      hl,(cr_vy1)
+                ld      de,(cr_vy2)
+                ld      (cr_vy1),de
+                ld      (cr_vy2),hl
+                pop     af
+                ret
+
+; ---------------------------------------------------------------------------
+; render_seg_body : project the seg's heights, emit its visible edges, and
+; apply the occlusion update it implies.
+; ---------------------------------------------------------------------------
+render_seg_body:
+                call    use_recip1
+                ld      a,(sg_ch)
+                call    hdelta
+                call    project_y
+                ld      (sg_ft1),hl
+                ld      a,(sg_fh)
+                call    hdelta
+                call    project_y
+                ld      (sg_fb1),hl
+                call    use_recip2
+                ld      a,(sg_ch)
+                call    hdelta
+                call    project_y
+                ld      (sg_ft2),hl
+                ld      a,(sg_fh)
+                call    hdelta
+                call    project_y
+                ld      (sg_fb2),hl
+
+                ld      a,(sg_flags)
+                and     SF_SOLID
+                jp      nz,rsb_solid
+
+                ; --- portal --------------------------------------------
+                ld      a,(sg_ch)
+                ld      b,a
+                ld      a,(sg_bch)
+                sub     b                       ; bch - ch
+                ld      a,0
+                jp      p,rsb_nbt0              ; bch >= ch: no upper step
+                inc     a
+rsb_nbt0:
+                ld      (sg_needbt),a
+                ld      a,(sg_fh)
+                ld      b,a
+                ld      a,(sg_bfh)
+                sub     b
+                ld      a,0
+                jp      m,rsb_nbb0
+                jr      z,rsb_nbb0
+                inc     a
+rsb_nbb0:
+                ld      (sg_needbb),a
+
+                ld      a,(sg_needbt)
+                or      a
+                jr      z,rsb_nobt
+                call    use_recip1
+                ld      a,(sg_bch)
+                call    hdelta
+                call    project_y
+                ld      (sg_bt1),hl
+                call    use_recip2
+                ld      a,(sg_bch)
+                call    hdelta
+                call    project_y
+                ld      (sg_bt2),hl
+                ld      hl,(sg_bt1)
+                ld      de,(sg_bt2)
+                call    emit_edge
+                ld      a,(sg_ch)
+                call    hdelta
+                jp      m,rsb_botpart
+                jr      z,rsb_botpart
+                ld      hl,(sg_ft1)
+                ld      de,(sg_ft2)
+                call    emit_edge
+                jr      rsb_botpart
+rsb_nobt:
+                ld      a,(sg_ch)
+                ld      b,a
+                ld      a,(sg_bch)
+                sub     b
+                jp      m,rsb_botpart
+                jr      z,rsb_botpart
+                ld      hl,(sg_ft1)
+                ld      de,(sg_ft2)
+                call    emit_edge
+rsb_botpart:
+                ld      a,(sg_needbb)
+                or      a
+                jr      z,rsb_nobb
+                call    use_recip1
+                ld      a,(sg_bfh)
+                call    hdelta
+                call    project_y
+                ld      (sg_bb1),hl
+                call    use_recip2
+                ld      a,(sg_bfh)
+                call    hdelta
+                call    project_y
+                ld      (sg_bb2),hl
+                ld      hl,(sg_bb1)
+                ld      de,(sg_bb2)
+                call    emit_edge
+                ld      a,(sg_fh)
+                call    hdelta
+                jp      p,rsb_verts
+                ld      hl,(sg_fb1)
+                ld      de,(sg_fb2)
+                call    emit_edge
+                jr      rsb_verts
+rsb_nobb:
+                ld      a,(sg_bfh)
+                ld      b,a
+                ld      a,(sg_fh)
+                sub     b
+                jp      m,rsb_verts
+                jr      z,rsb_verts
+                ld      hl,(sg_fb1)
+                ld      de,(sg_fb2)
+                call    emit_edge
+rsb_verts:
+                ; step-face verticals at each endpoint
+                ld      a,(sg_flags)
+                and     SF_NOVT1
+                jr      nz,rsb_v2
+                ld      a,(sg_needbt)
+                or      a
+                jr      z,rsb_v1b
+                ld      hl,(sg_sx1)
+                ld      (dl_x1),hl
+                ld      hl,(sg_ft1)
+                ld      (dl_y1),hl
+                ld      hl,(sg_bt1)
+                ld      (dl_y2),hl
+                call    sp_drawv
+rsb_v1b:
+                ld      a,(sg_needbb)
+                or      a
+                jr      z,rsb_v2
+                ld      hl,(sg_sx1)
+                ld      (dl_x1),hl
+                ld      hl,(sg_bb1)
+                ld      (dl_y1),hl
+                ld      hl,(sg_fb1)
+                ld      (dl_y2),hl
+                call    sp_drawv
+rsb_v2:
+                ld      a,(sg_flags)
+                and     SF_NOVT2
+                jr      nz,rsb_tighten
+                ld      a,(sg_needbt)
+                or      a
+                jr      z,rsb_v2b
+                ld      hl,(sg_sx2)
+                ld      (dl_x1),hl
+                ld      hl,(sg_ft2)
+                ld      (dl_y1),hl
+                ld      hl,(sg_bt2)
+                ld      (dl_y2),hl
+                call    sp_drawv
+rsb_v2b:
+                ld      a,(sg_needbb)
+                or      a
+                jr      z,rsb_tighten
+                ld      hl,(sg_sx2)
+                ld      (dl_x1),hl
+                ld      hl,(sg_bb2)
+                ld      (dl_y1),hl
+                ld      hl,(sg_fb2)
+                ld      (dl_y2),hl
+                call    sp_drawv
+rsb_tighten:
+                ; new top = max(ft, bt), new bottom = min(fb, bb)
+                ld      a,(sg_needbt)
+                or      a
+                jr      z,rsb_tt_f
+                ld      hl,(sg_ft1)
+                ld      de,(sg_bt1)
+                call    max_hl_de
+                ld      (cl_yt1),hl
+                ld      hl,(sg_ft2)
+                ld      de,(sg_bt2)
+                call    max_hl_de
+                ld      (cl_yt2),hl
+                jr      rsb_tb
+rsb_tt_f:
+                ld      hl,(sg_ft1)
+                ld      (cl_yt1),hl
+                ld      hl,(sg_ft2)
+                ld      (cl_yt2),hl
+rsb_tb:
+                ld      a,(sg_needbb)
+                or      a
+                jr      z,rsb_tb_f
+                ld      hl,(sg_fb1)
+                ld      de,(sg_bb1)
+                call    min_hl_de
+                ld      (cl_yb1),hl
+                ld      hl,(sg_fb2)
+                ld      de,(sg_bb2)
+                call    min_hl_de
+                ld      (cl_yb2),hl
+                jr      rsb_tgo
+rsb_tb_f:
+                ld      hl,(sg_fb1)
+                ld      (cl_yb1),hl
+                ld      hl,(sg_fb2)
+                ld      (cl_yb2),hl
+rsb_tgo:
+                ld      hl,(sg_sx1)
+                ld      (cl_sx1),hl
+                ld      hl,(sg_sx2)
+                ld      (cl_sx2),hl
+                call    set_op_range
+                jp      sp_tighten
+
+; --- one-sided wall --------------------------------------------------------
+rsb_solid:
+                ld      a,(sg_ch)
+                call    hdelta
+                jp      m,rsb_s_bot
+                jr      z,rsb_s_bot
+                ld      hl,(sg_ft1)
+                ld      de,(sg_ft2)
+                call    emit_edge
+rsb_s_bot:
+                ld      a,(sg_fh)
+                call    hdelta
+                jp      p,rsb_s_v1
+                ld      hl,(sg_fb1)
+                ld      de,(sg_fb2)
+                call    emit_edge
+rsb_s_v1:
+                ld      a,(sg_flags)
+                and     SF_NOVT1
+                jr      nz,rsb_s_v2
+                ld      hl,(sg_sx1)
+                ld      (dl_x1),hl
+                ld      hl,(sg_ft1)
+                ld      (dl_y1),hl
+                ld      hl,(sg_fb1)
+                ld      (dl_y2),hl
+                call    sp_drawv
+rsb_s_v2:
+                ld      a,(sg_flags)
+                and     SF_NOVT2
+                jr      nz,rsb_s_op
+                ld      hl,(sg_sx2)
+                ld      (dl_x1),hl
+                ld      hl,(sg_ft2)
+                ld      (dl_y1),hl
+                ld      hl,(sg_fb2)
+                ld      (dl_y2),hl
+                call    sp_drawv
+rsb_s_op:
+                call    set_op_range
+                jp      sp_marksolid
+
+; --- helpers ---------------------------------------------------------------
+; set_op_range : cl_lo / cl_hi as the half-open column range of the seg.
+set_op_range:
+                ld      a,(cl_lo)
+                ld      l,a
+                ld      h,0
+                ld      (cl_lo),hl
+                ld      a,(cl_hi)
+                ld      l,a
+                ld      h,0
+                inc     hl
+                ld      (cl_hi),hl
+                ret
+
+use_recip1:
+                ld      a,(sg_m1)
+                ld      (rc_m8),a
+                ld      a,(sg_s1)
+                ld      (rc_s),a
+                ret
+use_recip2:
+                ld      a,(sg_m2)
+                ld      (rc_m8),a
+                ld      a,(sg_s2)
+                ld      (rc_s),a
+                ret
+
+; hdelta : A = height - eye, flags set from the subtraction
+hdelta:
+                ld      b,a
+                ld      a,(vs_vz)
+                ld      c,a
+                ld      a,b
+                sub     c
+                ret
+
+; emit_edge : HL = y at sx1, DE = y at sx2; clip and emit the sloped edge.
+emit_edge:
+                ld      (ln_y1),hl
+                ld      (ln_y2),de
+                ld      hl,(sg_sx1)
+                ld      de,(sg_sx2)
+                call    cmp_s16
+                jr      c,ee_ord
+                ; swap so x1 < x2
+                ld      hl,(sg_sx2)
+                ld      (ln_x1),hl
+                ld      hl,(sg_sx1)
+                ld      (ln_x2),hl
+                ld      hl,(ln_y1)
+                ld      de,(ln_y2)
+                ld      (ln_y1),de
+                ld      (ln_y2),hl
+                jp      sp_draws
+ee_ord:
+                ld      hl,(sg_sx1)
+                ld      (ln_x1),hl
+                ld      hl,(sg_sx2)
+                ld      (ln_x2),hl
+                jp      sp_draws
+
+max_hl_de:
+                call    cmp_s16
+                ret     nc
+                ex      de,hl
+                ret
+min_hl_de:
+                call    cmp_s16
+                ret     c
+                ex      de,hl
+                ret

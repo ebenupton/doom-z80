@@ -1,0 +1,687 @@
+; ---------------------------------------------------------------------------
+; View transform and perspective projection.
+;
+; The rotation is  vx = wx*sin - wy*cos,  vy = wx*cos + wy*sin,  with sin and
+; cos held as unsigned 0.8 magnitudes plus sign and unity flags. Doing that as
+; four 16x8 quarter-square multiplies would cost about 1600 T-states a point,
+; and a frame transforms sixty vertices plus a couple of bbox corners per BSP
+; node, so instead each frame builds two 256-entry product tables - i*sin and
+; i*cos - and a rotation term becomes two table lookups. The tables cost about
+; 29k T-states to fill and save five times that.
+;
+; Results are TRUE16 counts: 32 counts to one prescaled unit, so a rotation
+; output is round-to-nearest shifted down by 3 and added to the per-frame
+; origin term (vs_rx / vs_ry).
+; ---------------------------------------------------------------------------
+
+; ---------------------------------------------------------------------------
+; sincos_lookup : A = angle byte -> magnitude in C, neg in B, unity in E
+; Mirrors fp._sin_mag_sign.
+; ---------------------------------------------------------------------------
+sincos_lookup:
+                ld      d,a
+                rlca
+                rlca
+                and     3
+                ld      b,a                     ; B = quadrant
+                ld      a,d
+                and     63
+                ld      e,a                     ; E = index
+                bit     0,b
+                jr      z,sc_noflip
+                ld      a,64
+                sub     e
+                ld      e,a                     ; mirror in odd quadrants
+sc_noflip:
+                ld      a,e
+                or      a
+                jr      nz,sc_nonzero
+                ld      c,0                     ; sin 0: magnitude 0, positive
+                ld      b,0
+                ld      e,0
+                ret
+sc_nonzero:
+                ld      a,b
+                cp      2
+                ld      b,0
+                jr      c,sc_pos
+                ld      b,1                     ; negative in quadrants 2 and 3
+sc_pos:
+                ld      h,SIN_UNITY>>8
+                ld      a,SIN_UNITY&$ff
+                add     a,e
+                ld      l,a
+                ld      a,(hl)
+                or      a
+                jr      z,sc_notunity
+                ld      c,0
+                ld      e,1                     ; unity: skip the multiply
+                ret
+sc_notunity:
+                ld      h,SIN_MAG>>8
+                ld      a,SIN_MAG&$ff
+                add     a,e
+                ld      l,a
+                ld      c,(hl)
+                ld      e,0
+                ret
+
+; ---------------------------------------------------------------------------
+; build_prod : fill a pair of product planes with i*mag.
+; in : A = magnitude, D = low plane page (high plane is the next page)
+; ---------------------------------------------------------------------------
+build_prod:
+                ld      e,a
+                ld      d,0                     ; DE = mag
+                ld      hl,0                    ; running product
+bp_page:        ld      b,TSLO>>8               ; patched by the caller
+                ld      c,0
+bp_loop:
+                ld      a,l
+                ld      (bc),a
+                inc     b
+                ld      a,h
+                ld      (bc),a
+                dec     b
+                add     hl,de
+                inc     c
+                jr      nz,bp_loop
+                ret
+
+; ---------------------------------------------------------------------------
+; view_setup : rebuild the per-frame view state.
+; Reads pl_x/pl_xf/pl_y/pl_yf/pl_ang/vs_vz, writes the trig state, the product
+; tables and vs_rx/vs_ry.
+; ---------------------------------------------------------------------------
+view_setup:
+                ; The trig state and the two 256-entry product tables depend
+                ; only on the view angle, so a frame that merely moved reuses
+                ; them; rebuilding costs about 29k T-states.
+                ld      a,(vs_haveang)
+                or      a
+                jr      z,vs_rebuild
+                ld      a,(pl_ang)
+                ld      b,a
+                ld      a,(vs_lastang)
+                cp      b
+                jp      z,vs_origin
+vs_rebuild:
+                ld      a,(pl_ang)
+                ld      (vs_lastang),a
+                ld      a,1
+                ld      (vs_haveang),a
+                ld      a,(pl_ang)
+                call    sincos_lookup
+                ld      a,c
+                ld      (vs_smag),a
+                ld      a,b
+                ld      (vs_sneg),a
+                ld      a,e
+                ld      (vs_sunity),a
+                ld      a,(pl_ang)
+                add     a,64
+                call    sincos_lookup
+                ld      a,c
+                ld      (vs_cmag),a
+                ld      a,b
+                ld      (vs_cneg),a
+                ld      a,e
+                ld      (vs_cunity),a
+
+                ; product tables
+                ld      a,TSLO>>8
+                ld      (bp_page+1),a
+                ld      a,(vs_smag)
+                call    build_prod
+                ld      a,TCLO>>8
+                ld      (bp_page+1),a
+                ld      a,(vs_cmag)
+                call    build_prod
+
+                ; patch the rotation dispatchers
+                ld      hl,rot_sin_tab
+                ld      a,(vs_sunity)
+                or      a
+                jr      z,vs_s1
+                ld      hl,rot_sin_unity
+vs_s1:          ld      (rs_k+1),hl
+                ld      a,(vs_smag)
+                ld      (rsm2+1),a
+                ld      hl,rsn
+                ld      a,(vs_sneg)
+                call    patch_sign
+
+                ld      hl,rot_cos_tab
+                ld      a,(vs_cunity)
+                or      a
+                jr      z,vs_c1
+                ld      hl,rot_cos_unity
+vs_c1:          ld      (rc_k+1),hl
+                ld      a,(vs_cmag)
+                ld      (rcm2+1),a
+                ld      hl,rcn
+                ld      a,(vs_cneg)
+                call    patch_sign
+
+vs_origin:
+                ; --- origin term ----------------------------------------
+                ; nx = (-px88) >> 8, dx_lo = (-px88) & 255
+                ld      hl,(pl_x)
+                ld      a,(pl_xf)
+                call    neg_pos                 ; HL = nx, A = dx_lo
+                ld      (vs_nx),hl
+                ld      (vs_dxlo),a
+                ld      hl,(pl_y)
+                ld      a,(pl_yf)
+                call    neg_pos
+                ld      (vs_ny),hl
+                ld      (vs_dylo),a
+
+                ; frac_vx = fterm(dx_lo, sin) - fterm(dy_lo, cos)
+                ld      a,(vs_dxlo)
+                call    fterm_sin
+                ld      (vs_t1),hl
+                ld      a,(vs_dylo)
+                call    fterm_cos
+                ex      de,hl
+                ld      hl,(vs_t1)
+                or      a
+                sbc     hl,de
+                ld      b,3
+                call    rns_hl                  ; rns(frac_vx, 3)
+                ld      (vs_t1),hl
+
+                ; frac_vy = fterm(dx_lo, cos) + fterm(dy_lo, sin)
+                ld      a,(vs_dxlo)
+                call    fterm_cos
+                ld      (vs_t2),hl
+                ld      a,(vs_dylo)
+                call    fterm_sin
+                ex      de,hl
+                ld      hl,(vs_t2)
+                add     hl,de
+                ld      b,3
+                call    rns_hl
+                ld      (vs_t2),hl
+
+                ; ref_vx = rot_sin(nx) - rot_cos(ny)
+                ld      de,(vs_nx)
+                call    rot_sin
+                call    push_ahl
+                ld      de,(vs_ny)
+                call    rot_cos
+                call    neg_ahl
+                call    add_pushed              ; A:HL = ref_vx
+                call    rns3_ahl
+                ld      de,(vs_t1)
+                add     hl,de
+                ld      (vs_rx),hl
+
+                ; ref_vy = rot_cos(nx) + rot_sin(ny)
+                ld      de,(vs_nx)
+                call    rot_cos
+                call    push_ahl
+                ld      de,(vs_ny)
+                call    rot_sin
+                call    add_pushed
+                call    rns3_ahl
+                ld      de,(vs_t2)
+                add     hl,de
+                ld      (vs_ry),hl
+
+                ; advance the vertex-cache generation
+                ld      a,(vc_stamp)
+                inc     a
+                jr      nz,vs_stampok
+                call    vcache_wipe
+                ld      a,1
+vs_stampok:
+                ld      (vc_stamp),a
+                ret
+
+; patch_sign : HL = patch site, A = 0 for "RET NOP NOP", else "JP neg_ahl"
+patch_sign:
+                or      a
+                jr      nz,ps_neg
+                ld      (hl),$c9                ; RET
+                inc     hl
+                ld      (hl),0
+                inc     hl
+                ld      (hl),0
+                ret
+ps_neg:
+                ld      (hl),$c3                ; JP nn
+                inc     hl
+                ld      (hl),neg_ahl & $ff
+                inc     hl
+                ld      (hl),neg_ahl >> 8
+                ret
+
+; neg_pos : HL = integer part, A = fraction -> HL = (-v)>>8, A = (-v)&255
+neg_pos:
+                ld      d,a
+                xor     a
+                sub     d
+                ld      d,a                     ; D = (-frac) & 255
+                ld      a,h
+                cpl
+                ld      h,a
+                ld      a,l
+                cpl
+                ld      l,a                     ; HL = ~v = -v - 1
+                ld      a,d
+                or      a
+                jr      nz,np_done
+                inc     hl                      ; no fraction: -v exactly
+np_done:
+                ld      a,d
+                ret
+
+; fterm_sin / fterm_cos : A = unsigned 0.8 delta -> HL = signed 0.8 term
+fterm_sin:
+                ld      e,a
+                ld      a,(vs_sunity)
+                or      a
+                jr      nz,ft_unity_s
+                ld      h,TSLO>>8
+                ld      l,e
+                ld      e,(hl)
+                inc     h
+                ld      d,(hl)                  ; DE = lo*mag
+                ld      hl,128
+                add     hl,de
+                ld      l,h
+                ld      h,0                     ; HL = (lo*mag + 128) >> 8
+                ld      a,(vs_sneg)
+                jr      ft_sign
+ft_unity_s:
+                ld      h,0
+                ld      l,e
+                ld      a,(vs_sneg)
+                jr      ft_sign
+fterm_cos:
+                ld      e,a
+                ld      a,(vs_cunity)
+                or      a
+                jr      nz,ft_unity_c
+                ld      h,TCLO>>8
+                ld      l,e
+                ld      e,(hl)
+                inc     h
+                ld      d,(hl)
+                ld      hl,128
+                add     hl,de
+                ld      l,h
+                ld      h,0
+                ld      a,(vs_cneg)
+                jr      ft_sign
+ft_unity_c:
+                ld      h,0
+                ld      l,e
+                ld      a,(vs_cneg)
+ft_sign:
+                or      a
+                ret     z
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ret
+
+; ---------------------------------------------------------------------------
+; rot_sin / rot_cos : DE = s16 -> A:HL = s24 product with sin / cos.
+; The dispatch target, the magnitude and the sign step are patched per frame.
+; ---------------------------------------------------------------------------
+rot_sin:
+rs_k:           jp      rot_sin_tab
+rot_sin_tab:
+                ld      a,d
+                ld      h,TSLO>>8
+                ld      l,e
+                ld      c,(hl)
+                inc     h
+                ld      b,(hl)                  ; BC = lo * mag
+                dec     h
+                ld      l,a
+                ld      e,(hl)
+                inc     h
+                ld      d,(hl)                  ; DE = hi_unsigned * mag
+                or      a
+                jp      p,rst_pos
+                ld      a,d
+rsm2:           sub     0                       ; hi was negative: -= mag<<8
+                ld      d,a
+rst_pos:
+                ld      l,c
+                ld      a,b
+                add     a,e
+                ld      h,a
+                ld      a,d
+                adc     a,0
+rsn:            ret
+                nop
+                nop
+rot_sin_unity:
+                ld      l,0
+                ld      h,e
+                ld      a,d                     ; A:HL = d << 8
+                jp      rsn
+
+rot_cos:
+rc_k:           jp      rot_cos_tab
+rot_cos_tab:
+                ld      a,d
+                ld      h,TCLO>>8
+                ld      l,e
+                ld      c,(hl)
+                inc     h
+                ld      b,(hl)
+                dec     h
+                ld      l,a
+                ld      e,(hl)
+                inc     h
+                ld      d,(hl)
+                or      a
+                jp      p,rct_pos
+                ld      a,d
+rcm2:           sub     0
+                ld      d,a
+rct_pos:
+                ld      l,c
+                ld      a,b
+                add     a,e
+                ld      h,a
+                ld      a,d
+                adc     a,0
+rcn:            ret
+                nop
+                nop
+rot_cos_unity:
+                ld      l,0
+                ld      h,e
+                ld      a,d
+                jp      rcn
+
+; ---------------------------------------------------------------------------
+; s24 helpers used to sum rotation terms.
+; ---------------------------------------------------------------------------
+push_ahl:
+                ld      (vs_acc),hl
+                ld      (vs_acc+2),a
+                ret
+add_pushed:
+                ld      de,(vs_acc)
+                add     hl,de
+                ld      d,a
+                ld      a,(vs_acc+2)
+                adc     a,d
+                ret
+; sub_pushed : A:HL = vs_acc - A:HL, replacing a negate-then-add pair.
+sub_pushed:
+                ex      de,hl
+                ld      c,a
+                ld      hl,(vs_acc)
+                or      a
+                sbc     hl,de
+                ld      a,(vs_acc+2)
+                sbc     a,c
+                ret
+
+; ---------------------------------------------------------------------------
+; to_view : tv_wx / tv_wy (s16 prescaled) -> tv_tvx / tv_tvy (s16 counts)
+; ---------------------------------------------------------------------------
+to_view:
+                ; bx = rot_sin(wx) - rot_cos(wy)
+                ld      de,(tv_wx)
+                call    rot_sin
+                ld      (vs_acc),hl
+                ld      (vs_acc+2),a
+                ld      de,(tv_wy)
+                call    rot_cos
+                call    sub_pushed
+                call    rns3_ahl
+                ld      de,(vs_rx)
+                add     hl,de
+                ld      (tv_tvx),hl
+
+                ; by = rot_cos(wx) + rot_sin(wy)
+                ld      de,(tv_wx)
+                call    rot_cos
+                ld      (vs_acc),hl
+                ld      (vs_acc+2),a
+                ld      de,(tv_wy)
+                call    rot_sin
+                call    add_pushed
+                call    rns3_ahl
+                ld      de,(vs_ry)
+                add     hl,de
+                ld      (tv_tvy),hl
+                ret
+
+; ---------------------------------------------------------------------------
+; recip : HL = tvy (positive s16 counts) -> rc_m8, rc_s
+;   idx = max(2, tvy >> 4), reduced by right shifts into [2, 255]
+; ---------------------------------------------------------------------------
+recip:
+                srl     h
+                rr      l
+                srl     h
+                rr      l
+                srl     h
+                rr      l
+                srl     h
+                rr      l                       ; HL = tvy >> 4
+                ; the table is defined for a 9.1 index of at most 1023
+                ld      a,h
+                cp      4
+                jr      c,rp_noclamp
+                ld      hl,1023
+rp_noclamp:
+                ld      b,0
+                ld      a,h
+                or      a
+                jr      z,rp_small
+rp_shift:
+                srl     h
+                rr      l
+                inc     b
+                ld      a,h
+                or      a
+                jr      nz,rp_shift
+rp_small:
+                ld      a,l
+                cp      2
+                jr      nc,rp_ok
+                ld      l,2
+rp_ok:
+                ld      h,RECIP_M8>>8
+                ld      a,(hl)
+                ld      (rc_m8),a
+                inc     h
+                ld      a,(hl)
+                add     a,b
+                ld      (rc_s),a
+                ret
+
+; ---------------------------------------------------------------------------
+; project_y : A = height delta (s8), rc_m8 / rc_s set -> HL = screen y (s16)
+;   sy = 80 - rns(h*M8 + (h << 8), S)
+; ---------------------------------------------------------------------------
+project_y:
+                ld      (py_h),a
+                ld      h,a
+                ld      a,(rc_m8)
+                ld      l,a
+                call    mul_s8_u8               ; HL = h * M8 (signed)
+                ld      a,(py_h)
+                ld      d,a
+                ld      e,0                     ; DE = h << 8
+                add     hl,de                   ; HL = h * m9, fits s16
+                ld      a,(rc_s)
+                ld      b,a
+                call    rns_hl
+                ex      de,hl
+                ld      hl,HALF_H
+                or      a
+                sbc     hl,de
+                ret
+
+; ---------------------------------------------------------------------------
+; project_x : HL = tvx (s16 counts), rc_m8 / rc_s set -> HL = screen x (s16)
+;
+;   X88 = tvx << 3   (exact 8.8 view x)
+;   shrink X88 into s16, decrementing S (or counting a deficit past its floor)
+;   B32 = (X88 << 8) + X88 * M8
+;   sx  = 128 + rns(B32, S + 8)
+; ---------------------------------------------------------------------------
+project_x:
+                ; X88 = tvx << 3, as s24 in A:HL
+                ld      a,h
+                rla
+                sbc     a,a
+                add     hl,hl
+                rla
+                add     hl,hl
+                rla
+                add     hl,hl
+                rla
+                ld      d,a
+                ld      a,(rc_s)
+                ld      (px_s),a
+                xor     a
+                ld      (px_def),a
+                ld      a,d
+px_shrink:
+                ; X88 fits s16 once A equals the sign extension of H.
+                ld      d,a
+                ld      a,h
+                rla
+                sbc     a,a
+                cp      d
+                jr      z,px_fits
+                ld      a,(px_s)
+                cp      2
+                jr      c,px_deficit
+                dec     a
+                ld      (px_s),a
+                jr      px_sh1
+px_deficit:
+                ld      a,(px_def)
+                inc     a
+                ld      (px_def),a
+px_sh1:
+                ld      a,d
+                sra     a
+                rr      h
+                rr      l
+                jr      px_shrink
+px_fits:
+                ; vx = H (s8), frac = L (u8).
+                ;
+                ; sx - 128 = rns(X88 * m9, S + 8), and X88 * m9 splits as
+                ;   256*W + (frac*M8 & 255)   with   W = vx*m9 + frac + (frac*M8 >> 8)
+                ; so the whole thing collapses to rns(W, S): no 32-bit
+                ; arithmetic, and the discarded low byte cannot change the
+                ; floor because it is strictly less than one unit.
+                ld      a,l
+                ld      (px_frac),a
+                ld      a,h
+                ld      (px_vx),a
+                ld      a,(rc_m8)
+                ld      (px_m8),a
+                ld      l,a
+                call    mul_s8_u8               ; HL = vx * M8 (signed)
+                ld      (px_p2),hl
+                ld      a,(px_frac)
+                ld      h,a
+                ld      a,(px_m8)
+                ld      l,a
+                call    mul_u8                  ; HL = frac * M8 (unsigned)
+                ld      e,h                     ; E = frac*M8 >> 8
+                ld      d,0
+                ld      hl,(px_p2)
+                ld      a,h
+                rla
+                sbc     a,a                     ; A:HL = vx*M8 sign extended
+                add     hl,de
+                adc     a,0
+                ld      c,a
+                ld      a,(px_frac)
+                ld      e,a
+                ld      d,0
+                ld      a,c
+                add     hl,de
+                adc     a,0
+                ; + vx << 8
+                ld      c,a
+                ld      a,(px_vx)
+                ld      d,a
+                ld      e,0
+                rla
+                sbc     a,a
+                ld      b,a                     ; B = sign extension of vx<<8
+                ld      a,c
+                add     hl,de
+                adc     a,b                     ; A:HL = W
+
+                ld      c,a
+                ld      a,(px_def)
+                or      a
+                jr      nz,px_defpath
+                ld      a,(px_s)
+                ld      b,a
+                ld      a,c
+                call    rns_ahl
+                ld      de,HALF_W
+                add     hl,de
+                adc     a,0
+                jp      sat_ahl
+px_defpath:
+                dec     a
+                jr      z,px_dfdone
+                ld      b,a
+px_dfsh:        add     hl,hl
+                rl      c
+                djnz    px_dfsh
+px_dfdone:
+                ld      a,c
+                ld      de,HALF_W
+                add     hl,de
+                adc     a,0
+                jp      sat_ahl
+
+; ---------------------------------------------------------------------------
+; sat_ahl : clamp the s24 in A:HL to a signed 16-bit HL.
+; Columns far off screen only need to keep their sign and ordering, and
+; letting them wrap would put them back on screen.
+; ---------------------------------------------------------------------------
+sat_ahl:
+                ld      d,a
+                ld      a,h
+                rla
+                sbc     a,a
+                cp      d
+                ret     z                       ; already fits
+                bit     7,d
+                jr      nz,sat_neg
+                ld      hl,$7fff
+                ret
+sat_neg:
+                ld      hl,$8000
+                ret
+
+; ---------------------------------------------------------------------------
+; vcache_wipe : invalidate every vertex-cache entry.
+; ---------------------------------------------------------------------------
+vcache_wipe:
+                ld      hl,VCACHE_BASE
+                ld      de,VCACHE_ENT
+                ld      bc,512
+vw_loop:
+                ld      (hl),0
+                add     hl,de
+                dec     bc
+                ld      a,b
+                or      c
+                jr      nz,vw_loop
+                ret

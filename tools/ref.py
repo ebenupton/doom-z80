@@ -1,0 +1,750 @@
+#!/usr/bin/env python3
+"""Bit-exact Python reference for the ZX Spectrum DOOM wireframe engine.
+
+This is the contract the Z80 implementation must reproduce exactly. It shares
+the BBC port's fixed-point primitives (fp.py) and its 256x160 raster geometry,
+so frames can be eyeballed against that engine's output, but the seg pipeline
+is the simpler per-seg-verticals scheme of RENDERING_ENGINE.md section 11
+rather than the BBC port's vertex-span descriptor machinery.
+
+Everything here is integer arithmetic in the formats the Z80 will use:
+    s16 prescaled world coords, s8 sector heights, 0.8 slopes, 8.0 screen.
+"""
+import os, sys, math, json
+
+REF_DIR = os.environ.get("DOOM_BBC_REF", "/tmp/doom_bbc_ref")
+sys.path.insert(0, REF_DIR)
+
+import fp as fpm  # noqa: E402
+from fp import (m8, fp_mul8, fp_div8, fp_sincos, fp_recip, rns,   # noqa: E402
+                fp_project_x, fp_project_y, _rot_int, _frac_rot_term,
+                T16_NEAR_VERDICT, T16_NEAR_CROSS, fp_cross_t16)
+
+W, H = 256, 160
+HALF_W, HALF_H = 128, 80
+NF_SUBSECTOR = 0x8000
+
+# ---------------------------------------------------------------------------
+# Map data
+# ---------------------------------------------------------------------------
+
+class MapData:
+    """Prescaled, Z80-ready tables for one level."""
+    __slots__ = ("vx", "vy", "sec_fh", "sec_ch", "segs", "ssectors", "nodes",
+                 "map_center", "prescale", "start", "_dw",
+                 "ss_sector", "sector_floor_world")
+
+
+def load_from_reference(mapname="E1M1"):
+    """Pull the derived tables out of the BBC port's loader.
+
+    That module does the hard precomputation - dead-seg elimination,
+    colinear merging, and the NOVT vertical-suppression analysis - so the
+    Spectrum packer inherits all of it.
+    """
+    os.environ.setdefault("SDL_VIDEODRIVER", "dummy")
+    os.environ.setdefault("PYGAME_HIDE_SUPPORT_PROMPT", "1")
+    os.environ.setdefault("DOOM_ANIM", "0")
+    cwd = os.getcwd()
+    os.chdir(REF_DIR)
+    import doom_wireframe as dw
+    os.chdir(cwd)
+
+    md = MapData()
+    md.map_center = (dw.MAP_CENTER_X, dw.MAP_CENTER_Y)
+    md.prescale = dw.PRESCALE
+    md.vx = [v[0] for v in dw.fp_vertexes]
+    md.vy = [v[1] for v in dw.fp_vertexes]
+    md.sec_fh = [s[0] for s in dw.fp_sectors]
+    md.sec_ch = [s[1] for s in dw.fp_sectors]
+
+    md.segs = []
+    for si, svwh in enumerate(dw.fp_segs_vwh):
+        s = svwh[0]
+        novt = dw._seg_novt_flags[si]
+        back = svwh[2]
+        md.segs.append({
+            "v1": s[0], "v2": s[1],
+            "front": svwh[1], "back": (-1 if back is None else back),
+            "fh": svwh[3], "ch": svwh[4],
+            "ldx": svwh[13], "ldy": svwh[14],
+            "dir": s[4],
+            "linedef_v1": dw.linedefs[s[3]][0],
+            "no_vt1": bool(novt & dw._SF_NOVT1),
+            "no_vt2": bool(novt & dw._SF_NOVT2),
+        })
+
+    # Back-face reference point: the linedef's first vertex, prescaled.
+    # Keep the *rounded* prescaled coordinate so the whole test is s16.
+    for sg in md.segs:
+        rv = dw.vertexes[sg["linedef_v1"]]
+        sg["lx"] = dw._prescale_round(rv[0] - dw.MAP_CENTER_X, dw.PRESCALE)
+        sg["ly"] = dw._prescale_round(rv[1] - dw.MAP_CENTER_Y, dw.PRESCALE)
+
+    md.ssectors = [(c, f) for (c, f) in dw.fp_ssectors]   # (count, first)
+
+    # Which sector each subsector belongs to, taken from its first seg's front
+    # side, plus each sector's raw floor height for the eye-height table.
+    md.ss_sector = []
+    for (cnt, first) in md.ssectors:
+        md.ss_sector.append(dw.fp_segs_vwh[first][1])
+    md.sector_floor_world = [s[0] for s in dw.sectors]
+
+    md.nodes = []
+    for n in dw.nodes:
+        md.nodes.append({
+            "x": n[0], "y": n[1], "dx": n[2], "dy": n[3],
+            # DOOM bbox order is top, bottom, left, right
+            "bbox": [(n[4], n[5], n[6], n[7]), (n[8], n[9], n[10], n[11])],
+            "child": (n[12], n[13]),
+        })
+    # Prescale bboxes into the same space as the vertices, expanding outward so
+    # the rounded box still contains the true one, then quantise to multiples
+    # of four: the packed table stores quarter-prescale bytes, so the engine
+    # only ever sees the quantised box and the reference must match it.
+    import math as _m
+    Q = 4
+    for nd in md.nodes:
+        nd["bboxp"] = []
+        for (top, bot, left, right) in nd["bbox"]:
+            ps = dw.PRESCALE
+            t = -(-(top - dw.MAP_CENTER_Y) // ps)         # ceil
+            b = (bot - dw.MAP_CENTER_Y) // ps             # floor
+            l = (left - dw.MAP_CENTER_X) // ps            # floor
+            rr = -(-(right - dw.MAP_CENTER_X) // ps)      # ceil
+            nd["bboxp"].append((-(-t // Q) * Q, (b // Q) * Q,
+                                (l // Q) * Q, -(-rr // Q) * Q))
+        # Reduce the partition direction so the side test's multiplies stay
+        # 8x16 rather than 16x16.
+        g = _m.gcd(abs(nd["dx"]), abs(nd["dy"])) or 1
+        nd["rdx"] = nd["dx"] // g
+        nd["rdy"] = nd["dy"] // g
+
+    md.start = (float(dw.player_x), float(dw.player_y),
+                int(round(dw.pangle * 256 / 360)) & 0xff,
+                dw.player_floor(dw.player_x, dw.player_y) + 41)
+    md._dw = dw
+    return md
+
+
+# ---------------------------------------------------------------------------
+# Linear boundary functions: (slope 0.8 signed, intercept 8.0 signed)
+# ---------------------------------------------------------------------------
+
+def div8s(num, den):
+    """(num << 8) / den, truncated toward zero, saturating - the exact
+    behaviour of the Z80 `divs` routine, whose first phase yields only an
+    8-bit integer quotient."""
+    if den == 0:
+        return 0
+    neg = (num < 0) != (den < 0)
+    n, d = abs(num), abs(den)
+    if d > 0x7fff:
+        d = 0x7fff
+    if n // d >= 128:
+        q = 0x7fff              # the full quotient would not fit s16
+    else:
+        q = (n << 8) // d
+    return -q if neg else q
+
+
+def linfn(y1, y2, sx1, sx2):
+    dx = sx2 - sx1
+    if dx == 0:
+        return (0, (y1 + y2) >> 1)
+    slope = div8s(y2 - y1, dx)
+    if slope == 0:
+        return (0, y1)
+    if abs(sx1) <= abs(sx2):
+        return (slope, y1 - fp_mul8(slope, sx1))
+    return (slope, y2 - fp_mul8(slope, sx2))
+
+
+def ev(fn, x):
+    if fn[0] == 0:
+        return fn[1]
+    return fp_mul8(fn[0], x) + fn[1]
+
+
+def ev88(fn, x):
+    """Evaluate to 8.8 - used where a half-pixel matters (vertical clipping)."""
+    if fn[0] == 0:
+        return fn[1] << 8
+    return m8(fn[0], x) + (fn[1] << 8)
+
+
+TOP0 = (0, 0)
+BOT0 = (0, H - 1)
+
+
+# ---------------------------------------------------------------------------
+# Trapezoid clip spans
+# ---------------------------------------------------------------------------
+
+class Spans:
+    """Visible region as a sorted array of inclusive column ranges."""
+    __slots__ = ("spans", "out")
+
+    def __init__(self, out):
+        self.spans = [(0, W - 1, TOP0, BOT0)]
+        self.out = out       # collects emitted line segments
+
+    def is_full(self):
+        return not self.spans
+
+    def has_gap(self, lo, hi):
+        ilo = max(0, lo)
+        ihi = min(W - 1, hi)
+        if ilo > ihi:
+            return False
+        for xlo, xlast, tfn, bfn in self.spans:
+            if xlo > ihi:
+                break
+            if xlast < ilo:
+                continue
+            clo, chi = max(xlo, ilo), min(xlast, ihi)
+            # The aperture is monotone in x, so its two ends decide it.
+            if ev(tfn, clo) < ev(bfn, clo) or ev(tfn, chi) < ev(bfn, chi):
+                return True
+        return False
+
+    # -- drawing ----------------------------------------------------------
+
+    def draw(self, lines):
+        for (x1, y1, x2, y2) in lines:
+            if x1 == x2:
+                self._draw_vertical(x1, y1, y2)
+            else:
+                if x1 > x2:
+                    x1, y1, x2, y2 = x2, y2, x1, y1
+                self._draw_sloped(x1, y1, x2, y2)
+
+    def _draw_vertical(self, x, ya, yb):
+        if x < 0 or x >= W:
+            return
+        if ya > yb:
+            ya, yb = yb, ya
+        for xlo, xlast, tfn, bfn in self.spans:
+            if xlo > x:
+                return
+            if xlast < x:
+                continue
+            yt = ev(tfn, x)
+            yb2 = ev(bfn, x)
+            if yt >= yb2:
+                return
+            a = max(ya, yt)
+            b = min(yb, yb2)
+            if a <= b:
+                self.out.append((x, a, x, b))
+            return
+
+    def _draw_sloped(self, x1, y1, x2, y2):
+        for xlo, xlast, tfn, bfn in self.spans:
+            if xlo > x2:
+                break
+            if xlast < x1:
+                continue
+            c = clip_to_trap(x1, y1, x2, y2, xlo, xlast, tfn, bfn)
+            if c:
+                self.out.append(c)
+
+    # -- occlusion updates -------------------------------------------------
+
+    def mark_solid(self, lo, hi):
+        """Delete the half-open column range [lo, hi)."""
+        ilo, ihi = max(0, lo), min(W, hi) - 1
+        if ilo > ihi:
+            return
+        new = []
+        for xlo, xlast, tfn, bfn in self.spans:
+            if xlast < ilo or xlo > ihi:
+                new.append((xlo, xlast, tfn, bfn))
+                continue
+            if xlo < ilo:
+                new.append((xlo, ilo - 1, tfn, bfn))
+            if xlast > ihi:
+                new.append((ihi + 1, xlast, tfn, bfn))
+        self.spans = new
+
+    def tighten(self, lo, hi, sx1, sx2, yt1, yt2, yb1, yb2):
+        ilo, ihi = max(0, lo), min(W, hi) - 1
+        if ilo > ihi:
+            return
+        ntf = linfn(yt1, yt2, sx1, sx2)
+        nbf = linfn(yb1, yb2, sx1, sx2)
+        new = []
+        for xlo, xlast, tfn, bfn in self.spans:
+            if xlast < ilo or xlo > ihi:
+                new.append((xlo, xlast, tfn, bfn))
+                continue
+            if xlo < ilo:
+                new.append((xlo, ilo - 1, tfn, bfn))
+            ox0, ox1 = max(xlo, ilo), min(xlast, ihi)
+            for tx0, tx1, tf in pw(tfn, ntf, ox0, ox1, True):
+                for bx0, bx1, bf in pw(bfn, nbf, tx0, tx1, False):
+                    if bx1 < bx0:
+                        continue
+                    d = (bf[0] - tf[0], bf[1] - tf[1])
+                    if evd(d, bx0) > 0 or evd(d, bx1) > 0:
+                        new.append((bx0, bx1, tf, bf))
+            if xlast > ihi:
+                new.append((ihi + 1, xlast, tfn, bfn))
+        self.spans = new
+
+
+def evd(d, x):
+    """Evaluate a difference function (slope, intercept) at a column."""
+    if d[0] == 0:
+        return d[1]
+    return fp_mul8(d[0], x) + d[1]
+
+
+def pw(f, g, x0, x1, want_max):
+    """Piecewise max (or min) of two linear functions over the inclusive
+    column range [x0, x1].
+
+    Comparisons run on the difference f - g, so parallel boundaries - which
+    includes the common both-flat case - cost no multiply, and the crossover
+    is a single divide rather than a search.
+    """
+    d = (f[0] - g[0], f[1] - g[1])
+    d0 = evd(d, x0)
+    d1 = evd(d, x1)
+    if want_max:
+        if d0 >= 0 and d1 >= 0: return [(x0, x1, f)]
+        if d0 <= 0 and d1 <= 0: return [(x0, x1, g)]
+    else:
+        if d0 <= 0 and d1 <= 0: return [(x0, x1, f)]
+        if d0 >= 0 and d1 >= 0: return [(x0, x1, g)]
+    if d[0] == 0:
+        keep_f = (d0 >= 0) if want_max else (d0 <= 0)
+        return [(x0, x1, f if keep_f else g)]
+    cx = div8s(-d[1], d[0])
+    cx = max(x0 + 1, min(x1, cx))
+    dc = evd(d, cx)
+    fwins = (dc >= 0) if want_max else (dc <= 0)
+    if fwins:
+        cx += 1
+        if cx > x1:
+            return [(x0, x1, f)]
+    else:
+        if cx <= x0:
+            return [(x0, x1, g)]
+    first_f = (d0 > 0) if want_max else (d0 < 0)
+    if first_f:
+        return [(x0, cx - 1, f), (cx, x1, g)]
+    return [(x0, cx - 1, g), (cx, x1, f)]
+
+
+def clip_to_trap(x1, y1, x2, y2, xlo, xlast, tfn, bfn):
+    """Cyrus-Beck clip of a sloped line to one trapezoid. Integer, x1 < x2.
+
+    Parametric t is kept as a 0.8 fraction; endpoints are recovered with
+    round-to-nearest and then clamped back inside the trapezoid, because
+    the divide's truncation can otherwise place them a pixel outside.
+    """
+    dx, dy = x2 - x1, y2 - y1
+    ta, tb = tfn
+    ba, bb = bfn
+    t0, t1 = 0, 256      # 0.8 parametric range, inclusive of 256
+
+    cons = (
+        (-dx, x1 - xlo),
+        (dx, xlast - x1),
+        (fp_mul8(ta, dx) - dy if ta else -dy,
+         y1 - (fp_mul8(ta, x1) if ta else 0) - tb),
+        (dy - (fp_mul8(ba, dx) if ba else 0),
+         (fp_mul8(ba, x1) if ba else 0) + bb - y1),
+    )
+    for p, q in cons:
+        if p == 0:
+            if q < 0:
+                return None
+            continue
+        # t = q / p in 0.8
+        t = div8s(q, p)
+        if p < 0:
+            if t > t1: return None
+            if t > t0: t0 = t
+        else:
+            if t < t0: return None
+            if t < t1: t1 = t
+    if t0 > t1:
+        return None
+
+    def at(t):
+        if t == 0: return x1, y1
+        if t == 256: return x2, y2
+        return (x1 + ((t * dx + 128) >> 8), y1 + ((t * dy + 128) >> 8))
+
+    ax, ay = at(t0)
+    bx, by = at(t1)
+    ax = max(xlo, min(xlast, ax))
+    bx = max(xlo, min(xlast, bx))
+    if ax > bx:
+        ax, ay, bx, by = bx, by, ax, ay
+    # Clamp Y into the aperture at each endpoint.
+    for _ in range(1):
+        ay = max(ev(tfn, ax), min(ev(bfn, ax), ay))
+        by = max(ev(tfn, bx), min(ev(bfn, bx), by))
+    return (ax, ay, bx, by)
+
+
+# ---------------------------------------------------------------------------
+# View transform / projection
+# ---------------------------------------------------------------------------
+
+class ViewCtx:
+    __slots__ = ("sc", "rx", "ry", "px_int", "py_int", "px88", "py88", "vz")
+
+
+def view_context(px88, py88, angle, vz):
+    sc = fp_sincos(angle)
+    s_mag, s_neg, s_unity, c_mag, c_neg, c_unity = sc
+    dx_lo = (-px88) & 0xFF
+    dy_lo = (-py88) & 0xFF
+    frac_vx = (_frac_rot_term(dx_lo, s_mag, s_neg, s_unity)
+               - _frac_rot_term(dy_lo, c_mag, c_neg, c_unity))
+    frac_vy = (_frac_rot_term(dx_lo, c_mag, c_neg, c_unity)
+               + _frac_rot_term(dy_lo, s_mag, s_neg, s_unity))
+    nx = (-px88) >> 8
+    ny = (-py88) >> 8
+    ref_vx = (_rot_int(nx, s_mag, s_neg, s_unity)
+              - _rot_int(ny, c_mag, c_neg, c_unity))
+    ref_vy = (_rot_int(nx, c_mag, c_neg, c_unity)
+              + _rot_int(ny, s_mag, s_neg, s_unity))
+    ctx = ViewCtx()
+    ctx.sc = sc
+    ctx.rx = rns(ref_vx, 3) + rns(frac_vx, 3)
+    ctx.ry = rns(ref_vy, 3) + rns(frac_vy, 3)
+    ctx.px_int = px88 >> 8
+    ctx.py_int = py88 >> 8
+    ctx.px88, ctx.py88 = px88, py88
+    ctx.vz = vz
+    return ctx
+
+
+def to_view(wx, wy, ctx):
+    """Prescaled world -> s16 view-space counts (32 counts per prescaled unit)."""
+    s_mag, s_neg, s_unity, c_mag, c_neg, c_unity = ctx.sc
+    bx = (_rot_int(wx, s_mag, s_neg, s_unity)
+          - _rot_int(wy, c_mag, c_neg, c_unity))
+    by = (_rot_int(wx, c_mag, c_neg, c_unity)
+          + _rot_int(wy, s_mag, s_neg, s_unity))
+    return rns(bx, 3) + ctx.rx, rns(by, 3) + ctx.ry
+
+
+def project_x(tvx, m8v, s):
+    """Screen column, saturated to s16: far off-screen endpoints only need to
+    keep sign and ordering, and wrapping would put them back on screen."""
+    v = fp_project_x(((tvx << 3) >> 8), (tvx << 3) & 0xFF, m8v, s)
+    return max(-32768, min(32767, v))
+
+
+def project_y(hdelta, m8v, s):
+    return fp_project_y(hdelta, m8v, s)
+
+
+def recip_for(tvy):
+    return fp_recip(max(2, tvy >> 4))
+
+
+# ---------------------------------------------------------------------------
+# BSP traversal and seg rendering
+# ---------------------------------------------------------------------------
+
+NEAR = T16_NEAR_VERDICT      # 16 counts = 0.5 prescaled units
+
+
+class Renderer:
+    def __init__(self, md):
+        self.md = md
+        self.stats = {}
+
+    # -- caches --------------------------------------------------------------
+
+    def _reset_frame(self):
+        n = len(self.md.vx)
+        self.vcache = [None] * n     # vertex -> (tvx, tvy, sx, m8, s)
+        self.lines = []
+        self.spans = Spans(self.lines)
+        self.nodes_visited = 0
+        self.segs_tested = 0
+        self.segs_drawn = 0
+        self.ss_visited = 0
+
+    def _vertex(self, vi):
+        c = self.vcache[vi]
+        if c is not None:
+            return c
+        md = self.md
+        tvx, tvy = to_view(md.vx[vi], md.vy[vi], self.ctx)
+        if tvy < NEAR:
+            c = (tvx, tvy, None, None, None)
+        else:
+            m, s = fp_recip(max(2, tvy >> 4))
+            sx = project_x(tvx, m, s)
+            c = (tvx, tvy, sx, m, s)
+        self.vcache[vi] = c
+        return c
+
+    # -- frame ---------------------------------------------------------------
+
+    def render(self, px88, py88, angle, vz, wx=None, wy=None):
+        self.ctx = view_context(px88, py88, angle, vz)
+        # The BSP side test runs in raw world coordinates for exactness.
+        self.wx = wx if wx is not None else self.ctx.px_int
+        self.wy = wy if wy is not None else self.ctx.py_int
+        self._reset_frame()
+        self.walk(len(self.md.nodes) - 1)
+        return self.lines
+
+    # -- bbox culling --------------------------------------------------------
+
+    def bbox_range(self, bb):
+        """Screen-X range [lo, hi] of a prescaled bbox, or None if invisible.
+
+        Corners in front of the near plane are projected once each; an edge
+        that straddles the plane contributes its crossing point as well, so a
+        box containing the camera still yields a tight range. A straddling
+        edge always has a valid crossing, since one endpoint is in front.
+        """
+        top, bot, left, right = bb
+        pts = [to_view(wx, wy, self.ctx)
+               for (wx, wy) in ((left, top), (right, top), (right, bot), (left, bot))]
+        xs = []
+        for p in pts:
+            if p[1] >= NEAR:
+                m, s = fp_recip(max(2, p[1] >> 4))
+                xs.append(project_x(p[0], m, s))
+        if not xs:
+            return None
+        cm, cs = fp_recip(max(2, T16_NEAR_CROSS >> 4))
+        for i in range(4):
+            a, b = pts[i], pts[(i + 1) & 3]
+            if (a[1] < NEAR) == (b[1] < NEAR):
+                continue
+            if a[1] < NEAR:
+                cx = fp_cross_t16(a[0], a[1], b[0], b[1])
+            else:
+                cx = fp_cross_t16(b[0], b[1], a[0], a[1])
+            if cx is None:
+                continue
+            xs.append(project_x(cx, cm, cs))
+        lo, hi = min(xs), max(xs)
+        if hi < 0 or lo > W - 1:
+            return None
+        return max(0, lo), min(W - 1, hi)
+
+    def point_on_side(self, node):
+        """DOOM R_PointOnSide, on the gcd-reduced partition direction."""
+        dx = self.wx - node["x"]
+        dy = self.wy - node["y"]
+        ndx, ndy = node["rdx"], node["rdy"]
+        if ndx == 0:
+            if dx <= 0:
+                return 1 if ndy > 0 else 0
+            return 1 if ndy < 0 else 0
+        if ndy == 0:
+            if dy <= 0:
+                return 1 if ndx < 0 else 0
+            return 1 if ndx > 0 else 0
+        return 0 if (dy * ndx) < (ndy * dx) else 1
+
+    # -- traversal -----------------------------------------------------------
+
+    def walk(self, nid):
+        if self.spans.is_full():
+            return
+        if nid & NF_SUBSECTOR:
+            self.render_subsector(0 if nid == 0xFFFF else nid & 0x7FFF)
+            return
+        self.nodes_visited += 1
+        node = self.md.nodes[nid]
+        side = self.point_on_side(node)
+        # DOOM's order: the near child is always visited, and only the far
+        # child pays a bounding-box test. Testing the near box as well prunes
+        # under 7% of subtrees while doubling the culling cost.
+        self.walk(node["child"][side])
+        if self.spans.is_full():
+            return
+        br = self.bbox_range(node["bboxp"][side ^ 1])
+        if br is None:
+            return
+        if not self.spans.has_gap(br[0], br[1]):
+            return
+        self.walk(node["child"][side ^ 1])
+
+    def render_subsector(self, ssid):
+        self.ss_visited += 1
+        cnt, first = self.md.ssectors[ssid]
+        for si in range(first, first + cnt):
+            self.render_seg(si)
+
+    # -- seg -----------------------------------------------------------------
+
+    def render_seg(self, si):
+        md = self.md
+        sg = md.segs[si]
+        # Back-face: the seg is visible only from the side its linedef faces.
+        dot = (sg["ldy"] * (self.ctx.px_int - sg["lx"])
+               - sg["ldx"] * (self.ctx.py_int - sg["ly"]))
+        if sg["dir"] == 1:
+            dot = -dot
+        if dot <= 0:
+            return
+        self.segs_tested += 1
+
+        v1, v2 = sg["v1"], sg["v2"]
+        c1 = self._vertex(v1)
+        c2 = self._vertex(v2)
+        n1 = c1[1] < NEAR
+        n2 = c2[1] < NEAR
+        if n1 and n2:
+            return
+
+        if not n1 and not n2:
+            sx1, m1, s1 = c1[2], c1[3], c1[4]
+            sx2, m2, s2 = c2[2], c2[3], c2[4]
+        elif n1:
+            cx = fp_cross_t16(c1[0], c1[1], c2[0], c2[1])
+            if cx is None:
+                return
+            m1, s1 = fp_recip(max(2, T16_NEAR_CROSS >> 4))
+            sx1 = project_x(cx, m1, s1)
+            sx2, m2, s2 = c2[2], c2[3], c2[4]
+        else:
+            cx = fp_cross_t16(c2[0], c2[1], c1[0], c1[1])
+            if cx is None:
+                return
+            m2, s2 = fp_recip(max(2, T16_NEAR_CROSS >> 4))
+            sx2 = project_x(cx, m2, s2)
+            sx1, m1, s1 = c1[2], c1[3], c1[4]
+
+        if sx1 == sx2:
+            return
+        x_lo, x_hi = min(sx1, sx2), max(sx1, sx2)
+        if x_hi < 0 or x_lo > W - 1:
+            return
+        if not self.spans.has_gap(x_lo, x_hi):
+            return
+        self.segs_drawn += 1
+
+        vz = self.ctx.vz
+        fh, ch = sg["fh"], sg["ch"]
+        ft1 = project_y(ch - vz, m1, s1)
+        fb1 = project_y(fh - vz, m1, s1)
+        ft2 = project_y(ch - vz, m2, s2)
+        fb2 = project_y(fh - vz, m2, s2)
+
+        back = sg["back"]
+        solid = back < 0
+        if not solid:
+            bfh, bch = md.sec_fh[back], md.sec_ch[back]
+            if bch <= fh or bfh >= ch:
+                solid = True
+
+        lines = []
+        if solid:
+            if ch > vz:
+                lines.append((sx1, ft1, sx2, ft2))
+            if fh < vz:
+                lines.append((sx1, fb1, sx2, fb2))
+            if not sg["no_vt1"]:
+                lines.append((sx1, ft1, sx1, fb1))
+            if not sg["no_vt2"]:
+                lines.append((sx2, ft2, sx2, fb2))
+            self.spans.draw(lines)
+            self.spans.mark_solid(x_lo, x_hi + 1)
+            return
+
+        need_bt = bch < ch
+        need_bb = bfh > fh
+        bt1 = bt2 = bb1 = bb2 = None
+        if need_bt:
+            bt1 = project_y(bch - vz, m1, s1)
+            bt2 = project_y(bch - vz, m2, s2)
+            lines.append((sx1, bt1, sx2, bt2))
+            if ch > vz:
+                lines.append((sx1, ft1, sx2, ft2))
+        elif bch > ch:
+            lines.append((sx1, ft1, sx2, ft2))
+
+        if need_bb:
+            bb1 = project_y(bfh - vz, m1, s1)
+            bb2 = project_y(bfh - vz, m2, s2)
+            lines.append((sx1, bb1, sx2, bb2))
+            if fh < vz:
+                lines.append((sx1, fb1, sx2, fb2))
+        elif bfh < fh:
+            lines.append((sx1, fb1, sx2, fb2))
+
+        # Verticals bound the visible step faces at each endpoint.
+        if not sg["no_vt1"]:
+            if need_bt:
+                lines.append((sx1, ft1, sx1, bt1))
+            if need_bb:
+                lines.append((sx1, bb1, sx1, fb1))
+        if not sg["no_vt2"]:
+            if need_bt:
+                lines.append((sx2, ft2, sx2, bt2))
+            if need_bb:
+                lines.append((sx2, bb2, sx2, fb2))
+
+        self.spans.draw(lines)
+
+        tt1 = bt1 if need_bt else ft1
+        tt2 = bt2 if need_bt else ft2
+        tb1 = bb1 if need_bb else fb1
+        tb2 = bb2 if need_bb else fb2
+        self.spans.tighten(x_lo, x_hi + 1, sx1, sx2,
+                           max(ft1, tt1), max(ft2, tt2),
+                           min(fb1, tb1), min(fb2, tb2))
+
+
+# ---------------------------------------------------------------------------
+# Rasterisation (for comparison against the Z80 framebuffer)
+# ---------------------------------------------------------------------------
+
+def raster(lines, w=W, h=H):
+    """Bresenham the emitted segments into a 1bpp bitmap, 32 bytes per row."""
+    fb = bytearray(h * (w // 8))
+
+    def plot(x, y):
+        if 0 <= x < w and 0 <= y < h:
+            fb[y * (w // 8) + (x >> 3)] |= 0x80 >> (x & 7)
+
+    for (x1, y1, x2, y2) in lines:
+        dx, dy = abs(x2 - x1), abs(y2 - y1)
+        sx = 1 if x1 < x2 else -1
+        sy = 1 if y1 < y2 else -1
+        if dx >= dy:
+            err = dx >> 1
+            x, y = x1, y1
+            for _ in range(dx + 1):
+                plot(x, y)
+                err -= dy
+                if err < 0:
+                    y += sy
+                    err += dx
+                x += sx
+        else:
+            err = dy >> 1
+            x, y = x1, y1
+            for _ in range(dy + 1):
+                plot(x, y)
+                err -= dx
+                if err < 0:
+                    x += sx
+                    err += dy
+                y += sy
+    return bytes(fb)
+
+
+def write_pgm(path, fb, w=W, h=H):
+    with open(path, "wb") as f:
+        f.write(b"P5\n%d %d\n255\n" % (w, h))
+        for y in range(h):
+            f.write(bytes(255 if (fb[y * (w // 8) + (x >> 3)] >> (7 - (x & 7))) & 1
+                          else 0 for x in range(w)))

@@ -1,0 +1,508 @@
+; ---------------------------------------------------------------------------
+; DOOM E1M1 wireframe for the 128K ZX Spectrum.
+;
+; Frame structure:
+;   pass 1  bank 0 paged at $C000; walk the BSP and build a display list of
+;           clipped screen-space segments.
+;   pass 2  page in whichever bank holds the back buffer, clear it, and
+;           rasterise the list.
+;   flip    wait for the frame interrupt, then swap the displayed bank.
+;
+; Buffer A is bank 5 (permanently at $4000); buffer B is bank 7, which has to
+; be paged in to be drawn but is displayed by setting bit 3 of $7FFD. The two
+; are the same offsets apart from address bit 15, which is why the rasteriser
+; can share one set of row tables.
+; ---------------------------------------------------------------------------
+
+                DEVICE  ZXSPECTRUM128
+                include "spec.inc"
+                include "start.inc"
+
+                ORG     $8800
+                INCBIN  "../build/tables.bin"           ; $8800..$8AFF
+                ; $8B00..$8EFF holds the per-frame product tables, built at
+                ; run time; pad so the image loads contiguously from $8800.
+                DS      ORG_ADDR-$, 0
+START:
+                di
+                ld      sp,STACK_TOP
+                call    init_video
+                call    sq_init
+                call    raster_init
+                call    setup_im2
+                call    init_player
+main_loop:
+                ; --- pass 1: geometry ------------------------------------
+                ld      a,BANK_GEOM
+                call    set_page
+                call    update_world_pos
+                call    find_eye_height
+                call    render_frame
+
+                ; --- pass 2: rasterise into the back buffer --------------
+                ld      a,(back_buf)
+                or      a
+                ld      a,BANK_GEOM
+                jr      z,ml_pg
+                ld      a,BANK_SCREEN_B
+ml_pg:          call    set_page
+                ld      a,(back_buf)
+                call    raster_select
+                ld      a,(back_buf)
+                call    raster_clear
+                call    dl_render
+
+                ; --- flip -----------------------------------------------
+                ei
+                halt
+                di
+                ld      a,(back_buf)
+                xor     1
+                ld      (back_buf),a
+                ld      a,BANK_GEOM
+                call    set_page
+
+                call    read_input
+                jr      main_loop
+
+; ---------------------------------------------------------------------------
+; set_page : A = bank to map at $C000.  The displayed screen follows back_buf:
+; whichever buffer is not being drawn into is the one on show.
+; ---------------------------------------------------------------------------
+set_page:
+                ld      e,a
+                ld      a,(back_buf)
+                xor     1                       ; 1 when buffer B is displayed
+                rlca
+                rlca
+                rlca                            ; -> bit 3 of $7FFD
+                or      e
+                or      P7_ROM48
+                ld      bc,PORT_7FFD
+                out     (c),a
+                ret
+
+; ---------------------------------------------------------------------------
+; init_video : blank both bitmaps and set both attribute files to white on
+; black, then show buffer B while buffer A is drawn first.
+; ---------------------------------------------------------------------------
+init_video:
+                xor     a
+                ld      (back_buf),a
+                out     ($fe),a                 ; black border
+                ; buffer A is always at $4000
+                ld      hl,FB_A
+                ld      de,FB_A+1
+                ld      bc,FB_LEN-1
+                ld      (hl),0
+                ldir
+                ld      hl,ATTR_A
+                ld      de,ATTR_A+1
+                ld      bc,767
+                ld      (hl),$47                ; bright white ink, black paper
+                ldir
+                ; buffer B: page bank 7 in and do the same
+                ld      a,BANK_SCREEN_B or P7_ROM48
+                ld      bc,PORT_7FFD
+                out     (c),a
+                ld      hl,FB_B
+                ld      de,FB_B+1
+                ld      bc,FB_LEN-1
+                ld      (hl),0
+                ldir
+                ld      hl,FB_B+$1800
+                ld      de,FB_B+$1801
+                ld      bc,767
+                ld      (hl),$47
+                ldir
+                ret
+
+; ---------------------------------------------------------------------------
+; setup_im2 : a 257-byte $B5 table at $B600 makes any data-bus value vector to
+; $B5B5, where a three-instruction handler lives.  The engine only needs the
+; interrupt as a frame-boundary signal for HALT.
+; ---------------------------------------------------------------------------
+setup_im2:
+                ld      hl,IM2_TABLE
+                ld      de,IM2_TABLE+1
+                ld      bc,256
+                ld      (hl),IM2_HANDLER>>8
+                ldir
+                ld      a,IM2_TABLE>>8
+                ld      i,a
+                im      2
+                ld      hl,IM2_HANDLER
+                ld      (hl),$fb                ; EI
+                inc     hl
+                ld      (hl),$ed                ; RETI
+                inc     hl
+                ld      (hl),$4d
+                ret
+
+; ---------------------------------------------------------------------------
+; init_player
+; ---------------------------------------------------------------------------
+init_player:
+                ld      hl,START_PX
+                ld      (pl_x),hl
+                ld      a,START_PXF
+                ld      (pl_xf),a
+                ld      hl,START_PY
+                ld      (pl_y),hl
+                ld      a,START_PYF
+                ld      (pl_yf),a
+                ld      a,START_ANG
+                ld      (pl_ang),a
+                ld      hl,BSP_ROOT
+                ld      (bsp_root),hl
+                xor     a
+                ld      (vc_stamp),a
+                ld      (vs_haveang),a
+                ret
+
+; ---------------------------------------------------------------------------
+; update_world_pos : the BSP side test runs in raw world coordinates.
+; ---------------------------------------------------------------------------
+update_world_pos:
+                ld      hl,(pl_x)
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                ld      de,MAP_CENTER_X
+                add     hl,de
+                ld      (pl_wx),hl
+                ld      hl,(pl_y)
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                ld      de,MAP_CENTER_Y
+                add     hl,de
+                ld      (pl_wy),hl
+                ret
+
+; ---------------------------------------------------------------------------
+; find_eye_height : descend the BSP to the subsector under the player and take
+; the prescaled eye height baked for its sector.
+; ---------------------------------------------------------------------------
+find_eye_height:
+                ld      hl,(bsp_root)
+fe_loop:
+                bit     7,h
+                jr      nz,fe_leaf
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                ld      de,NODES
+                add     hl,de
+                ld      (bsp_node),hl
+                call    point_on_side
+                ld      hl,(bsp_node)
+                ld      de,ND_CHILD0
+                or      a
+                jr      z,fe_c0
+                ld      de,ND_CHILD1
+fe_c0:
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ex      de,hl
+                jr      fe_loop
+fe_leaf:
+                res     7,h
+                ld      de,SSSEC
+                add     hl,de
+                ld      l,(hl)
+                ld      h,0
+                ld      de,EYEZ
+                add     hl,de
+                ld      a,(hl)
+                ld      (vs_vz),a
+                ret
+
+; ---------------------------------------------------------------------------
+; read_input
+;   O / 5     turn left            P / 8   turn right
+;   Q / 7     forward              A / 6   back
+;   Z         strafe left          X       strafe right
+;   SPACE     run
+; ---------------------------------------------------------------------------
+KEY_ROW_QWERT   EQU     $fb
+KEY_ROW_ASDFG   EQU     $fd
+KEY_ROW_POIUY   EQU     $df
+KEY_ROW_SZXCV   EQU     $fe
+KEY_ROW_12345   EQU     $f7
+KEY_ROW_09876   EQU     $ef
+KEY_ROW_SPACE   EQU     $7f
+
+read_input:
+                ; run modifier doubles both speeds
+                ld      a,KEY_ROW_SPACE
+                call    key_row
+                bit     0,a
+                ld      hl,STEP_WALK
+                ld      c,TURN_WALK
+                jr      nz,ri_speed
+                ld      hl,STEP_RUN
+                ld      c,TURN_RUN
+ri_speed:
+                ld      (mv_step),hl
+                ld      a,c
+                ld      (mv_turn),a
+
+                ; --- turning --------------------------------------------
+                ld      a,KEY_ROW_POIUY
+                call    key_row
+                ld      b,a
+                bit     1,b                     ; O
+                jr      nz,ri_t1
+                call    turn_left
+ri_t1:
+                bit     0,b                     ; P
+                jr      nz,ri_t2
+                call    turn_right
+ri_t2:
+                ld      a,KEY_ROW_12345
+                call    key_row
+                bit     4,a                     ; 5
+                jr      nz,ri_t3
+                call    turn_left
+ri_t3:
+                ld      a,KEY_ROW_09876
+                call    key_row
+                ld      b,a
+                bit     2,b                     ; 8
+                jr      nz,ri_t4
+                call    turn_right
+ri_t4:
+                ; --- forward / back -------------------------------------
+                ld      a,KEY_ROW_QWERT
+                call    key_row
+                bit     0,a                     ; Q
+                jr      nz,ri_m1
+                ld      a,MV_FWD
+                call    move_dir
+ri_m1:
+                ld      a,KEY_ROW_09876
+                call    key_row
+                bit     3,a                     ; 7
+                jr      nz,ri_m2
+                ld      a,MV_FWD
+                call    move_dir
+ri_m2:
+                ld      a,KEY_ROW_ASDFG
+                call    key_row
+                bit     0,a                     ; A
+                jr      nz,ri_m3
+                ld      a,MV_BACK
+                call    move_dir
+ri_m3:
+                ld      a,KEY_ROW_09876
+                call    key_row
+                bit     4,a                     ; 6
+                jr      nz,ri_m4
+                ld      a,MV_BACK
+                call    move_dir
+ri_m4:
+                ; --- strafing -------------------------------------------
+                ld      a,KEY_ROW_SZXCV
+                call    key_row
+                ld      b,a
+                bit     1,b                     ; Z
+                jr      nz,ri_s1
+                ld      a,MV_LEFT
+                call    move_dir
+ri_s1:
+                bit     2,b                     ; X
+                jr      nz,ri_s2
+                ld      a,MV_RIGHT
+                call    move_dir
+ri_s2:
+                ret
+
+; key_row : A = row select -> A = key bits (0 = pressed)
+key_row:
+                ld      b,a
+                ld      c,$fe
+                in      a,(c)
+                and     $1f
+                ret
+
+turn_left:
+                ld      a,(pl_ang)
+                ld      b,a
+                ld      a,(mv_turn)
+                add     a,b
+                ld      (pl_ang),a
+                ret
+turn_right:
+                ld      a,(pl_ang)
+                ld      b,a
+                ld      a,(mv_turn)
+                neg
+                add     a,b
+                ld      (pl_ang),a
+                ret
+
+; ---------------------------------------------------------------------------
+; move_dir : A selects the direction relative to the view.
+;   forward (cos, sin)   back (-cos, -sin)
+;   right   (sin, -cos)  left (-sin,  cos)
+; The step is an 8.8 prescaled distance; the trig magnitudes come straight
+; from the same quadrant table the renderer uses.
+; ---------------------------------------------------------------------------
+MV_FWD          EQU     0
+MV_BACK         EQU     1
+MV_RIGHT        EQU     2
+MV_LEFT         EQU     3
+
+move_dir:
+                ld      (mv_dir),a
+                ld      a,(pl_ang)
+                call    sincos_lookup
+                ld      a,c
+                ld      (mv_smag),a
+                ld      a,b
+                ld      (mv_sneg),a
+                ld      a,e
+                ld      (mv_sunity),a
+                ld      a,(pl_ang)
+                add     a,64
+                call    sincos_lookup
+                ld      a,c
+                ld      (mv_cmag),a
+                ld      a,b
+                ld      (mv_cneg),a
+                ld      a,e
+                ld      (mv_cunity),a
+
+                ld      a,(mv_dir)
+                cp      MV_RIGHT
+                jr      nc,md_strafe
+                ; forward / back: dx = step*cos, dy = step*sin
+                ld      a,(mv_cmag)
+                ld      c,a
+                ld      a,(mv_cneg)
+                ld      b,a
+                ld      a,(mv_cunity)
+                call    mv_term
+                ld      a,(mv_dir)
+                or      a
+                jr      z,md_fx
+                call    neg_hl
+md_fx:          call    add_px
+                ld      a,(mv_smag)
+                ld      c,a
+                ld      a,(mv_sneg)
+                ld      b,a
+                ld      a,(mv_sunity)
+                call    mv_term
+                ld      a,(mv_dir)
+                or      a
+                jr      z,md_fy
+                call    neg_hl
+md_fy:          jp      add_py
+md_strafe:
+                ; right: dx = step*sin, dy = -step*cos ; left is the negation
+                ld      a,(mv_smag)
+                ld      c,a
+                ld      a,(mv_sneg)
+                ld      b,a
+                ld      a,(mv_sunity)
+                call    mv_term
+                ld      a,(mv_dir)
+                cp      MV_LEFT
+                jr      nz,md_sx
+                call    neg_hl
+md_sx:          call    add_px
+                ld      a,(mv_cmag)
+                ld      c,a
+                ld      a,(mv_cneg)
+                ld      b,a
+                ld      a,(mv_cunity)
+                call    mv_term
+                ld      a,(mv_dir)
+                cp      MV_LEFT
+                jr      z,md_sy
+                call    neg_hl
+md_sy:          jp      add_py
+
+; mv_term : C = magnitude, B = negative flag, A = unity flag
+;           -> HL = signed 8.8 displacement
+mv_term:
+                or      a
+                jr      nz,mvt_unity
+                ld      a,c
+                or      a
+                jr      nz,mvt_mul
+                ld      hl,0
+                ret
+mvt_unity:
+                ld      hl,(mv_step)
+                jr      mvt_sign
+mvt_mul:
+                ld      de,(mv_step)
+                push    bc
+                ld      a,c
+                call    mul_s16_u8
+                call    rns8_ahl
+                pop     bc
+mvt_sign:
+                ld      a,b
+                or      a
+                ret     z
+neg_hl:
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ret
+
+; add_px / add_py : add a signed 8.8 delta to the player position.
+add_px:
+                ld      a,(pl_xf)
+                add     a,l
+                ld      (pl_xf),a
+                ld      a,0
+                adc     a,0
+                ld      c,a                     ; carry out of the fraction
+                ld      a,h
+                rla
+                sbc     a,a
+                ld      d,a
+                ld      e,h                     ; DE = sign-extended high byte
+                ld      hl,(pl_x)
+                add     hl,de
+                ld      d,0
+                ld      e,c
+                add     hl,de
+                ld      (pl_x),hl
+                ret
+add_py:
+                ld      a,(pl_yf)
+                add     a,l
+                ld      (pl_yf),a
+                ld      a,0
+                adc     a,0
+                ld      c,a
+                ld      a,h
+                rla
+                sbc     a,a
+                ld      d,a
+                ld      e,h
+                ld      hl,(pl_y)
+                add     hl,de
+                ld      d,0
+                ld      e,c
+                add     hl,de
+                ld      (pl_y),hl
+                ret
+
+                include "math.z80"
+                include "raster.z80"
+                include "view.z80"
+                include "spans.z80"
+                include "bsp.z80"
+
+CODE_END:

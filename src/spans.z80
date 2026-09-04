@@ -1,0 +1,1674 @@
+; ---------------------------------------------------------------------------
+; Trapezoid clip spans.
+;
+; The visible region of the screen is a sorted array of column ranges, each
+; carrying a linear top and bottom boundary:
+;
+;       span = [xlo, xlast]  with  top(x) = ta*x + tb,  bot(x) = ba*x + bb
+;
+; Slopes are 8.8 signed, intercepts s16. A one-sided wall calls mark_solid to
+; delete its columns outright; a portal calls tighten, which takes the
+; pointwise max of the old and new tops and the pointwise min of the bottoms,
+; splitting a span wherever those cross. A frame ends up holding a handful of
+; spans instead of the per-column arrays DOOM uses.
+;
+; Both operations rebuild into a second pool and swap, which keeps iteration
+; simple at the cost of two bytes of state.
+; ---------------------------------------------------------------------------
+
+; ---------------------------------------------------------------------------
+; divs : HL = (DE << 8) / BC, signed, truncated toward zero, saturating to s16.
+;
+; Restoring division in two phases: sixteen steps consume the numerator's own
+; bits and eight more consume the appended fraction. The remainder invariant
+; rem < den keeps rem*2+1 inside 16 bits, so no wide remainder is needed - the
+; divisor is clamped to $7FFF to guarantee that.
+; ---------------------------------------------------------------------------
+divs:
+                xor     a
+                bit     7,d
+                jr      z,dv_np
+                inc     a
+                push    af
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ex      de,hl
+                pop     af
+dv_np:
+                bit     7,b
+                jr      z,dv_dp
+                xor     1
+                push    af
+                ld      hl,0
+                or      a
+                sbc     hl,bc
+                ld      b,h
+                ld      c,l
+                pop     af
+dv_dp:
+                ld      (dv_sign),a
+                ld      a,b
+                or      c
+                jr      nz,dv_go
+                ld      hl,0
+                ret
+dv_go:
+                bit     7,b
+                jr      z,dv_ok
+                ld      bc,$7fff                ; keep rem*2 inside 16 bits
+dv_ok:
+                ; Fast path: when the numerator is smaller than the divisor the
+                ; integer quotient is zero, so the sixteen integer steps are
+                ; pure overhead - and that is the usual case for a parametric
+                ; t in [0, 256].
+                ld      h,d
+                ld      l,e
+                or      a
+                sbc     hl,bc
+                jr      nc,dv_full
+                ld      h,d
+                ld      l,e                     ; remainder = numerator
+                xor     a
+                ld      (dv_q+1),a
+                jr      dv_frac
+dv_full:
+                ld      hl,0                    ; remainder
+                ld      a,16
+dv_p1:
+                sla     e
+                rl      d
+                adc     hl,hl
+                sbc     hl,bc
+                jr      nc,dv_p1s
+                add     hl,bc
+                jr      dv_p1n
+dv_p1s:
+                inc     e
+dv_p1n:
+                dec     a
+                jp      nz,dv_p1
+                ; DE is the integer quotient; saturate once the full quotient
+                ; would not fit a signed 16-bit slope
+                ld      a,d
+                or      a
+                jr      nz,dv_sat
+                bit     7,e
+                jr      nz,dv_sat
+                ld      a,e
+                ld      (dv_q+1),a
+dv_frac:
+                ld      e,0
+                ld      a,8
+dv_p2:
+                add     hl,hl
+                sla     e
+                or      a
+                sbc     hl,bc
+                jr      nc,dv_p2s
+                add     hl,bc
+                jr      dv_p2n
+dv_p2s:
+                inc     e
+dv_p2n:
+                dec     a
+                jp      nz,dv_p2
+                ld      a,e
+                ld      (dv_q),a
+                ld      hl,(dv_q)
+dv_sign_apply:
+                ld      a,(dv_sign)
+                or      a
+                ret     z
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ret
+dv_sat:
+                ld      hl,$7fff
+                jr      dv_sign_apply
+
+; ---------------------------------------------------------------------------
+; fpmul8 : HL = (DE * HL) >> 8, both signed 16-bit, truncated to s16.
+;   (a*b)>>8 = 256*(ahi*bhi) + ahi*blo + alo*bhi + (alo*blo >> 8)
+; ---------------------------------------------------------------------------
+fpmul8:
+                ld      (fm_a),de
+                ld      (fm_b),hl
+                ld      h,e
+                ld      a,(fm_b)
+                ld      l,a
+                call    mul_u8                  ; alo * blo
+                ld      l,h
+                ld      h,0
+                ld      (fm_acc),hl
+                ld      a,(fm_a+1)
+                ld      h,a
+                ld      a,(fm_b)
+                ld      l,a
+                call    mul_s8_u8               ; ahi * blo
+                ld      de,(fm_acc)
+                add     hl,de
+                ld      (fm_acc),hl
+                ld      a,(fm_b+1)
+                ld      h,a
+                ld      a,(fm_a)
+                ld      l,a
+                call    mul_s8_u8               ; bhi * alo
+                ld      de,(fm_acc)
+                add     hl,de
+                ld      (fm_acc),hl
+                ld      a,(fm_a+1)
+                ld      h,a
+                ld      a,(fm_b+1)
+                ld      l,a
+                call    mul_s8_s8               ; ahi * bhi (low byte only)
+                ld      a,l
+                ld      hl,(fm_acc)
+                add     a,h
+                ld      h,a
+                ret
+
+; mul_s8_s8 : HL = (signed H) * (signed L)
+mul_s8_s8:
+                ld      a,l
+                ld      (fm_t),a
+                ld      a,h
+                ld      (fm_t+1),a
+                call    mul_u8
+                ld      a,(fm_t+1)
+                bit     7,a
+                jr      z,ms8_1
+                ld      a,(fm_t)
+                ld      d,a
+                ld      a,h
+                sub     d
+                ld      h,a
+ms8_1:
+                ld      a,(fm_t)
+                bit     7,a
+                ret     z
+                ld      a,(fm_t+1)
+                ld      d,a
+                ld      a,h
+                sub     d
+                ld      h,a
+                ret
+
+; ---------------------------------------------------------------------------
+; ev_at : HL = pointer to (slope s16, intercept s16), A = column 0..255
+;         -> HL = y (s16).  Flat boundaries skip the multiply.
+; ---------------------------------------------------------------------------
+ev_at:
+                ld      (ev_col_x),a
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                inc     hl
+                ld      c,(hl)
+                inc     hl
+                ld      b,(hl)                  ; DE = slope, BC = intercept
+                ld      a,d
+                or      e
+                jr      nz,ev_slope
+                ld      h,b
+                ld      l,c
+                ret
+ev_slope:
+                ld      (ev_tmp),bc
+                ld      a,(ev_col_x)
+                call    mul_s16_u8              ; A:HL = slope * x
+                ld      l,h
+                ld      h,a                     ; arithmetic >> 8
+                ld      de,(ev_tmp)
+                add     hl,de
+                ret
+
+; ---------------------------------------------------------------------------
+; linfn : write (slope, intercept) for the line through
+;         (cl_lx1, cl_ly1) - (cl_lx2, cl_ly2) into the buffer at HL.
+; ---------------------------------------------------------------------------
+linfn:
+                ld      (lf_out),hl
+                ld      hl,(cl_lx2)
+                ld      de,(cl_lx1)
+                or      a
+                sbc     hl,de
+                ld      a,h
+                or      l
+                jr      nz,lf_slope
+                ld      hl,(cl_ly1)
+                ld      de,(cl_ly2)
+                add     hl,de
+                sra     h
+                rr      l                       ; (y1 + y2) >> 1
+                jr      lf_store0
+lf_slope:
+                ld      b,h
+                ld      c,l                     ; BC = dx
+                ld      hl,(cl_ly2)
+                ld      de,(cl_ly1)
+                or      a
+                sbc     hl,de
+                ex      de,hl                   ; DE = dy
+                call    divs
+                ld      a,h
+                or      l
+                jr      nz,lf_real
+                ld      hl,(cl_ly1)
+lf_store0:
+                ex      de,hl
+                ld      hl,(lf_out)
+                ld      (hl),0
+                inc     hl
+                ld      (hl),0
+                inc     hl
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                ret
+lf_real:
+                ld      (lf_slope_v),hl
+                ld      hl,(cl_lx1)
+                call    abs_hl
+                ld      b,h
+                ld      c,l
+                ld      hl,(cl_lx2)
+                call    abs_hl
+                or      a
+                sbc     hl,bc
+                jr      c,lf_use2
+                ld      de,(cl_lx1)
+                ld      hl,(cl_ly1)
+                jr      lf_calc
+lf_use2:
+                ld      de,(cl_lx2)
+                ld      hl,(cl_ly2)
+lf_calc:
+                ld      (lf_y),hl
+                ex      de,hl                   ; HL = x
+                ld      de,(lf_slope_v)
+                call    fpmul8                  ; HL = (slope * x) >> 8
+                ex      de,hl
+                ld      hl,(lf_y)
+                or      a
+                sbc     hl,de
+                ex      de,hl                   ; DE = intercept
+                ld      hl,(lf_out)
+                ld      bc,(lf_slope_v)
+                ld      (hl),c
+                inc     hl
+                ld      (hl),b
+                inc     hl
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                ret
+
+abs_hl:
+                bit     7,h
+                ret     z
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ret
+
+; ---------------------------------------------------------------------------
+; sp_reset : one span covering the whole screen, top 0 and bottom RENDER_H-1.
+; ---------------------------------------------------------------------------
+sp_reset:
+                ld      hl,SPANS_BASE
+                ld      (sp_head),hl
+                ld      a,1
+                ld      (sp_count),a
+                ld      (hl),0                  ; xlo
+                inc     hl
+                ld      (hl),RENDER_W-1         ; xlast
+                inc     hl
+                ld      (hl),0                  ; top slope
+                inc     hl
+                ld      (hl),0
+                inc     hl
+                ld      (hl),0                  ; top intercept = 0
+                inc     hl
+                ld      (hl),0
+                inc     hl
+                ld      (hl),0                  ; bottom slope
+                inc     hl
+                ld      (hl),0
+                inc     hl
+                ld      (hl),RENDER_H-1         ; bottom intercept
+                inc     hl
+                ld      (hl),0
+                ret
+
+; sp_isfull : Z set when no spans remain (the screen is fully occluded).
+sp_isfull:
+                ld      a,(sp_count)
+                or      a
+                ret
+
+; ---------------------------------------------------------------------------
+; Rebuild helpers. sp_begin points the write cursor at the pool the live
+; spans are not in; sp_emit appends; sp_commit swaps them over.
+; ---------------------------------------------------------------------------
+sp_begin:
+                ld      hl,(sp_head)
+                ld      de,SPANS_BASE
+                or      a
+                sbc     hl,de
+                ld      hl,SPANS_BASE
+                jr      nz,sp_bg1
+                ld      hl,SPANS_ALT
+sp_bg1:
+                ld      (sp_wr),hl
+                xor     a
+                ld      (sp_wcount),a
+                ret
+
+; sp_emit : append the span at HL (12 bytes) to the write pool.
+sp_emit:
+                ld      a,(sp_wcount)
+                cp      SPANS_MAX
+                ret     nc                      ; pool full: drop (over-occludes)
+                inc     a
+                ld      (sp_wcount),a
+                ld      de,(sp_wr)
+                ld      bc,SPAN_SIZE
+                ldir
+                ld      (sp_wr),de
+                ret
+
+sp_commit:
+                ld      a,(sp_wcount)
+                ld      (sp_count),a
+                ld      hl,(sp_head)
+                ld      de,SPANS_BASE
+                or      a
+                sbc     hl,de
+                ld      hl,SPANS_ALT
+                jr      nz,sp_cm1
+                ld      (sp_head),hl
+                ret
+sp_cm1:
+                ld      hl,SPANS_BASE
+                ld      (sp_head),hl
+                ret
+
+; ---------------------------------------------------------------------------
+; sp_hasgap : are any columns in [cl_lo, cl_hi] still visible?
+; in : B = lo, C = hi (already clamped to 0..255).  Carry set if a gap exists.
+; ---------------------------------------------------------------------------
+sp_hasgap:
+                ld      a,b
+                ld      (hg_lo),a
+                ld      a,c
+                ld      (hg_hi),a
+                ld      a,(sp_count)
+                or      a
+                ret     z                       ; no spans left: no gap
+                ld      (sp_n),a
+                ld      hl,(sp_head)
+hg_loop:
+                ld      (cl_span),hl
+                ld      a,(hg_hi)
+                ld      c,a
+                ld      a,(hl)                  ; xlo
+                cp      c
+                jr      z,hg_over
+                jr      nc,hg_none              ; sorted: past the range
+hg_over:
+                inc     hl
+                ld      a,(hg_lo)
+                ld      c,a
+                ld      a,(hl)                  ; xlast
+                cp      c
+                jr      c,hg_next
+                ; clamp the overlap to [max(xlo,lo), min(xlast,hi)]
+                ld      b,a                     ; B = xlast
+                ld      hl,(cl_span)
+                ld      a,(hl)
+                cp      c
+                jr      nc,hg_l1
+                ld      a,c
+hg_l1:          ld      (hg_clo),a
+                ld      a,(hg_hi)
+                ld      c,a
+                ld      a,b
+                cp      c
+                jr      c,hg_l2
+                ld      a,c
+hg_l2:          ld      (hg_chi),a
+                ld      a,(hg_clo)
+                call    hg_alive
+                jr      c,hg_yes
+                ld      a,(hg_chi)
+                call    hg_alive
+                jr      c,hg_yes
+hg_next:
+                ld      hl,(cl_span)
+                ld      de,SPAN_SIZE
+                add     hl,de
+                ld      a,(sp_n)
+                dec     a
+                ld      (sp_n),a
+                jp      nz,hg_loop
+hg_none:
+                or      a
+                ret
+hg_yes:
+                scf
+                ret
+
+; hg_alive : carry set when column A of the span at cl_span is inside its
+; aperture.
+hg_alive:
+                ld      (hg_col),a
+                ld      hl,(cl_span)
+                ld      de,SP_TA
+                add     hl,de
+                ld      a,(hg_col)
+                call    ev_at
+                ld      (hg_top),hl
+                ld      hl,(cl_span)
+                ld      de,SP_BA
+                add     hl,de
+                ld      a,(hg_col)
+                call    ev_at
+                ld      de,(hg_top)
+                call    cmp_s16                 ; signed: top can be negative
+                jr      c,hg_a_no
+                jr      z,hg_a_no
+                scf
+                ret
+hg_a_no:
+                or      a
+                ret
+
+; ---------------------------------------------------------------------------
+; sp_marksolid : delete columns [cl_lo, cl_hi) from the span list.
+; ---------------------------------------------------------------------------
+sp_marksolid:
+                ld      a,(sp_count)
+                or      a
+                ret     z
+                ld      (sp_n),a
+                call    sp_begin
+                ld      hl,(sp_head)
+ms_loop:
+                ld      (cl_span),hl
+                ld      a,(hl)
+                ld      (tg_xlo),a
+                inc     hl
+                ld      a,(hl)
+                ld      (tg_xlast),a
+                ld      a,(cl_lo)
+                ld      b,a                     ; B = ilo
+                ld      a,(cl_hi)
+                dec     a
+                ld      c,a                     ; C = ihi - 1, inclusive
+                ; keep the span whole when it misses the range entirely
+                ld      a,(tg_xlast)
+                cp      b
+                jr      c,ms_keep
+                ld      a,c
+                ld      d,a
+                ld      a,(tg_xlo)
+                cp      d
+                jr      z,ms_split
+                jr      nc,ms_keep
+ms_split:
+                ; left piece [xlo, ilo-1]
+                ld      a,(tg_xlo)
+                cp      b
+                jr      nc,ms_right
+                ld      hl,(cl_span)
+                ld      a,b
+                dec     a
+                call    sp_emit_range
+ms_right:
+                ; right piece [ihi, xlast]
+                ld      a,(cl_hi)
+                dec     a
+                ld      b,a
+                ld      a,(tg_xlast)
+                cp      b
+                jr      z,ms_next
+                jr      c,ms_next
+                ld      hl,(cl_span)
+                ld      a,(cl_hi)
+                ld      b,a
+                ld      a,(tg_xlast)
+                call    sp_emit_range2
+                jr      ms_next
+ms_keep:
+                ld      hl,(cl_span)
+                call    sp_emit
+ms_next:
+                ld      hl,(cl_span)
+                ld      bc,SPAN_SIZE
+                add     hl,bc
+                ld      a,(sp_n)
+                dec     a
+                ld      (sp_n),a
+                jp      nz,ms_loop
+                jp      sp_commit
+
+; sp_emit_range : emit the span at HL with xlast replaced by A.
+sp_emit_range:
+                ld      (sp_tmp8),a
+                ld      de,sp_scratch
+                push    hl
+                ld      bc,SPAN_SIZE
+                ldir
+                pop     hl
+                ld      a,(sp_tmp8)
+                ld      (sp_scratch+SP_XLAST),a
+                ld      hl,sp_scratch
+                jp      sp_emit
+
+; sp_emit_range2 : emit the span at HL with xlo = B and xlast = A.
+sp_emit_range2:
+                ld      (sp_tmp8),a
+                ld      a,b
+                ld      (sp_tmp8+1),a
+                ld      de,sp_scratch
+                ld      bc,SPAN_SIZE
+                ldir
+                ld      a,(sp_tmp8)
+                ld      (sp_scratch+SP_XLAST),a
+                ld      a,(sp_tmp8+1)
+                ld      (sp_scratch+SP_XLO),a
+                ld      hl,sp_scratch
+                jp      sp_emit
+
+; ---------------------------------------------------------------------------
+; pw : piecewise max (pw_mode = 0) or min (pw_mode = 1) of two linear
+;      functions over the half-open column range [pw_x0, pw_x1).
+;
+; Comparisons run on the difference function d = f - g, so parallel
+; boundaries - which includes the very common both-flat case - need no
+; multiply at all, and a crossover is one divide rather than a search.
+;
+; in : pw_f, pw_g = function pointers; pw_x0, pw_x1 = columns
+; out: pw_n = 1 or 2 pieces in pw_out as (x0, x1, fnptr_lo, fnptr_hi)
+; ---------------------------------------------------------------------------
+pw:
+                ; da = f.a - g.a, db = f.b - g.b
+                ld      hl,(pw_f)
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                inc     hl
+                ld      c,(hl)
+                inc     hl
+                ld      b,(hl)
+                push    bc                      ; f.b
+                ld      hl,(pw_g)
+                ld      a,(hl)
+                inc     hl
+                ld      h,(hl)
+                ld      l,a
+                ex      de,hl
+                or      a
+                sbc     hl,de                   ; da = f.a - g.a
+                ld      (pw_da),hl
+                ld      hl,(pw_g)
+                inc     hl
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)                  ; DE = g.b
+                pop     hl                      ; f.b
+                or      a
+                sbc     hl,de
+                ld      (pw_db),hl              ; db = f.b - g.b
+
+                ld      de,(pw_da)
+                ld      a,d
+                or      e
+                jr      nz,pw_sloped
+                ; parallel: one piece, decided by the sign of db
+                ld      hl,(pw_db)
+                ld      (pw_d0),hl
+                ld      (pw_d1),hl
+                jr      pw_decide1
+pw_sloped:
+                ld      a,(pw_x0)
+                call    pw_evd
+                ld      (pw_d0),hl
+                ld      a,(pw_x1)
+                call    pw_evd
+                ld      (pw_d1),hl
+pw_decide1:
+                ; Decide from the sign of the difference at both ends.  The
+                ; order matters: when both ends are zero the reference picks f,
+                ; so the f-test is asked first in each mode.
+                ld      hl,(pw_d0)
+                call    pw_flags
+                ld      c,a
+                ld      hl,(pw_d1)
+                call    pw_flags
+                and     c                       ; bit0 = both >= 0, bit1 = both <= 0
+                ld      c,a
+                ld      a,(pw_mode)
+                or      a
+                jr      nz,pwd_min
+                bit     0,c
+                jp      nz,pw_one_f
+                bit     1,c
+                jp      nz,pw_one_g
+                jp      pw_cross
+pwd_min:
+                bit     1,c
+                jp      nz,pw_one_f
+                bit     0,c
+                jp      nz,pw_one_g
+                jp      pw_cross
+
+; pw_flags : A bit 0 set when HL >= 0, bit 1 set when HL <= 0
+pw_flags:
+                ld      a,h
+                or      l
+                ld      a,3
+                ret     z
+                bit     7,h
+                ld      a,1
+                ret     z
+                ld      a,2
+                ret
+
+; evaluate the difference function at column A -> HL
+pw_evd:
+                ld      (ev_col_x),a
+                ld      de,(pw_da)
+                ld      a,d
+                or      e
+                jr      nz,pwe_slope
+                ld      hl,(pw_db)
+                ret
+pwe_slope:
+                ld      a,(ev_col_x)
+                call    mul_s16_u8
+                ld      l,h
+                ld      h,a
+                ld      de,(pw_db)
+                add     hl,de
+                ret
+
+; sgn_hl : A = -1 / 0 / 1 for HL negative / zero / positive
+sgn_hl:
+                ld      a,h
+                or      l
+                ret     z
+                bit     7,h
+                jr      nz,sgn_neg
+                ld      a,1
+                ret
+sgn_neg:
+                ld      a,$ff
+                ret
+
+pw_one_f:
+                ld      hl,(pw_f)
+                jp      pw_one
+pw_one_g:
+                ld      hl,(pw_g)
+pw_one:
+                ld      (pw_out+2),hl
+                ld      a,(pw_x0)
+                ld      (pw_out),a
+                ld      a,(pw_x1)
+                ld      (pw_out+1),a
+                ld      a,1
+                ld      (pw_n),a
+                ret
+
+pw_cross:
+                ; the crossing column is where da/256 * x + db = 0
+                ld      hl,(pw_db)
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ex      de,hl                   ; DE = -db
+                ld      bc,(pw_da)
+                call    divs
+                ; clamp to [x0+1, x1-1]
+                ld      a,h
+                or      a
+                jr      z,pwc_lo
+                bit     7,h
+                jr      nz,pwc_useLo
+                ld      l,255
+pwc_lo:
+                ld      a,(pw_x0)
+                inc     a
+                cp      l
+                jr      nc,pwc_setlo
+                ld      a,(pw_x1)
+                cp      l
+                jr      nc,pwc_have
+                ld      l,a
+                jr      pwc_have
+pwc_useLo:
+                ld      a,(pw_x0)
+                inc     a
+                ld      l,a
+                jr      pwc_have
+pwc_setlo:
+                ld      l,a
+pwc_have:
+                ld      a,l
+                ld      (pw_cx),a
+                ; which function actually wins at cx?
+                call    pw_evd
+                call    sgn_hl
+                ld      c,a
+                ld      a,(pw_mode)
+                or      a
+                ld      a,c
+                jr      nz,pwc_min
+                ; max: f wins when d >= 0
+                or      a
+                jp      m,pwc_gwins
+                jr      pwc_fwins
+pwc_min:
+                or      a
+                jr      z,pwc_fwins             ; a tie belongs to f
+                jp      p,pwc_gwins
+pwc_fwins:
+                ld      a,(pw_cx)
+                inc     a
+                ld      (pw_cx),a
+                ld      b,a
+                ld      a,(pw_x1)
+                cp      b
+                jp      c,pw_one_f              ; cx past the last column
+                jp      pwc_split
+pwc_gwins:
+                ld      a,(pw_cx)
+                ld      b,a
+                ld      a,(pw_x0)
+                cp      b
+                jp      nc,pw_one_g
+pwc_split:
+                ; two pieces; the first carries whichever function leads
+                ld      a,(pw_mode)
+                or      a
+                ld      hl,(pw_d0)
+                call    sgn_hl
+                ld      c,a
+                ld      a,(pw_mode)
+                or      a
+                jr      nz,pwc_s_min
+                ld      a,c
+                or      a
+                jr      nz,pwc_chk_f
+                jr      pwc_first_g
+pwc_chk_f:
+                jp      m,pwc_first_g
+                jr      pwc_first_f
+pwc_s_min:
+                ld      a,c
+                or      a
+                jp      m,pwc_first_f
+pwc_first_g:
+                ld      hl,(pw_g)
+                ld      (pw_out+2),hl
+                ld      hl,(pw_f)
+                ld      (pw_out+6),hl
+                jr      pwc_store
+pwc_first_f:
+                ld      hl,(pw_f)
+                ld      (pw_out+2),hl
+                ld      hl,(pw_g)
+                ld      (pw_out+6),hl
+pwc_store:
+                ld      a,(pw_x0)
+                ld      (pw_out),a
+                ld      a,(pw_cx)
+                dec     a
+                ld      (pw_out+1),a            ; first piece ends before cx
+                ld      a,(pw_cx)
+                ld      (pw_out+4),a
+                ld      a,(pw_x1)
+                ld      (pw_out+5),a
+                ld      a,2
+                ld      (pw_n),a
+                ret
+
+; ---------------------------------------------------------------------------
+; pw_diff : fill pw_da / pw_db from the functions at pw_f and pw_g.
+; ---------------------------------------------------------------------------
+pw_diff:
+                ld      hl,(pw_f)
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                inc     hl
+                ld      c,(hl)
+                inc     hl
+                ld      b,(hl)
+                push    bc
+                ld      hl,(pw_g)
+                ld      a,(hl)
+                inc     hl
+                ld      h,(hl)
+                ld      l,a
+                ex      de,hl
+                or      a
+                sbc     hl,de
+                ld      (pw_da),hl
+                ld      hl,(pw_g)
+                inc     hl
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                pop     hl
+                or      a
+                sbc     hl,de
+                ld      (pw_db),hl
+                ret
+
+; ---------------------------------------------------------------------------
+; sp_alive : is any column of [B, C] inside the aperture between the top
+; function at tg_tp and the bottom at tg_bp?  Carry set if so.
+; ---------------------------------------------------------------------------
+sp_alive:
+                push    bc
+                ld      hl,(tg_bp)
+                ld      (pw_f),hl
+                ld      hl,(tg_tp)
+                ld      (pw_g),hl
+                call    pw_diff
+                pop     bc
+                push    bc
+                ld      a,b
+                call    pw_evd
+                pop     bc
+                ld      a,h
+                or      l
+                jr      z,al_try2
+                bit     7,h
+                jr      z,al_yes
+al_try2:
+                ld      a,c
+                call    pw_evd
+                ld      a,h
+                or      l
+                jr      z,al_no
+                bit     7,h
+                jr      z,al_yes
+al_no:
+                or      a
+                ret
+al_yes:
+                scf
+                ret
+
+; ---------------------------------------------------------------------------
+; sp_tighten : narrow the aperture over [cl_lo, cl_hi) to the new boundaries
+; through (cl_sx1, cl_yt1) - (cl_sx2, cl_yt2) on top and the cl_yb pair below.
+; ---------------------------------------------------------------------------
+sp_tighten:
+                ld      a,(sp_count)
+                or      a
+                ret     z
+                ; new boundary functions
+                ld      hl,(cl_sx1)
+                ld      (cl_lx1),hl
+                ld      hl,(cl_sx2)
+                ld      (cl_lx2),hl
+                ld      hl,(cl_yt1)
+                ld      (cl_ly1),hl
+                ld      hl,(cl_yt2)
+                ld      (cl_ly2),hl
+                ld      hl,cl_ntf
+                call    linfn
+                ld      hl,(cl_yb1)
+                ld      (cl_ly1),hl
+                ld      hl,(cl_yb2)
+                ld      (cl_ly2),hl
+                ld      hl,cl_nbf
+                call    linfn
+
+                ld      a,(cl_lo)
+                ld      (tg_ilo),a
+                ld      a,(sp_count)
+                ld      (sp_n),a
+                call    sp_begin
+                ld      hl,(sp_head)
+tg_loop:
+                ld      (cl_span),hl
+                ld      a,(hl)
+                ld      (tg_xlo),a
+                inc     hl
+                ld      a,(hl)
+                ld      (tg_xlast),a
+                ld      a,(cl_hi)
+                dec     a
+                ld      (tg_ihi),a              ; inclusive last column
+                ; keep the span whole when it misses [ilo, ihi]
+                ld      a,(tg_ilo)
+                ld      b,a
+                ld      a,(tg_xlast)
+                cp      b
+                jp      c,tg_keep
+                ld      a,(tg_ihi)
+                ld      b,a
+                ld      a,(tg_xlo)
+                cp      b
+                jr      z,tg_overlap
+                jp      nc,tg_keep
+tg_overlap:
+                ; left remainder [xlo, ilo-1]
+                ld      a,(tg_xlo)
+                ld      b,a
+                ld      a,(tg_ilo)
+                cp      b
+                jp      z,tg_noleft
+                jp      c,tg_noleft
+                dec     a
+                ld      hl,(cl_span)
+                call    sp_emit_range
+tg_noleft:
+                ; overlap columns [ox0, ox1] inclusive
+                ld      a,(tg_xlo)
+                ld      b,a
+                ld      a,(tg_ilo)
+                cp      b
+                jr      nc,tg_ox0j
+                ld      a,b
+tg_ox0j:        ld      (tg_ox0v),a
+                ld      a,(tg_xlast)
+                ld      b,a
+                ld      a,(tg_ihi)
+                cp      b
+                jr      c,tg_ox1c
+                ld      a,b
+tg_ox1c:        ld      (tg_ox1v),a
+
+                ; piecewise max of the old top and the new top
+                ld      hl,(cl_span)
+                ld      de,SP_TA
+                add     hl,de
+                ld      (pw_f),hl
+                ld      hl,cl_ntf
+                ld      (pw_g),hl
+                ld      a,(tg_ox0v)
+                ld      (pw_x0),a
+                ld      a,(tg_ox1v)
+                ld      (pw_x1),a
+                xor     a
+                ld      (pw_mode),a
+                call    pw
+                ; stash the top pieces; the inner pw overwrites pw_out
+                ld      hl,pw_out
+                ld      de,tg_piece
+                ld      bc,8
+                ldir
+                ld      a,(pw_n)
+                ld      (tg_iter),a
+                ld      hl,tg_piece
+                ld      (tg_tp2),hl
+tg_tploop:
+                ld      hl,(tg_tp2)
+                ld      a,(hl)
+                ld      (tg_tx0),a
+                inc     hl
+                ld      a,(hl)
+                ld      (tg_tx1),a
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (tg_tp),de              ; winning top function
+                ; piecewise min of the old bottom and the new bottom
+                ld      hl,(cl_span)
+                ld      de,SP_BA
+                add     hl,de
+                ld      (pw_f),hl
+                ld      hl,cl_nbf
+                ld      (pw_g),hl
+                ld      a,(tg_tx0)
+                ld      (pw_x0),a
+                ld      a,(tg_tx1)
+                ld      (pw_x1),a
+                ld      a,1
+                ld      (pw_mode),a
+                call    pw
+                ld      a,(pw_n)
+                ld      (tg_biter),a
+                ld      hl,pw_out
+                ld      (tg_bp2),hl
+tg_bploop:
+                ld      hl,(tg_bp2)
+                ld      a,(hl)
+                ld      (tg_bx0),a
+                inc     hl
+                ld      a,(hl)
+                ld      (tg_bx1),a
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (tg_bp),de
+                ; skip empty pieces
+                ld      a,(tg_bx0)
+                ld      b,a
+                ld      a,(tg_bx1)
+                cp      b
+                jp      c,tg_bpnext
+                ; alive anywhere over [bx0, bx1]?
+                ld      a,(tg_bx0)
+                ld      b,a
+                ld      a,(tg_bx1)
+                ld      c,a
+                call    sp_alive
+                jr      nc,tg_bpnext
+                ; emit the piece
+                ld      a,(tg_bx0)
+                ld      (sp_scratch+SP_XLO),a
+                ld      a,(tg_bx1)
+                ld      (sp_scratch+SP_XLAST),a
+                ld      hl,(tg_tp)
+                ld      de,sp_scratch+SP_TA
+                ld      bc,4
+                ldir
+                ld      hl,(tg_bp)
+                ld      de,sp_scratch+SP_BA
+                ld      bc,4
+                ldir
+                ld      hl,sp_scratch
+                call    sp_emit
+tg_bpnext:
+                ld      hl,(tg_bp2)
+                ld      de,4
+                add     hl,de
+                ld      (tg_bp2),hl
+                ld      a,(tg_biter)
+                dec     a
+                ld      (tg_biter),a
+                jp      nz,tg_bploop
+                ld      hl,(tg_tp2)
+                ld      de,4
+                add     hl,de
+                ld      (tg_tp2),hl
+                ld      a,(tg_iter)
+                dec     a
+                ld      (tg_iter),a
+                jp      nz,tg_tploop
+
+                ; right remainder [ihi, xlast]
+                ld      a,(cl_hi+1)
+                or      a
+                jr      nz,tg_next
+                ld      a,(cl_hi)
+                ld      b,a
+                ld      a,(tg_xlast)
+                cp      b
+                jr      c,tg_next
+                ld      hl,(cl_span)
+                ld      a,(cl_hi)
+                ld      b,a
+                ld      a,(tg_xlast)
+                call    sp_emit_range2
+                jp      tg_next
+tg_keep:
+                ld      hl,(cl_span)
+                call    sp_emit
+tg_next:
+                ld      hl,(cl_span)
+                ld      bc,SPAN_SIZE
+                add     hl,bc
+                ld      a,(sp_n)
+                dec     a
+                ld      (sp_n),a
+                jp      nz,tg_loop
+                jp      sp_commit
+
+; ---------------------------------------------------------------------------
+; dl_emit : append (A, B) - (C, D) to the display list.
+; ---------------------------------------------------------------------------
+; Writes first and bounds-checks after: the slot beyond DLIST_END is slack,
+; and refusing to advance simply makes further segments overwrite it.
+dl_emit:
+                ld      hl,(dlist_ptr)
+                ld      (hl),a
+                inc     hl
+                ld      (hl),b
+                inc     hl
+                ld      (hl),c
+                inc     hl
+                ld      (hl),d
+                inc     hl
+                ld      a,h
+                cp      DLIST_END_PAGE
+                ret     nc                      ; list full
+                ld      (dlist_ptr),hl
+                ret
+
+; ---------------------------------------------------------------------------
+; sp_drawv : vertical segment at column (dl_x1) from (dl_y1) to (dl_y2),
+; clipped to whichever span owns that column.
+; ---------------------------------------------------------------------------
+sp_drawv:
+                ld      hl,(dl_x1)
+                ld      a,h
+                or      a
+                ret     nz                      ; off screen either side
+                ld      a,l
+                ld      (ev_col_x),a
+                ; order y
+                ld      hl,(dl_y1)
+                ld      de,(dl_y2)
+                call    cmp_s16
+                jr      c,dv_ordered
+                jr      z,dv_ordered
+                ld      hl,(dl_y1)
+                ld      de,(dl_y2)
+                ld      (dl_y1),de
+                ld      (dl_y2),hl
+dv_ordered:
+                ld      a,(sp_count)
+                or      a
+                ret     z
+                ld      (sp_n),a
+                ld      hl,(sp_head)
+dv_find:
+                ld      (cl_span),hl
+                ld      a,(ev_col_x)
+                ld      c,a
+                ld      a,(hl)
+                cp      c
+                jr      z,dv_in
+                jr      nc,dv_none              ; xlo > x: sorted, so give up
+                inc     hl
+                ld      a,(hl)
+                cp      c
+                jr      nc,dv_in2
+                dec     hl
+                ld      bc,SPAN_SIZE
+                add     hl,bc
+                ld      a,(sp_n)
+                dec     a
+                ld      (sp_n),a
+                jp      nz,dv_find
+dv_none:
+                ret
+dv_in:
+                inc     hl
+                ld      a,(hl)
+                ld      c,a
+                ld      a,(ev_col_x)
+                cp      c
+                jr      z,dv_in2
+                jr      c,dv_in2
+                dec     hl
+                ld      bc,SPAN_SIZE
+                add     hl,bc
+                ld      a,(sp_n)
+                dec     a
+                ld      (sp_n),a
+                jp      nz,dv_find
+                ret
+dv_in2:
+                ; aperture at this column
+                ld      hl,(cl_span)
+                ld      de,SP_TA
+                add     hl,de
+                ld      a,(ev_col_x)
+                call    ev_at
+                ld      (dv_top),hl
+                ld      hl,(cl_span)
+                ld      de,SP_BA
+                add     hl,de
+                ld      a,(ev_col_x)
+                call    ev_at
+                ld      (dv_bot),hl
+                ld      de,(dv_top)
+                call    cmp_s16                 ; signed: top can be negative
+                ret     c                       ; empty aperture
+                ret     z
+                ; a = max(y1, top), b = min(y2, bot)
+                ld      hl,(dl_y1)
+                ld      de,(dv_top)
+                call    cmp_s16
+                jr      nc,dv_a1
+                ld      hl,(dv_top)
+dv_a1:          ld      (dv_a),hl
+                ld      hl,(dl_y2)
+                ld      de,(dv_bot)
+                call    cmp_s16
+                jr      c,dv_b1
+                ld      hl,(dv_bot)
+dv_b1:          ld      (dv_b),hl
+                ld      de,(dv_a)
+                call    cmp_s16
+                ret     c                       ; a > b: nothing visible
+                ld      a,(ev_col_x)
+                ld      c,a
+                ld      a,(dv_a)
+                ld      b,a
+                ld      a,(dv_b)
+                ld      d,a
+                ld      a,c
+                ld      c,a
+                jp      dl_emit
+
+; ---------------------------------------------------------------------------
+; sp_draws : sloped segment (ln_x1, ln_y1) - (ln_x2, ln_y2), x1 < x2.
+; Cyrus-Beck clipped against every span it overlaps.
+; ---------------------------------------------------------------------------
+sp_draws:
+                ld      a,(sp_count)
+                or      a
+                ret     z
+                ld      (sp_n),a
+                ld      hl,(ln_x2)
+                ld      de,(ln_x1)
+                or      a
+                sbc     hl,de
+                ld      (cl_dx),hl
+                ld      hl,(ln_y2)
+                ld      de,(ln_y1)
+                or      a
+                sbc     hl,de
+                ld      (cl_dy),hl
+                ld      hl,(sp_head)
+ds_loop:
+                ld      (cl_span),hl
+                ; skip spans that cannot overlap [x1, x2]
+                ld      a,(hl)
+                ld      e,a
+                ld      d,0
+                ld      hl,(ln_x2)
+                or      a
+                sbc     hl,de
+                jp      m,ds_done               ; xlo > x2 -> sorted, stop
+                ld      hl,(cl_span)
+                inc     hl
+                ld      a,(hl)
+                ld      e,a
+                ld      d,0
+                ld      hl,(ln_x1)
+                or      a
+                sbc     hl,de                   ; x1 - xlast
+                jr      z,ds_clip
+                jp      p,ds_next               ; x1 > xlast: no overlap
+ds_clip:
+                call    clip_to_trap
+ds_next:
+                ld      hl,(cl_span)
+                ld      bc,SPAN_SIZE
+                add     hl,bc
+                ld      a,(sp_n)
+                dec     a
+                ld      (sp_n),a
+                jp      nz,ds_loop
+ds_done:
+                ret
+
+; ---------------------------------------------------------------------------
+; clip_to_trap : clip the staged line to the span at cl_span and emit it.
+; ---------------------------------------------------------------------------
+clip_to_trap:
+                ld      hl,0
+                ld      (cl_t0),hl
+                ld      hl,256
+                ld      (cl_t1),hl
+                ; stage the trapezoid
+                ld      hl,(cl_span)
+                ld      a,(hl)
+                ld      (cl_xlo),a
+                xor     a
+                ld      (cl_xlo+1),a
+                ld      hl,(cl_span)
+                inc     hl
+                ld      a,(hl)
+                ld      (cl_xhi),a
+                xor     a
+                ld      (cl_xhi+1),a
+                ld      hl,(cl_span)
+                ld      de,SP_TA
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cl_ta),de
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cl_tb),de
+                ld      hl,(cl_span)
+                ld      de,SP_BA
+                add     hl,de
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cl_ba),de
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (cl_bb),de
+
+                ; 1: x >= xlo    p = -dx, q = x1 - xlo
+                ld      hl,0
+                ld      de,(cl_dx)
+                or      a
+                sbc     hl,de
+                ld      (cl_p),hl
+                ld      hl,(ln_x1)
+                ld      de,(cl_xlo)
+                or      a
+                sbc     hl,de
+                ld      (cl_q),hl
+                call    cl_apply
+                ret     c
+                ; 2: x <= xlast  p = dx, q = xlast - x1
+                ld      hl,(cl_dx)
+                ld      (cl_p),hl
+                ld      hl,(cl_xhi)
+                ld      de,(ln_x1)
+                or      a
+                sbc     hl,de
+                ld      (cl_q),hl
+                call    cl_apply
+                ret     c
+                ; 3: y >= top(x)   p = ta*dx - dy, q = y1 - ta*x1 - tb
+                ld      de,(cl_ta)
+                ld      a,d
+                or      e
+                jr      nz,ct_tslope
+                ld      hl,0
+                ld      de,(cl_dy)
+                or      a
+                sbc     hl,de
+                ld      (cl_p),hl
+                ld      hl,(ln_y1)
+                ld      de,(cl_tb)
+                or      a
+                sbc     hl,de
+                ld      (cl_q),hl
+                jr      ct_t3
+ct_tslope:
+                ld      hl,(cl_dx)
+                ld      de,(cl_ta)
+                call    fpmul8
+                ld      de,(cl_dy)
+                or      a
+                sbc     hl,de
+                ld      (cl_p),hl
+                ld      hl,(ln_x1)
+                ld      de,(cl_ta)
+                call    fpmul8
+                ex      de,hl
+                ld      hl,(ln_y1)
+                or      a
+                sbc     hl,de
+                ld      de,(cl_tb)
+                or      a
+                sbc     hl,de
+                ld      (cl_q),hl
+ct_t3:
+                call    cl_apply
+                ret     c
+                ; 4: y <= bot(x)   p = dy - ba*dx, q = ba*x1 + bb - y1
+                ld      de,(cl_ba)
+                ld      a,d
+                or      e
+                jr      nz,ct_bslope
+                ld      hl,(cl_dy)
+                ld      (cl_p),hl
+                ld      hl,(cl_bb)
+                ld      de,(ln_y1)
+                or      a
+                sbc     hl,de
+                ld      (cl_q),hl
+                jr      ct_t4
+ct_bslope:
+                ld      hl,(cl_dx)
+                ld      de,(cl_ba)
+                call    fpmul8
+                ex      de,hl
+                ld      hl,(cl_dy)
+                or      a
+                sbc     hl,de
+                ld      (cl_p),hl
+                ld      hl,(ln_x1)
+                ld      de,(cl_ba)
+                call    fpmul8
+                ld      de,(cl_bb)
+                add     hl,de
+                ld      de,(ln_y1)
+                or      a
+                sbc     hl,de
+                ld      (cl_q),hl
+ct_t4:
+                call    cl_apply
+                ret     c
+                ; t0 <= t1 ?
+                ld      hl,(cl_t1)
+                ld      de,(cl_t0)
+                or      a
+                sbc     hl,de
+                ret     c
+                ; endpoints
+                ld      hl,(cl_t0)
+                call    cl_at
+                ld      (cl_ax),hl
+                ld      (cl_ay),de
+                ld      hl,(cl_t1)
+                call    cl_at
+                ld      (cl_bx),hl
+                ld      (cl_by),de
+                ; clamp x into the span and order the endpoints
+                ld      hl,cl_ax
+                call    cl_clampx
+                ld      hl,cl_bx
+                call    cl_clampx
+                ld      hl,(cl_bx)
+                ld      de,(cl_ax)
+                or      a
+                sbc     hl,de
+                jr      nc,ct_ord
+                ld      hl,(cl_ax)
+                ld      de,(cl_bx)
+                ld      (cl_ax),de
+                ld      (cl_bx),hl
+                ld      hl,(cl_ay)
+                ld      de,(cl_by)
+                ld      (cl_ay),de
+                ld      (cl_by),hl
+ct_ord:
+                ; clamp y into the aperture at each endpoint
+                ld      hl,cl_ax
+                call    cl_clampy
+                ld      hl,cl_bx
+                call    cl_clampy
+                ld      a,(cl_ax)
+                ld      c,a
+                ld      a,(cl_ay)
+                ld      b,a
+                ld      a,(cl_bx)
+                ld      e,a
+                ld      a,(cl_by)
+                ld      d,a
+                ld      a,c
+                ld      c,e
+                jp      dl_emit
+
+; cl_apply : narrow [t0, t1] by the constraint p*t + q >= 0.  Carry = reject.
+cl_apply:
+                ld      hl,(cl_p)
+                ld      a,h
+                or      l
+                jr      nz,ca_div
+                ld      hl,(cl_q)
+                bit     7,h
+                ret     z                       ; q >= 0: constraint is slack
+                scf
+                ret
+ca_div:
+                ; Two exact early-outs that skip the divide entirely.
+                ;   p > 0 and q >= p  ->  t >= 256, so t1 = min(t1, t) is a no-op
+                ;   p < 0 and q > 0   ->  t <= 0 <= t0, so neither bound moves
+                ld      hl,(cl_p)
+                bit     7,h
+                jr      nz,ca_pneg
+                ld      de,(cl_q)
+                ex      de,hl
+                call    cmp_s16                 ; q < p ?
+                jr      nc,ca_skip
+                jr      ca_go
+ca_pneg:
+                ld      hl,(cl_q)
+                ld      a,h
+                or      l
+                jr      z,ca_go
+                bit     7,h
+                jr      z,ca_skip               ; q > 0
+ca_go:
+                ld      de,(cl_q)
+                ld      bc,(cl_p)
+                call    divs                    ; HL = (q << 8) / p
+                ld      (ca_t),hl
+                ld      de,(cl_p)
+                bit     7,d
+                jr      nz,ca_neg
+                ; p > 0: reject when t < t0, else t1 = min(t1, t)
+                ld      hl,(ca_t)
+                ld      de,(cl_t0)
+                call    cmp_s16
+                ret     c
+                ld      hl,(ca_t)
+                ld      de,(cl_t1)
+                call    cmp_s16
+                jr      nc,ca_done
+                ld      (cl_t1),hl
+ca_skip:
+ca_done:
+                or      a
+                ret
+ca_neg:
+                ; p < 0: reject when t > t1, else t0 = max(t0, t)
+                ld      hl,(cl_t1)
+                ld      de,(ca_t)
+                call    cmp_s16
+                ret     c
+                ld      hl,(cl_t0)
+                ld      de,(ca_t)
+                call    cmp_s16
+                jr      nc,ca_done
+                ld      hl,(ca_t)
+                ld      (cl_t0),hl
+                jr      ca_done
+
+; cl_at : HL = t (0..256) -> HL = x, DE = y along the staged line
+cl_at:
+                ld      a,h
+                or      l
+                jr      nz,ca_t1
+                ld      hl,(ln_x1)
+                ld      de,(ln_y1)
+                ret
+ca_t1:
+                ld      a,h
+                or      a
+                jr      z,ca_tm
+                ld      hl,(ln_x2)
+                ld      de,(ln_y2)
+                ret
+ca_tm:
+                ld      (ct_t),hl
+                ld      de,(cl_dx)
+                ld      a,(ct_t)
+                call    mul_s16_u8
+                call    rns8_ahl
+                ld      de,(ln_x1)
+                add     hl,de
+                ld      (ct_x),hl
+                ld      de,(cl_dy)
+                ld      a,(ct_t)
+                call    mul_s16_u8
+                call    rns8_ahl
+                ld      de,(ln_y1)
+                add     hl,de
+                ex      de,hl
+                ld      hl,(ct_x)
+                ret
+
+; cl_clampx : clamp the s16 at HL into [cl_xlo, cl_xhi]
+cl_clampx:
+                push    hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ex      de,hl                   ; HL = value
+                ld      de,(cl_xlo)
+                call    cmp_s16
+                jr      nc,cx_hi
+                ld      hl,(cl_xlo)
+                jr      cx_store
+cx_hi:
+                ld      de,(cl_xhi)
+                call    cmp_s16
+                jr      c,cx_store
+                ld      hl,(cl_xhi)
+cx_store:
+                ex      de,hl
+                pop     hl
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                ret
+
+; cl_clampy : clamp the y paired with the x at HL into the span's aperture
+cl_clampy:
+                ld      (cy_p),hl
+                ld      a,(hl)
+                ld      (ev_col_x),a
+                ld      hl,(cl_span)
+                ld      de,SP_TA
+                add     hl,de
+                ld      a,(ev_col_x)
+                call    ev_at
+                ld      (dv_top),hl
+                ld      hl,(cl_span)
+                ld      de,SP_BA
+                add     hl,de
+                ld      a,(ev_col_x)
+                call    ev_at
+                ld      (dv_bot),hl
+                ld      hl,(cy_p)
+                inc     hl
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)                  ; DE = y
+                ex      de,hl                   ; HL = y
+                ld      de,(dv_top)
+                call    cmp_s16
+                jr      nc,cy_hi
+                ld      hl,(dv_top)
+                jr      cy_store
+cy_hi:
+                ld      de,(dv_bot)
+                call    cmp_s16
+                jr      c,cy_store
+                ld      hl,(dv_bot)
+cy_store:
+                ex      de,hl
+                ld      hl,(cy_p)
+                inc     hl
+                inc     hl
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                ret
