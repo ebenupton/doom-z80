@@ -63,13 +63,13 @@ exact for all unsigned bytes because `a+b` and `a−b` share parity. Two
 512-entry byte planes hold `f`, page-aligned so the 9-bit sum index costs one
 `ADC` on the page byte. 148 T-states, built at boot in a single running add.
 
-**The rotation dodges it entirely.** A view transform is
-`vx = wx·sin − wy·cos`, `vy = wx·cos + wy·sin`, and doing that as four 16×8
-quarter-square multiplies costs about 1600 T-states a point. A frame
-transforms sixty-odd vertices plus corners for every BSP node it tests, so
-instead each frame fills two 256-entry product tables — `i·sin` and `i·cos` —
-and a rotation term becomes two table lookups. The tables cost 29k T-states
-and save five times that; they are also cached across frames that only moved.
+**The rotation goes through it.** A view transform is
+`vx = wx·sin − wy·cos`, `vy = wx·cos + wy·sin`: four 16×8 products a vertex,
+each of which is one quarter-square lookup because the world is prescaled
+into nine bits, so the high partial is 0 or ±mag. A first version filled two
+256-entry product tables per frame instead, which the BBC port had already
+rejected: every viewpoint in the benchmark turns, so the 29k T-state build
+was paid every frame against about 136 products, and the tables lost.
 
 **Perspective projection collapses to 16 bits.** The reference computes
 `sx = 128 + rns(X88·m9, S+8)` from a 25-bit product. Splitting
@@ -196,10 +196,10 @@ the tracked 109-frame walkthrough of E1M1:
 
 | | T-states/frame | fps |
 |---|---|---|
-| best frame (facing a near wall) | 142k | 24.9 |
-| median | 921k | 3.9 |
-| mean | 950k | 3.7 |
-| worst frame (the long start corridor) | 1.70M | 2.1 |
+| best frame (facing a near wall) | 142k | 25.0 |
+| median | 780k | 4.5 |
+| mean | 806k | 4.4 |
+| worst frame (the long start corridor) | 1.35M | 2.6 |
 
 The tracked comparison is against the BBC port's own recorded baseline: the
 same 18 viewpoints, its 6502 cycles beside these T-states, with parity meaning
@@ -210,9 +210,10 @@ outside the BBC harness's counted region too.
 | | 6502 cycles / Z80 T | fps |
 |---|---|---|
 | BBC Micro port | 2,956,217 | 12.2 |
-| this port | 14,738,966 | 4.3 |
+| this port | 11,479,813 | 5.6 |
 
-That is 2.81× off parity, from 3.72× when the engine first ran.
+That is 2.19× off parity, from 3.72× when the engine first ran and 2.81×
+before the register-file campaign below.
 
 ### What came over from the BBC port
 
@@ -278,10 +279,40 @@ step — on the Z80 `INC H` already costs 22 T-states a pixel against the 30 an
 unrolled absolute-addressed block would, and there is no room for 1.9K of
 blocks.
 
-What is left is spread thin — nothing above 7% of a frame. The 6502 does the
-same work about 2.8× cheaper per operation, and a quarter of this engine's
-time is absolute-address loads and stores where the 6502 has zero page at
-three cycles.
+### The register-file campaign
+
+The first port was a transliteration: every value went through an absolute
+address, as it would on a 6502, and the Z80's second register set and index
+registers went unused. The second pass rewrote the hot routines from their
+pseudocode as Z80: seg and node records are walked through `IX`, the two
+endpoint cache records sit in `IX`/`IY`, `project_x`/`project_y`/`recip`
+take and return their operands in registers, the span list is walked in
+`IX` with pieces written once from their sources (no staging copy), the
+record an op splits is kept as its own remainder rather than copied and
+freed, the divide and the rounding shifts are unrolled, and the frame's
+sin/cos products go through the quarter-square multiply rather than
+per-frame product tables (the BBC port rejected those too; on turning
+frames the 29k build cost more than it saved). The corner memo was measured
+a net loss (about 10% hits) and is kept, as the BBC port keeps it.
+
+`tools/flat.js` attributes every T-state to its enclosing label over the 18
+parity viewpoints, and the BBC port's own `profile_subsystems.py` gives the
+comparison. Per frame, in Z80 T-states against the BBC's cycles × 1.773:
+
+| subsystem | this port | BBC port | ratio |
+|---|---|---|---|
+| vertex transform, projection, reciprocals | 137k | 69k | 2.0× |
+| bbox visibility | 61k | 48k | 1.3× |
+| span clipper (fuse, extras, verticals, lines, has_gap, mark_solid) | 200k | 60k | 3.3× |
+| everything else (walk, seg glue, rasteriser) | 245k | 165k | 1.5× |
+
+The clipper is the outlier, and the reason is architectural: the BBC port's
+spans are two-point records — the y at each end of the span — so a drawn
+line's ends are its values, a span's ends need no evaluation, and there is no
+slope divide anywhere. This port's slope-intercept lines pay a 16-bit divide
+per line and an 8×8 multiply per evaluation (`linfn` + `divs` 28k, `ev_at`
+31k a frame). Everything else is within the ratio a byte-oriented 6502
+program should hold over a Z80 doing the same in 16 bits.
 
 ## The toolchain
 
