@@ -1101,12 +1101,10 @@ rs_visible:
                 ld      hl,(sg_v1)
                 call    vertex_get
                 ld      hl,(vc_ptr)
-                ld      (sg_c1),hl
                 push    hl
                 ld      hl,(sg_v2)
                 call    vertex_get
                 ld      hl,(vc_ptr)
-                ld      (sg_c2),hl
                 push    hl
                 pop     iy                      ; IY = v2's record
                 pop     ix                      ; IX = v1's
@@ -1127,14 +1125,10 @@ rs_visible:
                 ld      (sg_n1),a
                 and     c
                 ret     nz                      ; both behind the near plane
-
-                ld      l,(ix+VC_TVX)
-                ld      h,(ix+VC_TVX+1)
-                ld      (cr_vx1),hl
-                ld      l,(iy+VC_TVX)
-                ld      h,(iy+VC_TVX+1)
-                ld      (cr_vx2),hl
-
+                ld      a,b
+                or      c
+                jr      nz,rs_clipx             ; a crossing needs the view x's
+rs_front:
                 ld      a,b
                 or      a
                 jr      nz,rs_clip1
@@ -1151,6 +1145,16 @@ rs_visible:
                 ld      h,(ix+VC_SX+1)
                 ld      (sg_sx1),hl
                 jr      rs_do2
+rs_clipx:
+                push    bc
+                ld      l,(ix+VC_TVX)
+                ld      h,(ix+VC_TVX+1)
+                ld      (cr_vx1),hl
+                ld      l,(iy+VC_TVX)
+                ld      h,(iy+VC_TVX+1)
+                ld      (cr_vx2),hl
+                pop     bc
+                jr      rs_front
 rs_clip1:
                 ; v1 is behind: cross toward v2
                 call    near_cross_seg1

@@ -295,110 +295,103 @@ clampb:
 ;         (cl_lx1, cl_ly1) - (cl_lx2, cl_ly2) into the buffer at HL.
 ; ---------------------------------------------------------------------------
 linfn:
-                ld      (lf_out),hl
-                ; bias the endpoints here, so every intercept this writes is
-                ; already in the clipper's byte space and ev_at need only
-                ; range-check.  The slope is a difference, so it is untouched.
-                ld      hl,(cl_ly1)
-                ld      de,Y_BIAS
-                add     hl,de
-                ld      (cl_ly1),hl
-                ld      hl,(cl_ly2)
-                add     hl,de
-                ld      (cl_ly2),hl
+                push    hl                      ; the output slot
                 ld      hl,(cl_lx2)
                 ld      de,(cl_lx1)
                 or      a
                 sbc     hl,de
-                ld      a,h
-                or      l
-                jr      nz,lf_slope
-                ld      hl,(cl_ly1)
-                ld      de,(cl_ly2)
-                add     hl,de
-                sra     h
-                rr      l                       ; (y1 + y2) >> 1
-                jr      lf_store0
-lf_slope:
                 ld      b,h
                 ld      c,l                     ; BC = dx
                 ld      hl,(cl_ly2)
                 ld      de,(cl_ly1)
                 or      a
-                sbc     hl,de
+                sbc     hl,de                   ; HL = dy - the bias cancels
+                ld      a,b
+                or      c
+                jp      z,lf_vertl
                 ld      a,h
                 or      l
-                jr      nz,lf_div
-                ld      hl,(cl_ly1)             ; a level edge needs no divide
-                jr      lf_store0
-lf_div:
-                ex      de,hl                   ; DE = dy
-                call    divs
-                ld      a,h
-                or      l
-                jr      nz,lf_real
-                ld      hl,(cl_ly1)
-lf_store0:
+                jp      z,lf_level ; a level edge needs no divide
                 ex      de,hl
-                ld      hl,(lf_out)
-                ld      (hl),0
+                call    divs                    ; HL = (dy << 8) / dx
+                ld      a,h
+                or      l
+                jp      z,lf_level
+                ld      (lf_slope_v),hl
+                ; anchor on whichever endpoint is nearer the screen, so the
+                ; slope's quantisation has less distance to compound over
+                ld      hl,(cl_lx1)
+                bit     7,h
+                jr      z,lf_a1
+                xor     a
+                sub     l
+                ld      l,a
+                sbc     a,a
+                sub     h
+                ld      h,a
+lf_a1:          push    hl
+                ld      hl,(cl_lx2)
+                bit     7,h
+                jr      z,lf_a2
+                xor     a
+                sub     l
+                ld      l,a
+                sbc     a,a
+                sub     h
+                ld      h,a
+lf_a2:          pop     de
+                or      a
+                sbc     hl,de                   ; |x2| - |x1|
+                jr      c,lf_use2
+                ld      hl,(cl_lx1)
+                ld      de,(cl_ly1)
+                jr      lf_calc
+lf_use2:
+                ld      hl,(cl_lx2)
+                ld      de,(cl_ly2)
+lf_calc:
+                push    de                      ; the anchor's y
+                ; (slope * x) >> 8: screen columns are almost always inside
+                ; +/-255, which makes the wide product one 16-by-8
+                ld      a,h
+                or      a
+                jr      z,lf_pos8
+                inc     a
+                jr      nz,lf_wide
+                ld      a,l                     ; x negative and a byte: the
+                neg                             ; product is negated before
+                ld      de,(lf_slope_v)         ; the shift, since floor(-p/256)
+                call    mul_s16_u8              ; is not -floor(p/256)
+                call    neg_ahl
+                jr      lf_prod
+lf_pos8:
+                ld      a,l
+                ld      de,(lf_slope_v)
+                call    mul_s16_u8
+lf_prod:
+                ld      l,h
+                ld      h,a                     ; HL = (slope * x) >> 8
+lf_int:
+                pop     de                      ; the anchor's y
+                ex      de,hl
+                ld      bc,Y_BIAS
+                add     hl,bc
+                or      a
+                sbc     hl,de                   ; intercept = y + bias - product
+                ex      de,hl
+                ld      bc,(lf_slope_v)
+                pop     hl
+                ld      (hl),c
                 inc     hl
-                ld      (hl),0
+                ld      (hl),b
                 inc     hl
                 ld      (hl),e
                 inc     hl
                 ld      (hl),d
                 ret
-lf_real:
-                ld      (lf_slope_v),hl
-                ld      hl,(cl_lx1)
-                call    abs_hl
-                ld      b,h
-                ld      c,l
-                ld      hl,(cl_lx2)
-                call    abs_hl
-                or      a
-                sbc     hl,bc
-                jr      c,lf_use2
-                ld      de,(cl_lx1)
-                ld      hl,(cl_ly1)
-                jr      lf_calc
-lf_use2:
-                ld      de,(cl_lx2)
-                ld      hl,(cl_ly2)
-lf_calc:
-                ld      (lf_y),hl
-                ex      de,hl                   ; HL = x
-                ; (slope * x) >> 8.  Screen columns are almost always inside
-                ; +/-255, which turns the wide product into one 16x8.
-                ld      a,h
-                or      a
-                jr      z,lf_narrow
-                inc     a
-                jr      nz,lf_wide
-                ; x is negative and fits a byte.  The product must be negated
-                ; before the shift: floor(-p/256) is not -floor(p/256).
-                ld      a,l
-                neg
-                ld      (lf_absx),a
-                ld      de,(lf_slope_v)
-                ld      a,(lf_absx)
-                call    mul_s16_u8
-                call    neg_ahl
-                ld      l,h
-                ld      h,a
-                jr      lf_haveprod
-lf_narrow:
-                ld      a,l
-                ld      (lf_absx),a
-                ld      de,(lf_slope_v)
-                call    lf_mulcol
-                jr      lf_haveprod
 lf_wide:
-                ; An anchor column outside a byte: (slope*x)>>8 splits into
-                ; slope*xh + ((slope*xl)>>8), both 16-by-8.  E1M1 never gets
-                ; here - linfn anchors on whichever endpoint is nearer the
-                ; screen - so it costs nothing to spend two calls on it.
+                ; an anchor outside a byte: slope*xh + ((slope*xl)>>8).  E1M1
+                ; never gets here, so two calls cost nothing.
                 push    hl
                 ld      de,(lf_slope_v)
                 ld      a,l
@@ -412,38 +405,28 @@ lf_wide:
                 call    mul_s16_u8_signed
                 ld      de,(lf_wtmp)
                 add     hl,de
-lf_haveprod:
+                jr      lf_int
+lf_vertl:
+                ld      hl,(cl_ly1)             ; x1 == x2: the mean y
+                ld      de,(cl_ly2)
+                add     hl,de
+                sra     h
+                rr      l
+                jr      lf_store0
+lf_level:
+                ld      hl,(cl_ly1)
+lf_store0:
+                ld      de,Y_BIAS
+                add     hl,de
                 ex      de,hl
-                ld      hl,(lf_y)
-                or      a
-                sbc     hl,de
-                ex      de,hl                   ; DE = intercept
-                ld      hl,(lf_out)
-                ld      bc,(lf_slope_v)
-                ld      (hl),c
+                pop     hl
+                ld      (hl),0
                 inc     hl
-                ld      (hl),b
+                ld      (hl),0
                 inc     hl
                 ld      (hl),e
                 inc     hl
                 ld      (hl),d
-                ret
-
-; lf_mulcol : DE = slope, (lf_absx) = column 0..255 -> HL = (slope*col) >> 8
-lf_mulcol:
-                ld      a,(lf_absx)
-                call    mul_s16_u8
-                ld      l,h
-                ld      h,a
-                ret
-
-abs_hl:
-                bit     7,h
-                ret     z
-                ex      de,hl
-                ld      hl,0
-                or      a
-                sbc     hl,de
                 ret
 
 ; ---------------------------------------------------------------------------
