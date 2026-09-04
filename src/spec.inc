@@ -96,9 +96,9 @@ ORG_ADDR        EQU     CODE_BASE
 
 ; The span pool lives in bank 2 rather than with the other scratch: it is the
 ; hottest data in the clipper and bank 2 is uncontended.
-SPANS_BASE      EQU     $B800        ; two pools of 480 bytes, both below VARS_BASE
-SPANS_MAX       EQU     40              ; measured peak is 31
-SPAN_SIZE       EQU     12              ; xlo,xlast,tslope(2),tint(2),bslope(2),bint(2),pad(2)
+SPANS_BASE      EQU     $B900        ; two pools, both below VARS_BASE
+SPANS_MAX       EQU     24              ; measured peak is 10
+SPAN_SIZE       EQU     16
 SP_XLO          EQU     0
 SP_XLAST        EQU     1               ; inclusive, so a span is [xlo, xlast]
 SP_TA           EQU     2               ; top slope, 8.8 signed
@@ -106,6 +106,15 @@ SP_TB           EQU     4               ; top intercept, s16
 SP_BA           EQU     6
 SP_BB           EQU     8
 SP_OPEN         EQU     10              ; 1 when the aperture is open throughout
+; Each boundary carries its extremes over the span: outer is the value further
+; from the visible band, inner the value nearer it.  A line whose own extremes
+; sit inside [SP_IT, SP_IB] is inside the aperture right across the span, and
+; one outside [SP_OT, SP_OB] never enters it - so four byte comparisons settle
+; most clips without evaluating a boundary at all.
+SP_OT           EQU     12
+SP_IT           EQU     13
+SP_OB           EQU     14
+SP_IB           EQU     15
 SPANS_TOP       EQU     SPANS_BASE + SPANS_MAX*SPAN_SIZE
 ; scratch pool that tighten and mark_solid build into before swapping
 SPANS_ALT       EQU     SPANS_TOP
@@ -452,8 +461,20 @@ fu_ax1          EQU     VARS_BASE+697
 fu_have         EQU     VARS_BASE+716
 al_both         EQU     VARS_BASE+717
 al_open         EQU     VARS_BASE+718
-al_t            EQU     VARS_BASE+719   ; the walk supplied the boundary values
-fu_pb           EQU     VARS_BASE+698   ; 3 x (x0, x1, topfn, botfn)
+al_t            EQU     VARS_BASE+719
+fu_t_o          EQU     VARS_BASE+720   ; the current piece's boundary extremes
+fu_t_i          EQU     VARS_BASE+721
+fu_b_o          EQU     VARS_BASE+722
+fu_b_i          EQU     VARS_BASE+723
+fu_lylo         EQU     VARS_BASE+724   ; the line's extremes over the overlap
+fu_lyhi         EQU     VARS_BASE+725
+fu_o_to         EQU     VARS_BASE+726   ; what fu_out is to store
+fu_o_ti         EQU     VARS_BASE+727
+fu_o_bo         EQU     VARS_BASE+728
+fu_o_bi         EQU     VARS_BASE+729
+ct_have         EQU     VARS_BASE+730
+fu_hv           EQU     VARS_BASE+731   ; ct_*0 hold this span's boundaries   ; the walk supplied the boundary values
+fu_pb           EQU     VARS_BASE+732   ; 3 x (x0, x1, fns, extremes)
 lf_absx         EQU     VARS_BASE+550
 ds_cx1          EQU     VARS_BASE+551
 ds_cx2          EQU     VARS_BASE+552

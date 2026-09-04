@@ -429,6 +429,16 @@ sp_reset:
                 ld      (hl),0
                 inc     hl
                 ld      (hl),1                  ; aperture open throughout
+                inc     hl
+                ld      (hl),0
+                inc     hl
+                ld      (hl),Y_BIAS             ; the top is flat at row 0
+                inc     hl
+                ld      (hl),Y_BIAS
+                inc     hl
+                ld      (hl),Y_BIAS+RENDER_H-1  ; and the bottom at row 159
+                inc     hl
+                ld      (hl),Y_BIAS+RENDER_H-1
                 ret
 
 ; sp_isfull : Z set when no spans remain (the screen is fully occluded).
@@ -500,6 +510,7 @@ se_cmp:
                 add     hl,de
                 and     (hl)                    ; the merged span is only open
                 ld      (hl),a                  ; where both halves were
+                call    se_widen                ; and spans both extremes
                 ld      hl,(sp_tmp8)
                 inc     hl
                 ld      a,(hl)                  ; the new span's xlast
@@ -507,6 +518,39 @@ se_cmp:
                 inc     hl
                 ld      (hl),a
                 ret
+; se_widen : fold the new span's extremes into the one it merged with.
+se_widen:
+                ld      hl,(sp_tmp8)
+                ld      de,SP_OT
+                add     hl,de
+                ex      de,hl
+                ld      hl,(se_prev)
+                ld      bc,SP_OT
+                add     hl,bc
+                ld      a,(de)                  ; outer top: the smaller
+                cp      (hl)
+                jr      nc,sw_1
+                ld      (hl),a
+sw_1:           inc     hl
+                inc     de
+                ld      a,(de)                  ; inner top: the larger
+                cp      (hl)
+                jr      c,sw_2
+                ld      (hl),a
+sw_2:           inc     hl
+                inc     de
+                ld      a,(de)                  ; outer bottom: the larger
+                cp      (hl)
+                jr      c,sw_3
+                ld      (hl),a
+sw_3:           inc     hl
+                inc     de
+                ld      a,(de)                  ; inner bottom: the smaller
+                cp      (hl)
+                jr      nc,sw_4
+                ld      (hl),a
+sw_4:           ret
+
 se_nomerge:
                 ld      hl,(sp_tmp8)
 se_new:
@@ -974,6 +1018,18 @@ fu_ploop:
                 ld      d,(hl)
                 inc     hl
                 ld      (fu_bp),de
+                ld      a,(hl)
+                ld      (fu_t_o),a
+                inc     hl
+                ld      a,(hl)
+                ld      (fu_t_i),a
+                inc     hl
+                ld      a,(hl)
+                ld      (fu_b_o),a
+                inc     hl
+                ld      a,(hl)
+                ld      (fu_b_i),a
+                inc     hl
                 push    hl
                 call    fu_line
                 pop     hl
@@ -1006,6 +1062,10 @@ fu_next:
 ; hand on the pieces that survive, the run carrying the line.
 ; ---------------------------------------------------------------------------
 fu_line:
+                ld      a,(fu_have)
+                ld      (fu_hv),a
+                xor     a
+                ld      (fu_have),a
                 ld      hl,(cl_lfnp)
                 ld      a,(fu_x0)
                 call    ev_at
@@ -1014,11 +1074,51 @@ fu_line:
                 ld      a,(fu_x1)
                 call    ev_at
                 ld      (ct_yb),a
-                ld      a,(fu_have)
+                call    fu_lyext
+                call    fu_verdict
+                jr      c,fl_outside
+                jp      nz,fl_slow
+                ; wholly inside: the whole range is one run, unclamped
+                ld      a,(fu_emit)
+                or      a
+                jr      z,fl_in_p
+                ld      a,(ct_ya)
+                sub     Y_BIAS
+                ld      b,a
+                ld      a,(ct_yb)
+                sub     Y_BIAS
+                ld      d,a
+                ld      a,(fu_x1)
+                ld      c,a
+                ld      a,(fu_x0)
+                call    dl_emit
+fl_in_p:
+                ld      a,(fu_x0)
+                ld      b,a
+                ld      a,(fu_x1)
+                ld      d,a
+                jp      fu_orun
+fl_outside:
+                ; the line never enters the aperture: one piece, kept or shut
+                ld      a,(fu_lyhi)
+                ld      hl,fu_t_o
+                cp      (hl)
+                ld      a,1                     ; above the top
+                jr      c,fl_out1
+                xor     a                       ; below the bottom
+fl_out1:
+                ld      c,a
+                ld      a,(fu_x1)
+                ld      d,a
+                ld      a,(fu_x0)
+                ld      b,a
+                ld      a,c
+                jp      fu_okeep
+fl_slow:
+                ld      a,(fu_hv)
                 or      a
                 jr      z,fl_ev
-                xor     a
-                ld      (fu_have),a             ; the walk already has them
+                call    ct_need
                 ld      a,(ct_ta0)
                 ld      (ct_ta),a
                 ld      a,(ct_ba0)
@@ -1247,6 +1347,50 @@ fl_nr2e:
                 ld      a,(fu_k1)
                 jp      fu_okeep
 
+; fu_lyext : the line's own extremes over the staged range, from the values
+; already evaluated at its two ends.
+fu_lyext:
+                ld      a,(ct_yb)
+                ld      hl,ct_ya
+                cp      (hl)
+                jr      nc,fl_yo
+                ld      (fu_lylo),a
+                ld      a,(hl)
+                ld      (fu_lyhi),a
+                ret
+fl_yo:
+                ld      (fu_lyhi),a
+                ld      a,(hl)
+                ld      (fu_lylo),a
+                ret
+
+; fu_verdict : the two-level test.  Carry set when the line never enters the
+; aperture anywhere in the range; otherwise Z set when it is inside it
+; everywhere, and Z clear when the boundaries have to be evaluated.
+fu_verdict:
+                ld      a,(fu_lyhi)
+                ld      hl,fu_t_o
+                cp      (hl)
+                ret     c                       ; wholly above the top
+                ld      a,(fu_b_o)
+                ld      hl,fu_lylo
+                cp      (hl)
+                ret     c                       ; wholly below the bottom
+                ld      a,(fu_lylo)
+                ld      hl,fu_t_i
+                cp      (hl)
+                jr      c,fv_slow
+                ld      a,(fu_b_i)
+                ld      hl,fu_lyhi
+                cp      (hl)
+                jr      c,fv_slow
+                cp      a                       ; Z, carry clear: inside
+                ret
+fv_slow:
+                ld      a,1
+                or      a                       ; NZ, carry clear
+                ret
+
 ; fu_ge : the sub-interval of [fu_x0, fu_x1] on which the line is at or past
 ; the staged boundary, into fu_g0/fu_g1, given the sign of the difference at
 ; each end in fu_v0/fu_v1.  The difference itself is only formed when they
@@ -1330,6 +1474,14 @@ fu_okeep:
                 ld      (fu_otp),hl
                 ld      hl,(fu_bp)
                 ld      (fu_obp),hl
+                ld      a,(fu_t_o)
+                ld      (fu_o_to),a
+                ld      a,(fu_t_i)
+                ld      (fu_o_ti),a
+                ld      a,(fu_b_o)
+                ld      (fu_o_bo),a
+                ld      a,(fu_b_i)
+                ld      (fu_o_bi),a
                 jr      fu_out
 
 ; fu_orun : B = x0, D = x1.  The run carries the line as its new boundary.
@@ -1341,12 +1493,28 @@ fu_orun:
                 ld      (fu_otp),hl
                 ld      hl,(fu_bp)
                 ld      (fu_obp),hl
+                ld      a,(fu_lylo)
+                ld      (fu_o_to),a
+                ld      a,(fu_lyhi)
+                ld      (fu_o_ti),a
+                ld      a,(fu_b_o)
+                ld      (fu_o_bo),a
+                ld      a,(fu_b_i)
+                ld      (fu_o_bi),a
                 jr      fu_out
 fu_or_b:
                 ld      hl,(fu_tp)
                 ld      (fu_otp),hl
                 ld      hl,(cl_lfnp)
                 ld      (fu_obp),hl
+                ld      a,(fu_t_o)
+                ld      (fu_o_to),a
+                ld      a,(fu_t_i)
+                ld      (fu_o_ti),a
+                ld      a,(fu_lyhi)
+                ld      (fu_o_bo),a
+                ld      a,(fu_lylo)
+                ld      (fu_o_bi),a
 
 ; fu_out : B = x0, D = x1, fu_otp / fu_obp = its boundaries.  Dead apertures
 ; are dropped; the rest are staged for the bottom line or emitted as spans.
@@ -1379,6 +1547,14 @@ fu_out:
                 ldir
                 ld      a,(al_both)
                 ld      (sp_scratch+SP_OPEN),a
+                ld      a,(fu_o_to)
+                ld      (sp_scratch+SP_OT),a
+                ld      a,(fu_o_ti)
+                ld      (sp_scratch+SP_IT),a
+                ld      a,(fu_o_bo)
+                ld      (sp_scratch+SP_OB),a
+                ld      a,(fu_o_bi)
+                ld      (sp_scratch+SP_IB),a
                 ld      hl,sp_scratch
                 jp      sp_emit
 fo_stage:
@@ -1390,8 +1566,9 @@ fo_stage:
                 ld      (fu_np),a
                 ld      a,c
                 add     a,a
+                add     a,a
                 add     a,c
-                add     a,a                     ; * 6
+                add     a,a                     ; * 10
                 ld      l,a
                 ld      h,0
                 ld      de,fu_pb
@@ -1411,6 +1588,18 @@ fo_stage:
                 ld      (hl),e
                 inc     hl
                 ld      (hl),d
+                inc     hl
+                ld      a,(fu_o_to)
+                ld      (hl),a
+                inc     hl
+                ld      a,(fu_o_ti)
+                ld      (hl),a
+                inc     hl
+                ld      a,(fu_o_bo)
+                ld      (hl),a
+                inc     hl
+                ld      a,(fu_o_bi)
+                ld      (hl),a
                 ret
 
 ; ---------------------------------------------------------------------------
@@ -1657,7 +1846,22 @@ fe_clear:
 ; line clipped against this span, and then the seg's own edges through them.
 ; ---------------------------------------------------------------------------
 fu_extras:
-                call    ct_bounds
+                ld      hl,(cl_span)
+                ld      de,SP_OT
+                add     hl,de
+                ld      a,(hl)
+                ld      (fu_t_o),a
+                inc     hl
+                ld      a,(hl)
+                ld      (fu_t_i),a
+                inc     hl
+                ld      a,(hl)
+                ld      (fu_b_o),a
+                inc     hl
+                ld      a,(hl)
+                ld      (fu_b_i),a
+                xor     a
+                ld      (ct_have),a
                 ld      a,(sq_n)
                 or      a
                 ret     z
@@ -1727,6 +1931,13 @@ cc_zero:        xor     a
 ; ct_bounds : the trapezoid boundaries at ct_xa0 and ct_xb0 - the part of the
 ; clip that every line crossing this span shares.
 ; ---------------------------------------------------------------------------
+; ct_need : evaluate the span's boundaries at the staged range, once.
+ct_need:
+                ld      a,(ct_have)
+                or      a
+                ret     nz
+                inc     a
+                ld      (ct_have),a
 ct_bounds:
                 ld      hl,(cl_span)
                 ld      de,SP_TA
@@ -1760,6 +1971,30 @@ ct_bounds:
 ct_edge:
                 ld      (cl_lfnp),hl
                 ld      a,(ct_xa0)
+                call    ev_at
+                ld      (ct_ya),a
+                ld      hl,(cl_lfnp)
+                ld      a,(ct_xb0)
+                call    ev_at
+                ld      (ct_yb),a
+                call    fu_lyext
+                call    fu_verdict
+                ret     c                       ; never enters the aperture
+                jr      nz,ct_slow
+                ; wholly inside: emit the overlap with no clamping at all
+                ld      a,(ct_ya)
+                sub     Y_BIAS
+                ld      b,a
+                ld      a,(ct_yb)
+                sub     Y_BIAS
+                ld      d,a
+                ld      a,(ct_xb0)
+                ld      c,a
+                ld      a,(ct_xa0)
+                jp      dl_emit
+ct_slow:
+                call    ct_need
+                ld      a,(ct_xa0)
                 ld      (ct_xa),a
                 ld      a,(ct_xb0)
                 ld      (ct_xb),a
@@ -1771,14 +2006,6 @@ ct_edge:
                 ld      (ct_tb),a
                 ld      a,(ct_bb0)
                 ld      (ct_bb),a
-                ld      hl,(cl_lfnp)
-                ld      a,(ct_xa)
-                call    ev_at
-                ld      (ct_ya),a
-                ld      hl,(cl_lfnp)
-                ld      a,(ct_xb)
-                call    ev_at
-                ld      (ct_yb),a
 
                 ; --- y >= top(x) ---------------------------------------
                 ld      a,(ct_ya)

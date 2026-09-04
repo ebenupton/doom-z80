@@ -5,7 +5,7 @@ const { run } = require("./bench.js");
 
 const BUCKETS = new Set(["mul_u8","mul_s8_u8","mul_s16_u8","divs","fpmul8","mul_s8_s8",
   "rns_ahl","rns_hl","rns3_ahl","rns8_ahl","ev_at","linfn","pw","pw_diff","sp_alive",
-  "sp_hasgap","sp_marksolid","sp_fuse","fu_ge","fu_line","fu_out","fu_okeep","fu_orun","fu_above","sp_begin","sp_commit","pw_diff","pw_evd","sp_emit_range","sp_emit_range2","flush_edges","ct_span","ct_edge","queue_edge","sp_drawv","cross_col","cl_apply",
+  "sp_hasgap","sp_marksolid","sp_fuse","fu_ge","fu_verdict","ct_bounds","fu_lyext","fu_line","fu_out","fu_okeep","fu_orun","fu_above","sp_begin","sp_commit","pw_diff","pw_evd","sp_emit_range","sp_emit_range2","flush_edges","ct_span","ct_edge","queue_edge","sp_drawv","cross_col","cl_apply",
   "cl_at","cl_clampx","cl_clampy","to_view","rot_sin","rot_cos","recip","project_x",
   "project_y","view_setup","build_prod","bbox_range","bb_edge","near_cross","vertex_get",
   "point_on_side","render_seg","render_seg_body","walk","sp_emit","sp_commit","cmp_s16",
