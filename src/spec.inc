@@ -487,18 +487,30 @@ fu_bfn          EQU     VARS_BASE+676
 sg_emitt        EQU     VARS_BASE+680
 sg_emitb        EQU     VARS_BASE+681
 sg_swap         EQU     VARS_BASE+682
-fu_x0           EQU     VARS_BASE+683   ; the piece one line is applied over
+fu_pc           EQU     VARS_BASE+683   ; the piece one line is applied over:
+fu_x0           EQU     VARS_BASE+683   ;   columns,
 fu_x1           EQU     VARS_BASE+684
-fu_tp           EQU     VARS_BASE+686   ; its top / bottom boundary functions
-fu_bp           EQU     VARS_BASE+688
-fu_otp          EQU     VARS_BASE+690
-fu_obp          EQU     VARS_BASE+692
+fu_tp           EQU     VARS_BASE+685   ;   its top / bottom boundary functions,
+fu_bp           EQU     VARS_BASE+687
+fu_t_o          EQU     VARS_BASE+689   ;   and its boundary extremes
+fu_t_i          EQU     VARS_BASE+690
+fu_b_o          EQU     VARS_BASE+691
+fu_b_i          EQU     VARS_BASE+692
+FU_PIECE        EQU     10
 fu_stage        EQU     VARS_BASE+694   ; 1 = stage a piece, 0 = emit a span
 fu_np           EQU     VARS_BASE+695
+fu_ob           EQU     VARS_BASE+696   ; what fu_out is to emit, laid out as a piece
 fu_ax0          EQU     VARS_BASE+696
 fu_ax1          EQU     VARS_BASE+697
+fu_otp          EQU     VARS_BASE+698
+fu_obp          EQU     VARS_BASE+700
+fu_o_to         EQU     VARS_BASE+702
+fu_o_ti         EQU     VARS_BASE+703
+fu_o_bo         EQU     VARS_BASE+704
+fu_o_bi         EQU     VARS_BASE+705
+al_both         EQU     VARS_BASE+706   ; its open flag
+fu_keep         EQU     VARS_BASE+707   ; the walk's record survives as a remainder
 fu_have         EQU     VARS_BASE+716
-al_both         EQU     VARS_BASE+717
 al_open         EQU     VARS_BASE+718
 al_t            EQU     VARS_BASE+719
 cpm_p           EQU     VARS_BASE+742   ; the memo slot this corner hashed to
@@ -507,16 +519,8 @@ cpm_p           EQU     VARS_BASE+742   ; the memo slot this corner hashed to
 ch_vtx          EQU     VARS_BASE+744
 ch_ft           EQU     VARS_BASE+746
 ch_fb           EQU     VARS_BASE+748
-fu_t_o          EQU     VARS_BASE+720   ; the current piece's boundary extremes
-fu_t_i          EQU     VARS_BASE+721
-fu_b_o          EQU     VARS_BASE+722
-fu_b_i          EQU     VARS_BASE+723
 fu_lylo         EQU     VARS_BASE+724   ; the line's extremes over the overlap
 fu_lyhi         EQU     VARS_BASE+725
-fu_o_to         EQU     VARS_BASE+726   ; what fu_out is to store
-fu_o_ti         EQU     VARS_BASE+727
-fu_o_bo         EQU     VARS_BASE+728
-fu_o_bi         EQU     VARS_BASE+729
 ct_have         EQU     VARS_BASE+730
 fu_hv           EQU     VARS_BASE+731   ; ct_*0 hold this span's boundaries   ; the walk supplied the boundary values
 fu_pb           EQU     VARS_BASE+732   ; 3 x (x0, x1, fns, extremes)

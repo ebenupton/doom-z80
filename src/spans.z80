@@ -585,76 +585,93 @@ sp_freeslot:
                 ret
 
 ; ---------------------------------------------------------------------------
-; sp_emit : link the span at HL (16 bytes) into the live list after sp_prev,
-; coalescing it with that one if they abut and carry the same boundaries.
-;
-; A fuse splits every span it touches at the seg's own column range whether or
-; not anything changed there, and two of them run per seg, so without this the
-; list fragments a little further with every wall.
+; Emitting pieces.  A piece is described by the fu_ob block - its columns,
+; pointers to its two boundary functions, its four extremes and its open
+; flag - and goes straight from those into a pool slot, or into the last
+; span emitted when the two abut with identical boundaries.  Nothing is
+; staged and copied twice.
 ; ---------------------------------------------------------------------------
-sp_emit:
-                ld      (sp_tmp8),hl
-                call    se_try
-                ret     c
-                jp      se_new
-
-; se_try : fold the record at sp_tmp8 into the span at sp_prev if they abut
-; and carry the same boundaries.  Carry set when it went in.
-se_try:
+; sp_out_old : IX = a record, C = x0, B = x1 -> a piece with its boundaries
+; (the remainders of a split span).
+sp_out_old:
+                ld      (fu_ax0),bc
+                push    ix
+                pop     hl
+                ld      de,SP_TA
+                add     hl,de
+                ld      (fu_otp),hl
+                ld      de,SP_BA-SP_TA
+                add     hl,de
+                ld      (fu_obp),hl
+                ld      de,SP_OT-SP_BA
+                add     hl,de
+                ld      de,fu_o_to
+                ldi
+                ldi
+                ldi
+                ldi
+                ld      a,(ix+SP_OPEN)
+                ld      (al_both),a
+                ; fall into sp_out
+sp_out:
                 ld      hl,(sp_prev)
                 ld      a,h
                 or      l
-                ret     z
-                ld      (se_prev),hl
-                ld      bc,SP_XLAST
-                add     hl,bc
+                jr      z,so_new
+                inc     hl                      ; SP_XLAST
                 ld      a,(hl)
                 inc     a
-                ld      c,a                     ; C = previous xlast + 1
-                ld      hl,(sp_tmp8)
-                ld      a,(hl)
-                cp      c
-                jr      nz,se_fail
-                ld      de,(se_prev)
-                inc     de
-                inc     de
-                inc     hl
-                inc     hl                      ; both -> SP_TA
-                ld      b,8
-se_cmp:
-                ld      a,(de)
-                cp      (hl)
-                jr      nz,se_fail
-                inc     hl
-                inc     de
-                djnz    se_cmp
-                ld      hl,(sp_tmp8)
-                ld      de,SP_OPEN
-                add     hl,de
-                ld      a,(hl)
-                ld      hl,(se_prev)
-                add     hl,de
-                and     (hl)                    ; the merged span is only open
-                ld      (hl),a                  ; where both halves were
-                call    se_widen                ; and spans both extremes
-                ld      hl,(sp_tmp8)
-                inc     hl
-                ld      a,(hl)                  ; the new span's xlast
-                ld      hl,(se_prev)
-                inc     hl
+                ld      b,a
+                ld      a,(fu_ax0)
+                cp      b
+                jr      nz,so_new               ; not adjacent
+                inc     hl                      ; SP_TA
+                ld      de,(fu_otp)
+                call    so_cmp4
+                jr      nz,so_new
+                ld      de,(fu_obp)
+                call    so_cmp4
+                jr      nz,so_new
+                ; HL -> SP_OPEN: the merged span is only open where both
+                ; halves were, and spans both sets of extremes
+                ld      a,(al_both)
+                and     (hl)
                 ld      (hl),a
-                scf
+                inc     hl
+                inc     hl                      ; SP_OT
+                ld      de,fu_o_to
+                call    so_widen
+                ld      hl,(sp_prev)
+                inc     hl
+                ld      a,(fu_ax1)
+                ld      (hl),a                  ; xlast
                 ret
 
-; se_widen : fold the new span's extremes into the one it merged with.
-se_widen:
-                ld      hl,(sp_tmp8)
-                ld      de,SP_OT
-                add     hl,de
-                ex      de,hl
-                ld      hl,(se_prev)
-                ld      bc,SP_OT
-                add     hl,bc
+; so_cmp4 : four bytes at (DE) against (HL); Z when equal.  Both advance.
+so_cmp4:
+                ld      a,(de)
+                cp      (hl)
+                ret     nz
+                inc     hl
+                inc     de
+                ld      a,(de)
+                cp      (hl)
+                ret     nz
+                inc     hl
+                inc     de
+                ld      a,(de)
+                cp      (hl)
+                ret     nz
+                inc     hl
+                inc     de
+                ld      a,(de)
+                cp      (hl)
+                inc     hl
+                inc     de
+                ret
+
+; so_widen : the extremes at (HL) take in those at (DE).
+so_widen:
                 ld      a,(de)                  ; outer top: the smaller
                 cp      (hl)
                 jr      nc,sw_1
@@ -675,106 +692,134 @@ sw_3:           inc     hl
                 inc     de
                 ld      a,(de)                  ; inner bottom: the smaller
                 cp      (hl)
-                jr      nc,sw_4
+                ret     nc
                 ld      (hl),a
-sw_4:           ret
-
-se_fail:
-                or      a
                 ret
 
-se_new:
+so_new:
                 ld      hl,(sp_free)            ; sp_alloc, inlined
                 ld      a,h
                 or      l
-                ret     z                       ; pool spent: drop the span
+                ret     z                       ; pool spent: drop the piece
+                ld      e,l
+                ld      d,h
+                push    de
+                ld      bc,SP_NEXT
+                add     hl,bc
+                ld      a,(hl)
+                inc     hl
+                ld      h,(hl)
+                ld      l,a
+                ld      (sp_free),hl
+                ld      hl,sp_count
+                inc     (hl)
+                ld      hl,fu_ax0
+                ldi                             ; xlo
+                ldi                             ; xlast
+                ld      hl,(fu_otp)
+                ldi
+                ldi
+                ldi
+                ldi
+                ld      hl,(fu_obp)
+                ldi
+                ldi
+                ldi
+                ldi
+                ld      hl,al_both
+                ldi                             ; SP_OPEN
+                inc     de
+                ld      hl,fu_o_to
+                ldi
+                ldi
+                ldi
+                ldi
+                pop     de
+                ; fall into so_link
+; so_link : the record at DE joins the rebuilt list after sp_prev.
+so_link:
+                ld      hl,(sp_prev)
+                ld      a,h
+                or      l
+                jr      z,so_head
+                ld      bc,SP_NEXT
+                add     hl,bc
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                ld      (sp_prev),de
+                ret
+so_head:
+                ld      (sp_head),de
+                ld      (sp_prev),de
+                ret
+
+; sp_link_cur : the walk's current record survives, truncated to the left
+; remainder; it joins the rebuilt list and is not freed.
+sp_link_cur:
+                ld      a,1
+                ld      (fu_keep),a
+                push    ix
+                pop     de
+                jr      so_link
+
+; ---------------------------------------------------------------------------
+; sp_relink : the walk is over: the rebuilt list meets the rest, coalescing
+; across the join like the rebuild did.
+; ---------------------------------------------------------------------------
+sp_relink:
+                ld      hl,(sp_prev)
+                ld      a,h
+                or      l
+                jr      z,sr_head
+sr_again:
+                ld      de,(sp_cur)
+                ld      a,d
+                or      e
+                jr      z,sr_link
+                inc     hl                      ; prev's xlast
+                ld      a,(hl)
+                inc     a
+                ld      b,a
+                ld      a,(de)                  ; cur's xlo
+                cp      b
+                jr      nz,sr_link
+                inc     hl
+                inc     de
+                inc     de                      ; both -> SP_TA
+                ld      b,8
+sr_c:           ld      a,(de)
+                cp      (hl)
+                jr      nz,sr_link
+                inc     hl
+                inc     de
+                djnz    sr_c
+                ld      a,(de)                  ; SP_OPEN
+                and     (hl)
+                ld      (hl),a
+                inc     hl
+                inc     hl
+                inc     de
+                inc     de
+                call    so_widen
+                ld      hl,(sp_cur)
+                inc     hl
+                ld      a,(hl)
+                ld      hl,(sp_prev)
+                inc     hl
+                ld      (hl),a                  ; xlast
+                ld      hl,(sp_cur)
                 push    hl
                 ld      de,SP_NEXT
                 add     hl,de
                 ld      e,(hl)
                 inc     hl
                 ld      d,(hl)
-                ld      (sp_free),de
-                ld      a,(sp_count)
-                inc     a
-                ld      (sp_count),a
+                ld      (sp_cur),de
                 pop     hl
-                ld      (se_prev),hl
-                ex      de,hl
-                ld      hl,(sp_tmp8)
-                ld      bc,SPAN_SIZE
-                ldir
-                ld      hl,(sp_prev)
-                ld      a,h
-                or      l
-                jr      z,se_head
-                ld      de,SP_NEXT
-                add     hl,de
-                ld      de,(se_prev)
-                ld      (hl),e
-                inc     hl
-                ld      (hl),d
-                jr      se_done
-se_head:
-                ld      hl,(se_prev)
-                ld      (sp_head),hl
-se_done:
-                ld      hl,(se_prev)
-                ld      (sp_prev),hl
-                ret
-
-; sp_emit_range : emit the span at HL with xlast replaced by A.
-sp_emit_range:
-                ld      (sp_tmp8+2),a
-                ld      de,sp_scratch
-                ld      bc,SPAN_SIZE
-                ldir
-                ld      a,(sp_tmp8+2)
-                ld      (sp_scratch+SP_XLAST),a
-                ld      hl,sp_scratch
-                jp      sp_emit
-
-; sp_emit_range2 : emit the span at HL with xlo = B and xlast = A.
-sp_emit_range2:
-                ld      (sp_tmp8+2),a
-                ld      a,b
-                ld      (sp_tmp8+3),a
-                ld      de,sp_scratch
-                ld      bc,SPAN_SIZE
-                ldir
-                ld      a,(sp_tmp8+2)
-                ld      (sp_scratch+SP_XLAST),a
-                ld      a,(sp_tmp8+3)
-                ld      (sp_scratch+SP_XLO),a
-                ld      hl,sp_scratch
-                jp      sp_emit
-
-; sp_relink : the walk is done - hang whatever is left of the list off the
-; insertion point.
-sp_relink:
-                ld      hl,(sp_prev)
-                ld      a,h
-                or      l
-                jr      z,sr_head
-                ld      hl,(sp_cur)
-                ld      a,h
-                or      l
-                jr      z,sr_link
-                ld      (sp_tmp8),hl            ; the rebuild used to coalesce
-                call    se_try                  ; across this join too
-                jr      nc,sr_link
-                ld      hl,(sp_cur)
-                ld      de,SP_NEXT
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                push    de
-                ld      hl,(sp_cur)
                 call    sp_freeslot
-                pop     hl
-                ld      (sp_cur),hl
-                jr      sp_relink
+                ld      hl,(sp_prev)
+                jr      sr_again
 sr_link:
                 ld      de,(sp_cur)
                 ld      hl,(sp_prev)
@@ -788,6 +833,7 @@ sr_head:
                 ld      de,(sp_cur)
                 ld      (sp_head),de
                 ret
+
 
 ; sp_walk_begin : point the walk at the first span that can overlap the op
 ; range, leaving sp_prev at the one before it.
@@ -909,81 +955,96 @@ hg_alive:
 sp_marksolid:
                 call    sp_walk_begin
 ms_loop:
-                ld      hl,(sp_cur)
-                ld      a,h
-                or      l
+                ld      ix,(sp_cur)
+                ld      a,ixh
+                or      ixl
                 jp      z,ms_done
-                ld      (cl_span),hl
-                ld      a,(hl)
-                ld      (tg_xlo),a
-                ld      b,a
+                ld      (cl_span),ix
                 ld      a,(cl_hi)
                 dec     a
-                cp      b
-                jp      c,ms_done               ; xlo past the range: finished
-                inc     hl
-                ld      a,(hl)
-                ld      (tg_xlast),a
-                ld      hl,(cl_span)
-                ld      de,SP_NEXT
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (sp_nextp),de
-
-                ld      a,(sq_n)
-                or      a
-                jr      z,ms_left
+                ld      c,a                     ; C = the last column
+                ld      a,(ix+SP_XLO)
+                cp      c
+                jr      z,ms_in
+                jp      nc,ms_done              ; xlo past the range: finished
+ms_in:
                 ld      a,(cl_lo)
                 ld      b,a
-                ld      a,(tg_xlo)
+                ld      l,(ix+SP_NEXT)
+                ld      h,(ix+SP_NEXT+1)
+                ld      (sp_nextp),hl
+                ld      a,(ix+SP_XLAST)
+                ld      (tg_xlast),a
+                ; the overlap [ox0, ox1]
+                ld      a,(ix+SP_XLO)
                 cp      b
                 jr      nc,ms_d0
                 ld      a,b
 ms_d0:          ld      (ct_xa0),a
-                ld      a,(cl_hi)
-                dec     a
-                ld      b,a
+                ld      d,a
                 ld      a,(tg_xlast)
-                cp      b
+                cp      c
                 jr      c,ms_d1
-                ld      a,b
+                ld      a,c
 ms_d1:          ld      (ct_xb0),a
+                ld      a,(sq_n)
+                or      a
+                jr      z,ms_left
+                push    bc
+                push    de
                 call    fu_extras
+                pop     de
+                pop     bc
 ms_left:
-                ; left piece [xlo, ilo-1]
-                ld      a,(cl_lo)
-                ld      b,a
-                ld      a,(tg_xlo)
-                cp      b
+                ; [xlo, ox0-1] keeps the old boundaries: the record itself,
+                ; truncated in place
+                xor     a
+                ld      (fu_keep),a
+                ld      a,(ix+SP_XLO)
+                cp      d
                 jr      nc,ms_right
-                ld      hl,(cl_span)
-                ld      a,b
+                ld      a,d
                 dec     a
-                call    sp_emit_range
+                ld      (ix+SP_XLAST),a
+                call    sp_link_cur
 ms_right:
-                ; right piece [ihi, xlast]
+                ; [ox1+1, xlast]: the record again when it is still free,
+                ; else a copy
                 ld      a,(cl_hi)
                 dec     a
-                ld      b,a
+                ld      c,a
                 ld      a,(tg_xlast)
-                cp      b
+                cp      c
                 jr      z,ms_next
                 jr      c,ms_next
-                ld      hl,(cl_span)
-                ld      a,(cl_hi)
-                ld      b,a
+                ld      a,(fu_keep)
+                or      a
+                jr      nz,ms_rcopy
+                ld      a,c
+                inc     a
+                ld      (ix+SP_XLO),a           ; it stays as the cursor, and
+                jp      sp_relink               ; nothing beyond it overlaps
+ms_rcopy:
+                ld      a,c
+                inc     a
+                ld      c,a
                 ld      a,(tg_xlast)
-                call    sp_emit_range2
+                ld      b,a
+                call    sp_out_old
 ms_next:
-                ld      hl,(cl_span)
+                ld      a,(fu_keep)
+                or      a
+                jr      nz,ms_adv
+                push    ix
+                pop     hl
                 call    sp_freeslot
+ms_adv:
                 ld      hl,(sp_nextp)
                 ld      (sp_cur),hl
                 jp      ms_loop
 ms_done:
                 jp      sp_relink
+
 
 ; pw_evd : A = column -> HL = the staged difference function's value there.
 pw_evd:
@@ -1101,73 +1162,67 @@ al_pos:
 sp_fuse:
                 call    sp_walk_begin
 fu_loop:
-                ld      hl,(sp_cur)
-                ld      a,h
-                or      l
+                ld      ix,(sp_cur)
+                ld      a,ixh
+                or      ixl
                 jp      z,fu_done
-                ld      (cl_span),hl
-                ld      a,(hl)
-                ld      (tg_xlo),a
-                ld      b,a
+                ld      (cl_span),ix
                 ld      a,(cl_hi)
                 dec     a
-                cp      b
-                jp      c,fu_done               ; xlo past the range: finished
-                inc     hl
-                ld      a,(hl)
-                ld      (tg_xlast),a
-                ld      hl,(cl_span)
-                ld      de,SP_NEXT
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (sp_nextp),de
+                ld      c,a
+                ld      a,(ix+SP_XLO)
+                cp      c
+                jr      z,fu_in
+                jp      nc,fu_done              ; xlo past the range: finished
+fu_in:
                 ld      a,(cl_lo)
                 ld      b,a
-                ld      a,(tg_xlo)
+                ld      l,(ix+SP_NEXT)
+                ld      h,(ix+SP_NEXT+1)
+                ld      (sp_nextp),hl
+                ld      a,(ix+SP_XLAST)
+                ld      (tg_xlast),a
+                ld      a,(ix+SP_XLO)
                 cp      b
                 jr      nc,fu_o0
                 ld      a,b
 fu_o0:          ld      (fu_ox0),a
-                ld      a,(cl_hi)
-                dec     a
-                ld      b,a
+                ld      d,a
                 ld      a,(tg_xlast)
-                cp      b
+                cp      c
                 jr      c,fu_o1
-                ld      a,b
+                ld      a,c
 fu_o1:          ld      (fu_ox1),a
-fu_over:
-                ld      a,(fu_ox0)
-                ld      b,a
-                ld      a,(tg_xlo)
-                cp      b
+                ; [xlo, ox0-1] keeps the old boundaries: the record itself,
+                ; truncated in place
+                xor     a
+                ld      (fu_keep),a
+                ld      a,(ix+SP_XLO)
+                cp      d
                 jr      nc,fu_nolt
-                ld      hl,(cl_span)
-                ld      a,(fu_ox0)
+                ld      a,d
                 dec     a
-                call    sp_emit_range           ; [xlo, ox0-1]
+                ld      (ix+SP_XLAST),a
+                call    sp_link_cur
 fu_nolt:
-                ld      a,(fu_ox0)
-                ld      (ct_xa0),a
-                ld      a,(fu_ox1)
-                ld      (ct_xb0),a
+                ld      hl,(fu_ox0)
+                ld      (ct_xa0),hl             ; and ct_xb0
                 call    fu_extras
                 ld      a,1
                 ld      (fu_have),a
-                ld      hl,(cl_span)
+                ; the top line over the whole overlap, against the old
+                ; boundaries; each piece it leaves is what the bottom line
+                ; then meets
+                push    ix
+                pop     hl
                 ld      de,SP_TA
                 add     hl,de
                 ld      (fu_tp),hl
-                ld      hl,(cl_span)
-                ld      de,SP_BA
+                ld      de,SP_BA-SP_TA
                 add     hl,de
                 ld      (fu_bp),hl
-                ld      a,(fu_ox0)
-                ld      (fu_x0),a
-                ld      a,(fu_ox1)
-                ld      (fu_x1),a
+                ld      hl,(fu_ox0)
+                ld      (fu_x0),hl              ; and fu_x1
                 ld      hl,fu_tfn
                 ld      (cl_lfnp),hl
                 ld      a,1
@@ -1192,59 +1247,53 @@ fu_ploop:
                 jr      z,fu_right
                 dec     a
                 ld      (fu_np),a
-                ld      a,(hl)
-                ld      (fu_x0),a
-                inc     hl
-                ld      a,(hl)
-                ld      (fu_x1),a
-                inc     hl
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                inc     hl
-                ld      (fu_tp),de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                inc     hl
-                ld      (fu_bp),de
-                ld      a,(hl)
-                ld      (fu_t_o),a
-                inc     hl
-                ld      a,(hl)
-                ld      (fu_t_i),a
-                inc     hl
-                ld      a,(hl)
-                ld      (fu_b_o),a
-                inc     hl
-                ld      a,(hl)
-                ld      (fu_b_i),a
-                inc     hl
                 push    hl
+                ld      de,fu_pc
+                ld      bc,FU_PIECE
+                ldir
                 call    fu_line
                 pop     hl
+                ld      bc,FU_PIECE
+                add     hl,bc
                 jr      fu_ploop
 fu_right:
-                ld      a,(fu_ox1)
-                ld      b,a
+                ; [ox1+1, xlast]: the record again when it is still free,
+                ; else a copy
+                ld      ix,(cl_span)
+                ld      a,(cl_hi)
+                dec     a
+                ld      c,a
                 ld      a,(tg_xlast)
-                cp      b
+                cp      c
                 jr      z,fu_next
                 jr      c,fu_next
-                ld      hl,(cl_span)
-                ld      a,(fu_ox1)
+                ld      a,(fu_keep)
+                or      a
+                jr      nz,fu_rcopy
+                ld      a,c
                 inc     a
-                ld      b,a
+                ld      (ix+SP_XLO),a
+                jp      sp_relink
+fu_rcopy:
+                ld      a,c
+                inc     a
+                ld      c,a
                 ld      a,(tg_xlast)
-                call    sp_emit_range2
+                ld      b,a
+                call    sp_out_old
 fu_next:
+                ld      a,(fu_keep)
+                or      a
+                jr      nz,fu_adv
                 ld      hl,(cl_span)
                 call    sp_freeslot
+fu_adv:
                 ld      hl,(sp_nextp)
                 ld      (sp_cur),hl
                 jp      fu_loop
 fu_done:
                 jp      sp_relink
+
 
 ; ---------------------------------------------------------------------------
 ; fu_line : one line against one trapezoid piece - draw the visible run and
@@ -1658,17 +1707,12 @@ fu_okeep:
                 ld      (fu_otp),hl
                 ld      hl,(fu_bp)
                 ld      (fu_obp),hl
-                ld      a,(fu_t_o)
-                ld      (fu_o_to),a
-                ld      a,(fu_t_i)
-                ld      (fu_o_ti),a
-                ld      a,(fu_b_o)
-                ld      (fu_o_bo),a
-                ld      a,(fu_b_i)
-                ld      (fu_o_bi),a
+                ld      hl,(fu_t_o)             ; the extremes, two words
+                ld      (fu_o_to),hl
+                ld      hl,(fu_b_o)
+                ld      (fu_o_bo),hl
                 jr      fu_out
 
-; fu_orun : B = x0, D = x1.  The run carries the line as its new boundary.
 fu_orun:
                 ld      a,(fu_side)
                 or      a
@@ -1677,41 +1721,29 @@ fu_orun:
                 ld      (fu_otp),hl
                 ld      hl,(fu_bp)
                 ld      (fu_obp),hl
-                ld      a,(fu_lylo)
-                ld      (fu_o_to),a
-                ld      a,(fu_lyhi)
-                ld      (fu_o_ti),a
-                ld      a,(fu_b_o)
-                ld      (fu_o_bo),a
-                ld      a,(fu_b_i)
-                ld      (fu_o_bi),a
+                ld      hl,(fu_lylo)            ; outer top = lylo, inner = lyhi
+                ld      (fu_o_to),hl
+                ld      hl,(fu_b_o)
+                ld      (fu_o_bo),hl
                 jr      fu_out
 fu_or_b:
                 ld      hl,(fu_tp)
                 ld      (fu_otp),hl
                 ld      hl,(cl_lfnp)
                 ld      (fu_obp),hl
-                ld      a,(fu_t_o)
-                ld      (fu_o_to),a
-                ld      a,(fu_t_i)
-                ld      (fu_o_ti),a
-                ld      a,(fu_lyhi)
-                ld      (fu_o_bo),a
-                ld      a,(fu_lylo)
-                ld      (fu_o_bi),a
+                ld      hl,(fu_t_o)
+                ld      (fu_o_to),hl
+                ld      hl,(fu_lylo)
+                ld      a,h
+                ld      (fu_o_bo),a             ; outer bottom = lyhi
+                ld      a,l
+                ld      (fu_o_bi),a             ; inner bottom = lylo
 
-; fu_out : B = x0, D = x1, fu_otp / fu_obp = its boundaries.  Dead apertures
-; are dropped; the rest are staged for the bottom line or emitted as spans.
 fu_out:
                 ld      a,b
                 ld      (fu_ax0),a
                 ld      a,d
                 ld      (fu_ax1),a
-                ; The inner extremes settle most apertures outright: an
-                ; inner top two rows clear of the inner bottom leaves the
-                ; piece open right across itself.  Two rows, because the
-                ; difference function and the two boundaries evaluated apart
-                ; each truncate their own shift and can disagree by one.
                 ld      a,(fu_o_ti)
                 inc     a
                 jr      z,fo_measure
@@ -1736,30 +1768,7 @@ fo_alive:
                 ld      a,(fu_stage)
                 or      a
                 jr      nz,fo_stage
-                ld      a,(fu_ax0)
-                ld      (sp_scratch+SP_XLO),a
-                ld      a,(fu_ax1)
-                ld      (sp_scratch+SP_XLAST),a
-                ld      hl,(fu_otp)
-                ld      de,sp_scratch+SP_TA
-                ld      bc,4
-                ldir
-                ld      hl,(fu_obp)
-                ld      de,sp_scratch+SP_BA
-                ld      bc,4
-                ldir
-                ld      a,(al_both)
-                ld      (sp_scratch+SP_OPEN),a
-                ld      a,(fu_o_to)
-                ld      (sp_scratch+SP_OT),a
-                ld      a,(fu_o_ti)
-                ld      (sp_scratch+SP_IT),a
-                ld      a,(fu_o_bo)
-                ld      (sp_scratch+SP_OB),a
-                ld      a,(fu_o_bi)
-                ld      (sp_scratch+SP_IB),a
-                ld      hl,sp_scratch
-                jp      sp_emit
+                jp      sp_out
 fo_stage:
                 ld      a,(fu_np)
                 cp      3
@@ -1771,39 +1780,17 @@ fo_stage:
                 add     a,a
                 add     a,a
                 add     a,c
-                add     a,a                     ; * 10
-                ld      l,a
-                ld      h,0
-                ld      de,fu_pb
+                add     a,a                     ; * FU_PIECE
+                ld      e,a
+                ld      d,0
+                ld      hl,fu_pb
                 add     hl,de
-                ld      a,(fu_ax0)
-                ld      (hl),a
-                inc     hl
-                ld      a,(fu_ax1)
-                ld      (hl),a
-                inc     hl
-                ld      de,(fu_otp)
-                ld      (hl),e
-                inc     hl
-                ld      (hl),d
-                inc     hl
-                ld      de,(fu_obp)
-                ld      (hl),e
-                inc     hl
-                ld      (hl),d
-                inc     hl
-                ld      a,(fu_o_to)
-                ld      (hl),a
-                inc     hl
-                ld      a,(fu_o_ti)
-                ld      (hl),a
-                inc     hl
-                ld      a,(fu_o_bo)
-                ld      (hl),a
-                inc     hl
-                ld      a,(fu_o_bi)
-                ld      (hl),a
+                ex      de,hl
+                ld      hl,fu_ax0
+                ld      bc,FU_PIECE
+                ldir
                 ret
+
 
 ; ---------------------------------------------------------------------------
 ; dl_emit : append (A, B) - (C, D) to the display list.
