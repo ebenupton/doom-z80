@@ -57,8 +57,7 @@ console.log('recip:', fail===f0 ? 'ok' : 'FAIL');
 // --- project_y ------------------------------------------------------------
 f0 = fail; let tp = 0;
 for (const [h, m, s, want] of V.projy) {
-  z.poke(A.rc_m8, m); z.poke(A.rc_s, s);
-  const r = z.call('project_y', { a: h & 0xff });
+  const r = z.call('project_y', { a: h & 0xff, e: m, d: s });
   tp += r.tstates;
   chk('projy', s16(r.hl), want, `h=${h} m=${m} s=${s}`);
 }
