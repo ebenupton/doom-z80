@@ -50,14 +50,26 @@ P7_ROM48        EQU     $10
 ; $4000-$5AFF is the bitmap, $5800-$5AFF the attributes; everything the
 ; engine keeps here starts above them.
 DLIST_BASE      EQU     $5C00           ; display list: 4 bytes per segment
-DLIST_MAX       EQU     704
-DLIST_END       EQU     DLIST_BASE + DLIST_MAX*4             ; $6800
+DLIST_MAX       EQU     512
+DLIST_END       EQU     DLIST_BASE + DLIST_MAX*4             ; $6400
 
 DLIST_END_PAGE  EQU     DLIST_END>>8
 
-NODEBB          EQU     $6800           ; 195 x 8 quarter-prescale bounds
+NODEBB          EQU     $6400           ; 195 x 8 quarter-prescale bounds
 
-VCACHE_BASE     EQU     $7000           ; 512 x 8, indexed by vertex
+NVERTS          EQU     455
+
+; Translation-coherence vertex cache.  The view transform is exactly linear in
+; the integer world deltas and the per-frame terms are position-only, so for a
+; fixed angle  to_view(w) = L(w) + ref,  with ref = to_view(0, 0) - which is
+; exactly the vs_rx / vs_ry the transform adds last.  L(w) is stored once per
+; vertex per angle epoch and every warm read is two adds; an angle change is
+; the only thing that can invalidate it, and it wipes the whole valid map.
+VXCACHE_BASE    EQU     $6A20           ; NVERTS x 4, indexed by vertex
+VXVALID         EQU     $7140           ; one bit per vertex
+VXVALID_LEN     EQU     (NVERTS+7)/8
+
+VCACHE_BASE     EQU     $7180           ; NVERTS x 8, indexed by vertex
 VCACHE_ENT      EQU     8
 VC_STAMP        EQU     0               ; frame generation; 0 = empty
 VC_TVX          EQU     2               ; view-space counts, s16
@@ -99,7 +111,7 @@ ORG_ADDR        EQU     CODE_BASE
 ; sorted singly-linked list and the unused slots a free chain, so an occlusion
 ; update edits the spans it touches and leaves the rest where they are - there
 ; is no second pool and nothing to swap.
-SPANS_BASE      EQU     $BA40
+SPANS_BASE      EQU     $BA44
 SPANS_MAX       EQU     24              ; measured peak is 10
 SPAN_SIZE       EQU     16
 SLOT_SIZE       EQU     18

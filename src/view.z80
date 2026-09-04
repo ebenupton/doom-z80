@@ -106,6 +106,12 @@ view_setup:
                 cp      b
                 jp      z,vs_origin
 vs_rebuild:
+                ; the angle moved, so every stored rotation is stale
+                ld      hl,VXVALID
+                ld      de,VXVALID+1
+                ld      bc,VXVALID_LEN-1
+                ld      (hl),0
+                ldir
                 ld      a,(pl_ang)
                 ld      (vs_lastang),a
                 ld      a,1
@@ -671,12 +677,10 @@ sat_neg:
                 ret
 
 ; ---------------------------------------------------------------------------
-; vcache_wipe : invalidate every vertex-cache entry.
-; ---------------------------------------------------------------------------
 vcache_wipe:
                 ld      hl,VCACHE_BASE
                 ld      de,VCACHE_ENT
-                ld      bc,512
+                ld      bc,NVERTS
 vw_loop:
                 ld      (hl),0
                 add     hl,de

@@ -571,12 +571,6 @@ sr_l:
                 ld      (hl),0
                 ret
 
-; sp_isfull : Z set when no spans remain (the screen is fully occluded).
-sp_isfull:
-                ld      a,(sp_count)
-                or      a
-                ret
-
 ; ---------------------------------------------------------------------------
 ; The pool is a partition: the live list and the free chain between them hold
 ; every slot, always.  A walk keeps sp_prev as its insertion point, so a span
@@ -2198,20 +2192,6 @@ fs_l:
                 inc     hl
                 inc     hl
                 djnz    fs_l
-                ret
-
-; clamp_col : HL (s16) -> A, clamped to 0..255
-clamp_col:
-                bit     7,h
-                jr      nz,cc_zero
-                ld      a,h
-                or      a
-                jr      nz,cc_max
-                ld      a,l
-                ret
-cc_max:         ld      a,255
-                ret
-cc_zero:        xor     a
                 ret
 
 ; ---------------------------------------------------------------------------

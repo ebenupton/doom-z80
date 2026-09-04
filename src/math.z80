@@ -10,33 +10,6 @@
 ; 9-bit sum index costs one ADC on the page byte.
 ; ---------------------------------------------------------------------------
 
-; --- build the quarter-square tables ---------------------------------------
-; f(0) = 0 and f(n) - f(n-1) = n>>1, so the whole table is one running add.
-sq_init:
-                ld      hl,0                    ; f(n)
-                ld      bc,SQ_LO                ; write pointer
-                ld      de,0                    ; n
-sq2_loop:
-                ld      a,l
-                ld      (bc),a
-                inc     b
-                inc     b
-                ld      a,h
-                ld      (bc),a
-                dec     b
-                dec     b
-                inc     bc
-                inc     de                      ; n
-                push    de
-                srl     d
-                rr      e                       ; DE = n>>1
-                add     hl,de                   ; f(n) = f(n-1) + (n>>1)
-                pop     de
-                ld      a,d
-                cp      2
-                jr      nz,sq2_loop
-                ret
-
 ; MUL_U8_BODY : the quarter-square multiply as a macro, for the handful of
 ; call sites hot enough that the 27 T-states of CALL/RET matter.
                 MACRO   MUL_U8_BODY

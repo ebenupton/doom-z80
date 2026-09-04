@@ -1,0 +1,73 @@
+; ---------------------------------------------------------------------------
+; Cold routines - init and per-epoch work that runs once a frame at most.
+;
+; The atan and column tables are indexed with a 16-bit add rather than a page
+; register, so packing them tight left a slack run before the product planes.
+; Bank 2 is the only bank that is always mapped and the engine long since
+; filled it, so these live in that slack rather than in the hot region.
+; ---------------------------------------------------------------------------
+
+; --- build the quarter-square tables ---------------------------------------
+; f(0) = 0 and f(n) - f(n-1) = n>>1, so the whole table is one running add.
+sq_init:
+                ld      hl,0                    ; f(n)
+                ld      bc,SQ_LO                ; write pointer
+                ld      de,0                    ; n
+sq2_loop:
+                ld      a,l
+                ld      (bc),a
+                inc     b
+                inc     b
+                ld      a,h
+                ld      (bc),a
+                dec     b
+                dec     b
+                inc     bc
+                inc     de                      ; n
+                push    de
+                srl     d
+                rr      e                       ; DE = n>>1
+                add     hl,de                   ; f(n) = f(n-1) + (n>>1)
+                pop     de
+                ld      a,d
+                cp      2
+                jr      nz,sq2_loop
+                ret
+
+; ---------------------------------------------------------------------------
+; vcache_wipe : invalidate every vertex-cache entry.
+; ---------------------------------------------------------------------------
+; init_video : blank both bitmaps and set both attribute files to white on
+; black, then show buffer B while buffer A is drawn first.
+; ---------------------------------------------------------------------------
+init_video:
+                xor     a
+                ld      (back_buf),a
+                out     ($fe),a                 ; black border
+                ; buffer A is always at $4000
+                ld      hl,FB_A
+                ld      de,FB_A+1
+                ld      bc,FB_LEN-1
+                ld      (hl),0
+                ldir
+                ld      hl,ATTR_A
+                ld      de,ATTR_A+1
+                ld      bc,767
+                ld      (hl),$47                ; bright white ink, black paper
+                ldir
+                ; buffer B: page bank 7 in and do the same
+                ld      a,BANK_SCREEN_B or P7_ROM48
+                ld      bc,PORT_7FFD
+                out     (c),a
+                ld      hl,FB_B
+                ld      de,FB_B+1
+                ld      bc,FB_LEN-1
+                ld      (hl),0
+                ldir
+                ld      hl,FB_B+$1800
+                ld      de,FB_B+$1801
+                ld      bc,767
+                ld      (hl),$47
+                ldir
+                ret
+

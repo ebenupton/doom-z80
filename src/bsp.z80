@@ -801,7 +801,34 @@ vertex_get:
                 cp      (hl)
                 ret     z
                 ld      (hl),a
-                ; miss: fetch the prescaled world position
+                ; Miss this frame - but the rotation of this vertex is the
+                ; same for as long as the angle is, and the frame's whole
+                ; contribution is the ref term the transform adds last.  So a
+                ; vertex seen at this angle before comes back in two adds.
+                call    vx_slot
+                and     c
+                jr      z,vg_cold
+                call    vx_addr
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                inc     hl
+                push    hl
+                ld      hl,(vs_rx)
+                add     hl,de
+                ld      (tv_tvx),hl
+                pop     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      hl,(vs_ry)
+                add     hl,de
+                ld      (tv_tvy),hl
+                jr      vg_have
+vg_cold:
+                ld      a,(hl)
+                or      c
+                ld      (hl),a
                 ld      hl,(vg_idx)
                 add     hl,hl
                 add     hl,hl
@@ -817,6 +844,29 @@ vertex_get:
                 ld      d,(hl)
                 ld      (tv_wy),de
                 call    to_view
+                call    vx_addr
+                push    hl
+                ld      hl,(tv_tvx)
+                ld      de,(vs_rx)
+                or      a
+                sbc     hl,de
+                ex      de,hl
+                pop     hl
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                inc     hl
+                push    hl
+                ld      hl,(tv_tvy)
+                ld      de,(vs_ry)
+                or      a
+                sbc     hl,de
+                ex      de,hl
+                pop     hl
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+vg_have:
                 ld      hl,(vc_ptr)
                 ld      de,VC_TVX
                 add     hl,de
@@ -851,17 +901,38 @@ vg_store:
                 ld      (hl),d
                 ret
 
-; vc_field : HL = vc_ptr + A, returns the s16 there in HL
-vc_field:
+; vx_slot : HL -> this vertex's byte in the valid map, C = its bit, A = that
+; byte - so a hit is one AND and a miss one OR back.
+vx_slot:
+                ld      a,(vg_idx)
+                and     7
                 ld      e,a
                 ld      d,0
-                ld      hl,(vc_ptr)
+                ld      hl,VXBIT
                 add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ex      de,hl
+                ld      c,(hl)
+                ld      hl,(vg_idx)
+                srl     h
+                rr      l
+                srl     h
+                rr      l
+                srl     h
+                rr      l
+                ld      de,VXVALID
+                add     hl,de
+                ld      a,(hl)
                 ret
+
+; vx_addr : HL = this vertex's four bytes in the cache.
+vx_addr:
+                ld      hl,(vg_idx)
+                add     hl,hl
+                add     hl,hl
+                ld      de,VXCACHE_BASE
+                add     hl,de
+                ret
+
+VXBIT:          DB      1,2,4,8,16,32,64,128
 
 ; ---------------------------------------------------------------------------
 ; render_seg : HL = seg index.

@@ -19,8 +19,11 @@
                 include "start.inc"
 
                 ORG     $8800
-                INCBIN  "../build/tables.bin"           ; $8800..$8E0F
-                ; $8F00..$92FF holds the per-frame product tables, built at
+                INCBIN  "../build/tables.bin"
+
+                include "cold.z80"
+                ASSERT  $ <= TSLO, "cold code has run into the product tables"
+                ; $8E00..$91FF holds the per-frame product tables, built at
                 ; run time; pad so the image loads contiguously from $8800.
                 DS      ORG_ADDR-$, 0
 START:
@@ -80,41 +83,6 @@ set_page:
                 or      P7_ROM48
                 ld      bc,PORT_7FFD
                 out     (c),a
-                ret
-
-; ---------------------------------------------------------------------------
-; init_video : blank both bitmaps and set both attribute files to white on
-; black, then show buffer B while buffer A is drawn first.
-; ---------------------------------------------------------------------------
-init_video:
-                xor     a
-                ld      (back_buf),a
-                out     ($fe),a                 ; black border
-                ; buffer A is always at $4000
-                ld      hl,FB_A
-                ld      de,FB_A+1
-                ld      bc,FB_LEN-1
-                ld      (hl),0
-                ldir
-                ld      hl,ATTR_A
-                ld      de,ATTR_A+1
-                ld      bc,767
-                ld      (hl),$47                ; bright white ink, black paper
-                ldir
-                ; buffer B: page bank 7 in and do the same
-                ld      a,BANK_SCREEN_B or P7_ROM48
-                ld      bc,PORT_7FFD
-                out     (c),a
-                ld      hl,FB_B
-                ld      de,FB_B+1
-                ld      bc,FB_LEN-1
-                ld      (hl),0
-                ldir
-                ld      hl,FB_B+$1800
-                ld      de,FB_B+$1801
-                ld      bc,767
-                ld      (hl),$47
-                ldir
                 ret
 
 ; ---------------------------------------------------------------------------

@@ -28,7 +28,7 @@ const r = assemble(path.join(ROOT, "src/main.z80"), path.join(ROOT, "build/doom.
 const S = readSymbols(r.sym);
 const mm = new Spectrum128();
 mm.ram[0].set(fs.readFileSync(path.join(ROOT, "build/bank0.bin")), 0);
-mm.ram[5].set(fs.readFileSync(path.join(ROOT, "build/nodebb.bin")), 0x6800 - 0x4000);
+mm.ram[5].set(fs.readFileSync(path.join(ROOT, "build/nodebb.bin")), 0x6400 - 0x4000);
 mm.ram[2].set(fs.readFileSync(path.join(ROOT, "build/doom.bin")), 0x8800 - 0x8000);
 const st = mm.cpu.getState(); st.pc = S.get("START"); st.sp = 0xbff0; st.imode = 1;
 mm.cpu.setState(st);
