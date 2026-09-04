@@ -39,7 +39,6 @@ walk:
                 ld      a,(frame_nodes)
                 inc     a
                 ld      (frame_nodes),a
-                ; node address = NODES + nid * 16
                 add     hl,hl
                 add     hl,hl
                 add     hl,hl
@@ -47,65 +46,54 @@ walk:
                 ld      de,NODES
                 add     hl,de
                 ld      (bsp_node),hl
-                call    point_on_side           ; A = 0 or 1
-                ld      c,a
-                ld      hl,(bsp_node)
-                ; DOOM's order: descend the near child unconditionally, then
-                ; bounding-box test only the far one.  The recursion overwrites
-                ; bsp_node, so it and the side ride on the stack.
-                push    hl
-                push    bc
-                ld      de,ND_CHILD0
+                call    point_on_side           ; A = the side, IX = the node
+                push    ix
+                push    af
                 or      a
-                jr      z,wk_n0
-                ld      de,ND_CHILD1
-wk_n0:
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ex      de,hl
-                call    walk
+                jr      nz,wk_n1
+                ld      l,(ix+ND_CHILD0)
+                ld      h,(ix+ND_CHILD0+1)
+                jr      wk_go
+wk_n1:          ld      l,(ix+ND_CHILD1)
+                ld      h,(ix+ND_CHILD1+1)
+wk_go:          call    walk
                 ld      a,(sp_count)
                 or      a
                 jr      z,walk_pop
-                pop     bc
-                pop     hl
-                push    hl
-                push    bc
-                ld      (bsp_node),hl
-                ld      a,c
+                pop     af
+                pop     ix
+                ld      (bsp_node),ix
                 xor     1
-                call    walk_child
+                jr      walk_child              ; the far child, if its box shows
 walk_pop:
-                pop     bc
-                pop     hl
+                pop     af
+                pop     ix
                 ret
 
-; walk_child : A = which side (0 or 1) of the node at bsp_node to descend.
-walk_child:
+walk_child:     ; A = the side, IX = bsp_node
                 ld      (bsp_side),a
+                push    ix
                 call    bbox_range              ; carry set when visible
+                pop     ix
                 ret     nc
                 ld      a,(bb_lo)
                 ld      b,a
                 ld      a,(bb_hi)
                 ld      c,a
+                push    ix
                 call    sp_hasgap
+                pop     ix
                 ret     nc
-                ld      hl,(bsp_node)
                 ld      a,(bsp_side)
-                ld      de,ND_CHILD0
                 or      a
-                jr      z,wc_c0
-                ld      de,ND_CHILD1
-wc_c0:
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ex      de,hl
+                jr      nz,wc_c1
+                ld      l,(ix+ND_CHILD0)
+                ld      h,(ix+ND_CHILD0+1)
                 jp      walk
+wc_c1:          ld      l,(ix+ND_CHILD1)
+                ld      h,(ix+ND_CHILD1+1)
+                jp      walk
+
 
 ; ---------------------------------------------------------------------------
 ; walk_ss : HL = subsector id with bit 15 set.
@@ -123,7 +111,9 @@ walk_ss:
                 ld      de,SSEC
                 add     hl,de
                 ld      a,(hl)
-                ld      (ss_cnt),a
+                or      a
+                ret     z
+                ld      b,a                     ; B = segs left
                 inc     hl
                 ld      e,(hl)
                 inc     hl
@@ -140,17 +130,15 @@ walk_ss:
                 ld      hl,$ffff
                 ld      (ch_vtx),hl             ; the chain starts empty
 ss_loop:
-                ld      a,(ss_cnt)
-                or      a
-                ret     z
-                dec     a
-                ld      (ss_cnt),a
+                push    bc
                 push    ix
                 call    render_seg
                 pop     ix
+                pop     bc
                 ld      de,SEG_SIZE
                 add     ix,de
-                jr      ss_loop
+                djnz    ss_loop
+                ret
 
 ; ---------------------------------------------------------------------------
 ; point_on_side : DOOM's R_PointOnSide against the node at bsp_node.
