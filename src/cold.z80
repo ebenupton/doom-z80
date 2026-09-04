@@ -40,7 +40,18 @@ sq2_loop:
 ; init_video : blank both bitmaps and set both attribute files to white on
 ; black, then show buffer B while buffer A is drawn first.
 ; ---------------------------------------------------------------------------
+; cpm_init : empty the corner memo.  Its entries are a pure function of the
+; delta pair, so this runs once and never again.
+cpm_init:
+                ld      hl,CPM_BASE
+                ld      de,CPM_BASE+1
+                ld      bc,255
+                ld      (hl),0
+                ldir
+                ret
+
 init_video:
+                call    cpm_init
                 xor     a
                 ld      (back_buf),a
                 out     ($fe),a                 ; black border

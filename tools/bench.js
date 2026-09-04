@@ -16,7 +16,7 @@ function run(nFrames = 109) {
   const sym = readSymbols(r.sym);
   const m = new Spectrum128();
   m.ram[0].set(fs.readFileSync(path.join(ROOT, "build/bank0.bin")), 0);
-  m.ram[5].set(fs.readFileSync(path.join(ROOT, "build/nodebb.bin")), 0x6400 - 0x4000);
+  m.ram[5].set(fs.readFileSync(path.join(ROOT, "build/nodebb.bin")), 0x6408 - 0x4000);
   m.ram[2].set(fs.readFileSync(path.join(ROOT, "build/doom.bin")), 0x8800 - 0x8000);
   const st = m.cpu.getState();
   st.pc = sym.get("START"); st.sp = 0xbff0; st.imode = 1;

@@ -68,7 +68,7 @@ const tap = Buffer.concat([
   basicLoader(),
   codeFile("boot", 0x8000, stub),
   codeFile("geom", 0xc000, geom),
-  codeFile("bbox", 0x6400, nodebb),
+  codeFile("bbox", 0x6408, nodebb),
   codeFile("engine", 0x8800, image),
 ]);
 const out = path.join(ROOT, "build/doom.tap");

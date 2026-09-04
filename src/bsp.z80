@@ -508,7 +508,7 @@ bb_corner_angle:
                 or      a
                 sbc     hl,de
                 ld      (pa_dy),hl
-                call    ptoa
+                call    ptoa_memo
                 ld      a,(pl_ang)
                 ld      d,a
                 ld      a,h
@@ -520,6 +520,70 @@ bb_corner_angle:
 ; ptoa : (pa_dx, pa_dy) -> HL = 16-bit angle, atan2 folded through the first
 ; octant.  No multiplies: one 8-bit divide and a table lookup.
 ; ---------------------------------------------------------------------------
+; ---------------------------------------------------------------------------
+; ptoa_memo : the corner angle, from the memo when this delta pair has been
+; through before.  R_PointToAngle is a pure function of the pair, so an entry
+; can never go stale - and sibling boxes, and a box and its parent, keep
+; handing the same corners back.
+; ---------------------------------------------------------------------------
+ptoa_memo:
+                ld      a,(pa_dx)
+                ld      hl,pa_dy
+                xor     (hl)
+                and     31
+                add     a,a
+                add     a,a
+                add     a,a
+                ld      l,a                     ; a page-aligned table, so the
+                ld      h,CPM_BASE>>8           ; slot is one shift chain
+                ld      (cpm_p),hl
+                ld      de,(pa_dx)
+                ld      a,e
+                cp      (hl)
+                jr      nz,cpm_miss
+                inc     l
+                ld      a,d
+                cp      (hl)
+                jr      nz,cpm_miss
+                inc     l
+                ld      de,(pa_dy)
+                ld      a,e
+                cp      (hl)
+                jr      nz,cpm_miss
+                inc     l
+                ld      a,d
+                cp      (hl)
+                jr      nz,cpm_miss
+                ld      a,CPM_VALID-3
+                add     a,l
+                ld      l,a
+                ld      a,(hl)
+                or      a
+                jr      z,cpm_miss
+                dec     l
+                ld      d,(hl)
+                dec     l
+                ld      e,(hl)
+                ex      de,hl
+                ret
+cpm_miss:
+                ld      hl,pa_dx                ; bank the raw pair: ptoa folds
+                ld      de,(cpm_p)              ; it in place
+                ld      bc,4
+                ldir
+                call    ptoa
+                ex      de,hl
+                ld      hl,(cpm_p)
+                ld      bc,4
+                add     hl,bc
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                inc     hl
+                ld      (hl),1
+                ex      de,hl
+                ret
+
 ptoa:
                 xor     a
                 ld      (pa_oct),a

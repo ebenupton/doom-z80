@@ -7,10 +7,11 @@ const z = new ZHarness(R + 'test/t_view.z80');
 // geometry into bank 0, tables into bank 2, node bboxes into bank 5
 z.m.ram[0].set(fs.readFileSync(R + 'build/bank0.bin'), 0);
 z.pokeBytes(0x8800, fs.readFileSync(R + 'build/tables.bin'));
-z.m.ram[5].set(fs.readFileSync(R + 'build/nodebb.bin'), 0x6400 - 0x4000);
+z.m.ram[5].set(fs.readFileSync(R + 'build/nodebb.bin'), 0x6408 - 0x4000);
 z.m.applyPaging(0);              // bank 0 at $C000
 
 z.call('sq_init');
+z.call('cpm_init');
 z.call('raster_init');
 
 const V = 0xBC00;
@@ -34,7 +35,7 @@ F.forEach((f, i) => {
   if (r.tstates > worst) { worst = r.tstates; worstI = i; }
   const end = z.peek16(A.dlist_ptr);
   const got = [];
-  for (let p = 0x5C00; p < end; p += 4)
+  for (let p = z.sym_("DLIST_BASE"); p < end; p += 4)
     got.push([z.peek(p), z.peek(p+1), z.peek(p+2), z.peek(p+3)]);
   const want = f.lines.map(l => l.map(v => v & 0xff));
   let ok = got.length === want.length;

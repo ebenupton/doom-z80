@@ -343,26 +343,8 @@ plot_shallow:
                 inc     hl
                 ld      d,(hl)
                 ld      (ps_go+1),de
-                ld      hl,ps_sl_d
-                ld      a,(ln_sy)
-                inc     a
-                jr      nz,ps_dsel
-                ld      hl,ps_sl_u
-ps_dsel:
-                ld      (ps_sl+1),hl
                 call    addr_of                 ; HL = byte, C and B consumed
-                ld      a,h
-                and     7
-                ld      c,a
-                ld      a,(ln_sy)
-                inc     a
-                jr      z,ps_cu
-                ld      a,8
-                sub     c
-                ld      c,a                     ; rows to the cell boundary
-                jr      ps_cd
-ps_cu:          inc     c
-ps_cd:
+                call    pl_dirsel
                 ld      a,(ln_dy)
                 ld      d,a
                 ld      a,(ln_dx)
@@ -487,84 +469,63 @@ PSJT:           DW      cp7, cp6, cp5, cp4, cp3, cp2, cp1, cp0
 ; plot_steep : |dy| >= dx >= 1.  C = x1, B = y1.
 ; ---------------------------------------------------------------------------
 plot_steep:
+                ; Twenty-one pixels a frame come through here against 880 in
+                ; the shallow path, so this shares the shallow drawer's
+                ; scanline step and keeps its mask in memory rather than
+                ; carrying a second unrolled copy of everything.
                 ld      a,(ln_dx)
-                ld      (ptd_dx+1),a
-                ld      (ptu_dx+1),a
-                ld      a,(ln_dy)
-                ld      (ptd_dy+1),a
-                ld      (ptu_dy+1),a
+                ld      (pt_dx+1),a
                 call    addr_of
-                ld      c,a
+                ld      (pt_mask),a
+                call    pl_dirsel
                 ld      a,(ln_dy)
                 ld      d,a
                 srl     a
                 ld      e,a                     ; err = dy >> 1
                 inc     d
                 ld      b,d                     ; B = dy + 1 pixels
+                dec     d                       ; D = dy again
+pt_loop:
+                ld      a,(pt_mask)
+                or      (hl)
+                ld      (hl),a
+                dec     b
+                ret     z
+                ld      a,e
+pt_dx:          sub     0
+                ld      e,a
+                jr      nc,pt_noy
+                add     a,d
+                ld      e,a
+                ld      a,(pt_mask)
+                rrca
+                ld      (pt_mask),a
+                jr      nc,pt_noy
+                inc     l
+pt_noy:
+                call    ps_sl
+                jr      pt_loop
+
+; pl_dirsel : point ps_sl at the right scanline step for ln_sy and prime C
+; with the rows left inside the character cell.
+pl_dirsel:
+                ld      a,h
+                and     7
+                ld      c,a
+                ld      de,ps_sl_d
                 ld      a,(ln_sy)
                 inc     a
-                jr      z,pt_loop_u
-pt_loop_d:
-                ld      a,(hl)
-                or      c
-                ld      (hl),a
-                dec     b
-                ret     z
-                ld      a,e
-ptd_dx:         sub     0
-                ld      e,a
-                jr      nc,ptd_noy
-ptd_dy:         add     a,0
-                ld      e,a
-                rrc     c
-                jr      nc,ptd_noy
-                inc     l
-ptd_noy:
-                inc     h
-                ld      a,h
-                and     7
-                jr      nz,pt_loop_d
-                ld      a,l
-                add     a,32
-                ld      l,a
-                jr      c,pt_loop_d
-                ld      a,h
-                sub     8
-                ld      h,a
-                jr      pt_loop_d
-pt_loop_u:
-                ld      a,(hl)
-                or      c
-                ld      (hl),a
-                dec     b
-                ret     z
-                ld      a,e
-ptu_dx:         sub     0
-                ld      e,a
-                jr      nc,ptu_noy
-ptu_dy:         add     a,0
-                ld      e,a
-                rrc     c
-                jr      nc,ptu_noy
-                inc     l
-ptu_noy:
-                ld      a,h
-                and     7
-                jr      z,ptu_up2
-                dec     h
-                jr      pt_loop_u
-ptu_up2:
-                ld      a,h
-                add     a,7
-                ld      h,a
-                ld      a,l
-                sub     32
-                ld      l,a
-                jr      nc,pt_loop_u
-                ld      a,h
-                sub     8
-                ld      h,a
-                jr      pt_loop_u
+                jr      z,pl_up
+                ld      a,8
+                sub     c
+                ld      c,a
+                jr      pl_set
+pl_up:
+                inc     c
+                ld      de,ps_sl_u
+pl_set:
+                ld      (ps_sl+1),de
+                ret
 
 ; ---------------------------------------------------------------------------
 ; Pixel mask tables.

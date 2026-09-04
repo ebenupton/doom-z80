@@ -10,7 +10,7 @@ const BUCKETS = new Set(["mul_u8","mul_s8_u8","mul_s16_u8","divs","fpmul8","mul_
   "project_y","view_setup","build_prod","bbox_range","bb_edge","near_cross","vertex_get",
   "point_on_side","render_seg","render_seg_body","walk","sp_emit","sp_commit","cmp_s16",
   "sincos_lookup","div16_8","dl_emit","dl_render","plot_line","raster_clear","sp_reset",
-  "ptoa","bb_corner_angle","bb_angtox","sx4","walk_child","walk_ss","emit_edge","mul_u8","plot_vert","addr_of","find_eye_height","update_world_pos","view_setup"]);
+  "ptoa","ptoa_memo","bb_corner_angle","bb_angtox","sx4","walk_child","walk_ss","emit_edge","mul_u8","plot_vert","addr_of","find_eye_height","update_world_pos","view_setup"]);
 
 const { sym, m } = run(1);   // build + boot once
 const bucketAddr = new Map();
@@ -28,7 +28,7 @@ const r = assemble(path.join(ROOT, "src/main.z80"), path.join(ROOT, "build/doom.
 const S = readSymbols(r.sym);
 const mm = new Spectrum128();
 mm.ram[0].set(fs.readFileSync(path.join(ROOT, "build/bank0.bin")), 0);
-mm.ram[5].set(fs.readFileSync(path.join(ROOT, "build/nodebb.bin")), 0x6400 - 0x4000);
+mm.ram[5].set(fs.readFileSync(path.join(ROOT, "build/nodebb.bin")), 0x6408 - 0x4000);
 mm.ram[2].set(fs.readFileSync(path.join(ROOT, "build/doom.bin")), 0x8800 - 0x8000);
 const st = mm.cpu.getState(); st.pc = S.get("START"); st.sp = 0xbff0; st.imode = 1;
 mm.cpu.setState(st);

@@ -49,13 +49,20 @@ P7_ROM48        EQU     $10
 ; --- bank 5 ($4000-$7FFF): screen + scratch --------------------------------
 ; $4000-$5AFF is the bitmap, $5800-$5AFF the attributes; everything the
 ; engine keeps here starts above them.
+; Corner-angle memo: R_PointToAngle is a pure function of the delta pair, so
+; an entry never goes stale - the map is cleared once at boot and never again.
+; Sibling boxes and a box and its parent share corners, so a delta pair comes
+; round again about one time in six.
+CPM_BASE        EQU     $5B00           ; 32 x (dx, dy, angle, valid, pad)
+CPM_VALID       EQU     6
+
 DLIST_BASE      EQU     $5C00           ; display list: 4 bytes per segment
 DLIST_MAX       EQU     512
 DLIST_END       EQU     DLIST_BASE + DLIST_MAX*4             ; $6400
 
 DLIST_END_PAGE  EQU     DLIST_END>>8
 
-NODEBB          EQU     $6400           ; 195 x 8 quarter-prescale bounds
+NODEBB          EQU     $6408           ; dl_emit may write one slot past the end           ; 195 x 8 quarter-prescale bounds
 
 NVERTS          EQU     455
 
@@ -111,7 +118,7 @@ ORG_ADDR        EQU     CODE_BASE
 ; sorted singly-linked list and the unused slots a free chain, so an occlusion
 ; update edits the spans it touches and leaves the rest where they are - there
 ; is no second pool and nothing to swap.
-SPANS_BASE      EQU     $BA44
+SPANS_BASE      EQU     $BA4A
 SPANS_MAX       EQU     24              ; measured peak is 10
 SPAN_SIZE       EQU     16
 SLOT_SIZE       EQU     18
@@ -136,11 +143,7 @@ SPANS_TOP       EQU     SPANS_BASE + SPANS_MAX*SLOT_SIZE
 sp_cur          EQU     SPANS_TOP+0     ; the walk's cursor, its successor
 sp_nextp        EQU     SPANS_TOP+2     ; and its insertion point
 sp_prev         EQU     SPANS_TOP+4
-; the seg chain: a subsector's segs share endpoints, so the pair projected for
-; one seg's v2 is the pair its neighbour needs for v1
-ch_vtx          EQU     SPANS_TOP+6
-ch_ft           EQU     SPANS_TOP+8
-ch_fb           EQU     SPANS_TOP+10
+
 
 ; hot variables and stack live at the top of bank 2
 VARS_BASE       EQU     $BC00
@@ -154,6 +157,7 @@ ln_sy           EQU     VARS_BASE+3
 pv_count        EQU     VARS_BASE+4
 ph_x1           EQU     VARS_BASE+5
 ph_x2           EQU     VARS_BASE+6
+pt_mask         EQU     VARS_BASE+7
 dlist_ptr       EQU     VARS_BASE+8     ; next free display-list slot (2)
 back_buf        EQU     VARS_BASE+10    ; 0 = A is the back buffer, 1 = B
 
@@ -485,6 +489,12 @@ fu_have         EQU     VARS_BASE+716
 al_both         EQU     VARS_BASE+717
 al_open         EQU     VARS_BASE+718
 al_t            EQU     VARS_BASE+719
+cpm_p           EQU     VARS_BASE+742   ; the memo slot this corner hashed to
+; the seg chain: a subsector's segs share endpoints, so the pair projected for
+; one seg's v2 is the pair its neighbour needs for v1
+ch_vtx          EQU     VARS_BASE+744
+ch_ft           EQU     VARS_BASE+746
+ch_fb           EQU     VARS_BASE+748
 fu_t_o          EQU     VARS_BASE+720   ; the current piece's boundary extremes
 fu_t_i          EQU     VARS_BASE+721
 fu_b_o          EQU     VARS_BASE+722
