@@ -78,8 +78,14 @@ def load_from_reference(mapname="E1M1"):
     # Keep the *rounded* prescaled coordinate so the whole test is s16.
     for sg in md.segs:
         rv = dw.vertexes[sg["linedef_v1"]]
-        sg["lx"] = dw._prescale_round(rv[0] - dw.MAP_CENTER_X, dw.PRESCALE)
-        sg["ly"] = dw._prescale_round(rv[1] - dw.MAP_CENTER_Y, dw.PRESCALE)
+        # the back-face reference point in prescaled 8.8, exactly as
+        # fp_render_seg's _lx88/_ly88 (world * 32): integer part (floor)
+        # and fraction, so the runtime test can be exact against the
+        # player's own 8.8 position
+        lx88 = (rv[0] - dw.MAP_CENTER_X) * 32
+        ly88 = (rv[1] - dw.MAP_CENTER_Y) * 32
+        sg["lx"], sg["lxf"] = lx88 >> 8, lx88 & 255
+        sg["ly"], sg["lyf"] = ly88 >> 8, ly88 & 255
 
     md.ssectors = [(c, f) for (c, f) in dw.fp_ssectors]   # (count, first)
 
@@ -131,138 +137,331 @@ def load_from_reference(mapname="E1M1"):
 # Linear boundary functions: (slope 0.8 signed, intercept 8.0 signed)
 # ---------------------------------------------------------------------------
 
-def div8s(num, den):
-    """(num << 8) / den, truncated toward zero, saturating - the exact
-    behaviour of the Z80 `divs` routine, whose first phase yields only an
-    8-bit integer quotient."""
-    if den == 0:
-        return 0
-    neg = (num < 0) != (den < 0)
-    n, d = abs(num), abs(den)
-    if d > 0x7fff:
-        d = 0x7fff
-    if n // d >= 128:
-        q = 0x7fff              # the full quotient would not fit s16
-    else:
-        q = (n << 8) // d
-    return -q if neg else q
-
-
-def linfn(y1, y2, sx1, sx2):
-    """(slope, intercept, ends): the line through the two points, carrying
-    its own endpoints so that evaluating it at one of them gives the
-    point's y rather than the quantised slope's version of it - what the
-    BBC port's two-point records give for free."""
-    ends = (sx1, y1, sx2, y2)
-    dx = sx2 - sx1
-    if dx == 0:
-        return (0, (y1 + y2) >> 1, ends)
-    slope = div8s(y2 - y1, dx)
-    if slope == 0:
-        return (0, y1, ends)
-    if abs(sx1) <= abs(sx2):
-        return (slope, y1 - fp_mul8(slope, sx1), ends)
-    return (slope, y2 - fp_mul8(slope, sx2), ends)
-
-
-def ev(fn, x):
-    """A boundary's y at a column: the linear function alone."""
-    if fn[0] == 0:
-        return fn[1]
-    return fp_mul8(fn[0], x) + fn[1]
-
-
-def evl(fn, x):
-    """A drawn line's y at a column: its own end where the column is one."""
-    if len(fn) > 2:
-        e = fn[2]
-        if x == e[0]:
-            return e[1]
-        if x == e[2]:
-            return e[3]
-    return ev(fn, x)
-
-
-def same_fn(a, b):
-    return a[0] == b[0] and a[1] == b[1]
-
-
-def ev88(fn, x):
-    """Evaluate to 8.8 - used where a half-pixel matters (vertical clipping)."""
-    if fn[0] == 0:
-        return fn[1] << 8
-    return m8(fn[0], x) + (fn[1] << 8)
-
-
-TOP0 = (0, 0)
-BOT0 = (0, H - 1)
-
-
 # ---------------------------------------------------------------------------
-# Trapezoid clip spans
+# Trapezoid clip spans, in the BBC port's data model
+#
+# A span's two boundaries are two-point records - the y at each end of an
+# anchor range covering the span - and a drawn line is the same thing, so a
+# line that lies inside a span's aperture becomes that span's boundary by
+# copying its record: nothing is evaluated and there is no slope, so there is
+# no divide.  Evaluation, where it is needed, is one round-to-nearest lerp.
+# Every y here is biased by Y_BIAS into a byte: the visible rows [0, 159] are
+# [48, 207] and the band [0, 255] holds a line's excursions above and below;
+# beyond it a line is a flat at 0 or 255, which every aperture is inside of.
+# Column ranges are inclusive.
 # ---------------------------------------------------------------------------
+
+Y_BIAS = 48
+VIS_LO, VIS_HI = Y_BIAS, Y_BIAS + H - 1
+
+
+def interp(x, x0, y0, x1, y1):
+    """Round-to-nearest lerp with |dy| and the offset unsigned, the BBC
+    port's interp_store: exact at both ends."""
+    if x1 == x0:
+        return y0
+    off, den = x - x0, x1 - x0
+    if den < 0:
+        off, den = -off, -den
+    if y1 >= y0:
+        return y0 + (off * (y1 - y0) + den // 2) // den
+    return y0 - (off * (y0 - y1) + den // 2) // den
+
+
+def interp_x(y, x0, y0, x1, y1):
+    """The column where the line reaches y, the lerp with its axes swapped."""
+    return interp(y, y0, x0, y1, x1)
+
+
+def cross_col(a, b, d0, d1, dfn):
+    """First column in [a, b] where the linear-ish difference dfn is >= 0,
+    given its values d0 at a and d1 at b of opposite sign: one rounded
+    divide, then the column is checked rather than trusted."""
+    n0, n1 = abs(d0), abs(d1)
+    den = n0 + n1
+    num = (b - a) * n0
+    if den > 255:                      # the Z80 divides by a byte
+        num >>= 1
+        den >>= 1
+    xc = a + min(255, (num + den // 2) // den)
+    xc = max(a, min(b, xc))
+    if dfn(xc) < 0:
+        if d0 < 0:                     # rising through zero
+            xc += 1
+            if xc > b:
+                return None
+        else:
+            xc -= 1
+            if xc < a:
+                return None
+    return xc
+
+
+def ge_range(v0, v1, a, b, dfn):
+    """The sub-interval of [a, b] where the difference is >= 0, from its
+    values at the ends; empty comes back as (a+1, a)."""
+    if v0 >= 0 and v1 >= 0:
+        return a, b
+    if v0 < 0 and v1 < 0:
+        return a + 1, a
+    xc = cross_col(a, b, v0, v1, dfn)
+    if xc is None:
+        return a + 1, a
+    return (xc, b) if v0 < 0 else (a, xc)
+
+
+class Line:
+    """A drawn line, clipped to the screen columns and the y band: an
+    in-band record (xa, ya, xb, yb) plus flats at 0 or 255 either side.
+    `run` is the visible stretch being accumulated as the walk goes right:
+    abutting visible pieces come out as one segment."""
+    __slots__ = ("pieces", "run")
+
+    def __init__(self, sx1, y1, sx2, y2):
+        # sx1 < sx2; y biased s16
+        self.run = None
+        pieces = []
+        if sx1 < 0:
+            y1 = interp(0, sx1, y1, sx2, y2)
+            sx1 = 0
+        if sx2 > W - 1:
+            y2 = interp(W - 1, sx1, y1, sx2, y2)
+            sx2 = W - 1
+        if sx1 > sx2:
+            self.pieces = pieces
+            return
+        if y1 < 0 and y2 < 0:
+            pieces.append((sx1, sx2, 0, 0, 0))
+        elif y1 > 255 and y2 > 255:
+            pieces.append((sx1, sx2, 255, 255, 255))
+        else:
+            if y1 < 0 or y1 > 255:
+                tgt = 0 if y1 < 0 else 255
+                cx = max(sx1, min(sx2, interp_x(tgt, sx1, y1, sx2, y2)))
+                if cx > sx1:
+                    pieces.append((sx1, cx - 1, tgt, tgt, tgt))
+                sx1, y1 = cx, tgt
+            right = None
+            if y2 < 0 or y2 > 255:
+                tgt = 0 if y2 < 0 else 255
+                cx = max(sx1, min(sx2, interp_x(tgt, sx1, y1, sx2, y2)))
+                if cx < sx2:
+                    right = (cx + 1, sx2, tgt, tgt, tgt)
+                sx2, y2 = cx, tgt
+            pieces.append((sx1, sx2, y1, y2, None))
+            if right is not None:
+                pieces.append(right)
+        self.pieces = pieces
+
+    def at(self, x):
+        for (xa, xb, ya, yb, flat) in self.pieces:
+            if xa <= x <= xb:
+                return ya if flat is not None else interp(x, xa, ya, xb, yb)
+        raise ValueError("column outside the line")
+
+
+class Span:
+    __slots__ = ("xs", "xlast", "top", "bot", "ot", "it", "ob", "ib")
+
+    def __init__(self, xs, xlast, top, bot):
+        self.xs, self.xlast, self.top, self.bot = xs, xlast, top, bot
+        # extremes over the anchor ranges, which cover the span: the
+        # outer/inner top and outer/inner bottom
+        self.ot, self.it = min(top[1], top[3]), max(top[1], top[3])
+        self.ob, self.ib = max(bot[1], bot[3]), min(bot[1], bot[3])
+
+    def top_at(self, x):
+        return interp(x, *self.top)
+
+    def bot_at(self, x):
+        return interp(x, *self.bot)
+
+
+TOP0 = (0, VIS_LO, W - 1, VIS_LO)
+BOT0 = (0, VIS_HI, W - 1, VIS_HI)
+
 
 class Spans:
-    """Visible region as a sorted array of inclusive column ranges."""
+    """Visible region as a sorted list of inclusive column ranges."""
     __slots__ = ("spans", "out")
 
     def __init__(self, out):
-        self.spans = [(0, W - 1, TOP0, BOT0)]
-        self.out = out       # collects emitted line segments
+        self.spans = [Span(0, W - 1, TOP0, BOT0)]
+        self.out = out
 
     def is_full(self):
         return not self.spans
 
     def has_gap(self, lo, hi):
-        ilo = max(0, lo)
-        ihi = min(W - 1, hi)
+        """Any live span overlapping the range: the BBC port's cheapened
+        test, every live span being taken to have an aperture."""
+        ilo, ihi = max(0, lo), min(W - 1, hi)
         if ilo > ihi:
             return False
-        for xlo, xlast, tfn, bfn in self.spans:
-            if xlo > ihi:
+        for s in self.spans:
+            if s.xs > ihi:
                 break
-            if xlast < ilo:
-                continue
-            clo, chi = max(xlo, ilo), min(xlast, ihi)
-            # The aperture is monotone in x, so its two ends decide it.
-            if ev(tfn, clo) < ev(bfn, clo) or ev(tfn, chi) < ev(bfn, chi):
+            if s.xlast >= ilo:
                 return True
         return False
 
     # -- drawing ----------------------------------------------------------
 
+    def _emit(self, x0, y0, x1, y1):
+        self.out.append((x0, y0 - Y_BIAS, x1, y1 - Y_BIAS))
+
+    def _run_add(self, ln, a, b, ya, yb):
+        """[a, b] of the line is visible: continue the run being drawn if
+        it abuts, else flush it and start another."""
+        r = ln.run
+        if r is not None and r[2] + 1 == a:
+            ln.run = (r[0], r[1], b, yb)
+            return
+        self._run_flush(ln)
+        ln.run = (a, ya, b, yb)
+
+    def _run_flush(self, ln):
+        r = ln.run
+        if r is not None:
+            self._emit(r[0], r[1], r[2], r[3])
+            ln.run = None
+
     def draw_verticals(self, verts):
         for (x, ya, yb) in verts:
             self._draw_vertical(x, ya, yb)
 
-    def _draw_extras(self, extra, ox0, ox1, tfn, bfn, ta, ba, tb, bb):
-        """The seg's other edges, clipped to one span's trapezoid."""
-        for fn in extra:
-            c = clip_to_trap(fn, ox0, ox1, tfn, bfn, ta, ba, tb, bb)
-            if c:
-                self.out.append(c)
-
     def _draw_vertical(self, x, ya, yb):
         if x < 0 or x >= W:
             return
+        ya = max(0, min(255, ya + Y_BIAS))
+        yb = max(0, min(255, yb + Y_BIAS))
         if ya > yb:
             ya, yb = yb, ya
-        for xlo, xlast, tfn, bfn in self.spans:
-            if xlo > x:
+        for s in self.spans:
+            if s.xs > x:
                 return
-            if xlast < x:
+            if s.xlast < x:
                 continue
-            yt = ev(tfn, x)
-            yb2 = ev(bfn, x)
-            if yt >= yb2:
+            if yb < s.ot or ya > s.ob:
                 return
-            a = max(ya, yt)
-            b = min(yb, yb2)
-            if a <= b:
-                self.out.append((x, a, x, b))
+            if ya >= s.it and yb <= s.ib:
+                self._emit(x, ya, x, yb)
+                return
+            t, b = s.top_at(x), s.bot_at(x)
+            if t >= b:
+                return
+            a2, b2 = max(ya, t), min(yb, b)
+            if a2 <= b2:
+                self._emit(x, a2, x, b2)
             return
 
+    # -- one line against one span piece ------------------------------------
+
+    def _verdicts(self, ln, s, a, b):
+        """The line over [a, b] of span s as a list of (x0, x1, kind,
+        extras): kind 'above' (over the top), 'below' (under the bottom) or
+        'in' (inside the aperture, drawn), with the line's y at the ends
+        for 'in' pieces.  The whole line's y range decides most of them
+        without an evaluation."""
+        out = []
+        for (xa, xb, ya, yb, flat) in ln.pieces:
+            p0, p1 = max(a, xa), min(b, xb)
+            if p0 > p1:
+                continue
+            if flat is not None:
+                out.append((p0, p1, 'above' if flat == 0 else 'below', None))
+                continue
+            ylo, yhi = min(ya, yb), max(ya, yb)
+            if yhi < s.ot:
+                out.append((p0, p1, 'above', None))
+                continue
+            if ylo > s.ob:
+                out.append((p0, p1, 'below', None))
+                continue
+            if ylo >= s.it and yhi <= s.ib:
+                y0 = ya if p0 == xa else interp(p0, xa, ya, xb, yb)
+                y1 = yb if p1 == xb else interp(p1, xa, ya, xb, yb)
+                out.append((p0, p1, 'in', (y0, y1)))
+                continue
+            out.extend(self._exact(ln, (xa, ya, xb, yb), s, p0, p1))
+        return out
+
+    def _exact(self, ln, rec, s, a, b):
+        xa, ya_, xb, yb_ = rec
+        lat = lambda x: interp(x, xa, ya_, xb, yb_)
+        ya, yb = lat(a), lat(b)
+        ta, tb = s.top_at(a), s.top_at(b)
+        ba, bb = s.bot_at(a), s.bot_at(b)
+        t0, t1 = ge_range(ya - ta, yb - tb, a, b, lambda x: lat(x) - s.top_at(x))
+        b0, b1 = ge_range(ba - ya, bb - yb, a, b, lambda x: s.bot_at(x) - lat(x))
+        r0, r1 = max(t0, b0), min(t1, b1)
+        above = lambda x: x < t0 or x > t1
+        out = []
+        if r0 <= r1:
+            if r0 > a:
+                out.append((a, r0 - 1, 'above' if above(a) else 'below', None))
+            y0 = ya if r0 == a else lat(r0)
+            y1 = yb if r1 == b else lat(r1)
+            # the drawn ends sit inside the aperture at those columns
+            e0 = max(ta if r0 == a else s.top_at(r0), min(ba if r0 == a else s.bot_at(r0), y0))
+            e1 = max(tb if r1 == b else s.top_at(r1), min(bb if r1 == b else s.bot_at(r1), y1))
+            out.append((r0, r1, 'in', (y0, y1, e0, e1)))
+            if r1 < b:
+                out.append((r1 + 1, b, 'above' if above(b) else 'below', None))
+        elif above(a) == above(b):
+            out.append((a, b, 'above' if above(a) else 'below', None))
+        else:
+            c = max(a + 1, min(b, t0 if above(a) else b0))
+            out.append((a, c - 1, 'above' if above(a) else 'below', None))
+            out.append((c, b, 'above' if above(b) else 'below', None))
+        return out
+
+    def _draw_pieces(self, ln, pieces):
+        for (x0, x1, kind, ys) in pieces:
+            if kind == 'in':
+                if len(ys) == 4:
+                    self._run_flush(ln)
+                    self._emit(x0, ys[2], x1, ys[3])
+                else:
+                    self._run_add(ln, x0, x1, ys[0], ys[1])
+            else:
+                self._run_flush(ln)
+
+    def _draw_only(self, ln, s, a, b):
+        self._draw_pieces(ln, self._verdicts(ln, s, a, b))
+
+    def _apply(self, ln, s, a, b, side, emit):
+        """The line as a new boundary of span s over [a, b]: the pieces
+        that survive, with the line where it ran inside."""
+        pieces = self._verdicts(ln, s, a, b)
+        if emit:
+            self._draw_pieces(ln, pieces)
+        out = []
+        for (x0, x1, kind, ys) in pieces:
+            if kind == 'in':
+                rec = (x0, ys[0], x1, ys[1])
+                ns = Span(x0, x1, rec, s.bot) if side else Span(x0, x1, s.top, rec)
+                if ns.it < ns.ib or ns.top_at(x0) < ns.bot_at(x0) or ns.top_at(x1) < ns.bot_at(x1):
+                    out.append(ns)
+            elif (kind == 'above') == side:
+                out.append(Span(x0, x1, s.top, s.bot))     # the line never reached it
+            # else the line ran past the far boundary: closed
+        return out
+
     # -- occlusion updates -------------------------------------------------
+
+    def _finish(self, new, lines):
+        """Abutting pieces with the same boundaries coalesce."""
+        self.spans = []
+        for sp in new:
+            if self.spans:
+                p = self.spans[-1]
+                if p.xlast + 1 == sp.xs and p.top == sp.top and p.bot == sp.bot:
+                    p.xlast = sp.xlast
+                    continue
+            self.spans.append(sp)
+        for ln in lines:
+            self._run_flush(ln)
 
     def mark_solid(self, extra, lo, hi):
         """Draw a solid wall's edges and delete its columns, in one walk."""
@@ -270,241 +469,38 @@ class Spans:
         if ilo > ihi:
             return
         new = []
-        for xlo, xlast, tfn, bfn in self.spans:
-            if xlast < ilo or xlo > ihi:
-                new.append((xlo, xlast, tfn, bfn))
+        for s in self.spans:
+            if s.xlast < ilo or s.xs > ihi:
+                new.append(s)
                 continue
-            ox0, ox1 = max(xlo, ilo), min(xlast, ihi)
-            self._draw_extras(extra, ox0, ox1, tfn, bfn,
-                              ev(tfn, ox0), ev(bfn, ox0),
-                              ev(tfn, ox1), ev(bfn, ox1))
-            if xlo < ilo:
-                new.append((xlo, ilo - 1, tfn, bfn))
-            if xlast > ihi:
-                new.append((ihi + 1, xlast, tfn, bfn))
-        self.spans = new
+            ox0, ox1 = max(s.xs, ilo), min(s.xlast, ihi)
+            for ln in extra:
+                self._draw_only(ln, s, ox0, ox1)
+            if s.xs < ox0:
+                new.append(Span(s.xs, ox0 - 1, s.top, s.bot))
+            if s.xlast > ox1:
+                new.append(Span(ox1 + 1, s.xlast, s.top, s.bot))
+        self._finish(new, extra)
 
-    def fuse_seg(self, tfn, bfn, x1, x2, emit_t, emit_b, extra):
-        """Clip both of a seg's boundary lines to the span list, draw them,
-        and make them the new boundaries - all in one walk.
-
-        A line that was drawn is, by construction, inside the aperture on
-        every column it lit: there max(old_top, line) is just the line, so
-        the tighten is a copy rather than a piecewise max with a crossover
-        search.  Columns where the line ran past the far boundary close;
-        columns where it never reached the near one keep what they had.  The
-        bottom line then meets whatever the top line left behind, which is
-        what a second pass over the list would have shown it.
-        """
+    def fuse_seg(self, tln, bln, x1, x2, emit_t, emit_b, extra):
+        """Both of a seg's boundary lines against the span list, drawn and
+        made the new boundaries in one walk: the top line over each span's
+        overlap, the bottom line over what that leaves."""
         new = []
-        for (xlo, xlast, sp_t, sp_b) in self.spans:
-            ox0, ox1 = max(xlo, x1), min(xlast, x2)
+        for s in self.spans:
+            ox0, ox1 = max(s.xs, x1), min(s.xlast, x2)
             if ox0 > ox1:
-                new.append((xlo, xlast, sp_t, sp_b))
+                new.append(s)
                 continue
-            if xlo < ox0:
-                new.append((xlo, ox0 - 1, sp_t, sp_b))
-            ta, ba = ev(sp_t, ox0), ev(sp_b, ox0)
-            tb, bb = ev(sp_t, ox1), ev(sp_b, ox1)
-            self._draw_extras(extra, ox0, ox1, sp_t, sp_b, ta, ba, tb, bb)
-            for (a, b, tf, bf) in self._apply(tfn, ox0, ox1, sp_t, sp_b,
-                                              True, emit_t, ta, ba, tb, bb):
-                new.extend(self._apply(bfn, a, b, tf, bf, False, emit_b))
-            if xlast > ox1:
-                new.append((ox1 + 1, xlast, sp_t, sp_b))
-        # A fuse splits at the seg's own column range whether or not the
-        # boundaries changed there, so abutting pieces that ended up
-        # identical are coalesced again.
-        self.spans = []
-        for sp in new:
-            if self.spans:
-                p = self.spans[-1]
-                if p[1] + 1 == sp[0] and same_fn(p[2], sp[2]) and same_fn(p[3], sp[3]):
-                    self.spans[-1] = (p[0], sp[1], p[2], p[3])
-                    continue
-            self.spans.append(sp)
-
-    def _apply(self, fn, x0, x1, tfn, bfn, side, emit,
-               ta_=None, ba_=None, tb_=None, bb_=None):
-        """One line against one trapezoid piece: draw the visible run and
-        return the pieces that survive, the run carrying the line."""
-        if ta_ is None:
-            ta_, ba_ = ev(tfn, x0), ev(bfn, x0)
-            tb_, bb_ = ev(tfn, x1), ev(bfn, x1)
-        ya, yb = evl(fn, x0), evl(fn, x1)
-        t0, t1 = ge_range(ya - ta_, yb - tb_,
-                          (fn[0] - tfn[0], fn[1] - tfn[1]), x0, x1)
-        b0, b1 = ge_range(ba_ - ya, bb_ - yb,
-                          (bfn[0] - fn[0], bfn[1] - fn[1]), x0, x1)
-        r0, r1 = max(t0, b0), min(t1, b1)
-        if emit and r0 <= r1:
-            if r0 != x0:
-                ya, ta_, ba_ = evl(fn, r0), ev(tfn, r0), ev(bfn, r0)
-            if r1 != x1:
-                yb, tb_, bb_ = evl(fn, r1), ev(tfn, r1), ev(bfn, r1)
-            ea = ta_ if ya < ta_ else (ba_ if ya > ba_ else ya)
-            eb = tb_ if yb < tb_ else (bb_ if yb > bb_ else yb)
-            self.out.append((r0, ea, r1, eb))
-
-        above = lambda x: x < t0 or x > t1
-        pieces = []
-        if r0 <= r1:
-            if r0 > x0:
-                pieces.append((x0, r0 - 1, above(x0)))
-            pieces.append((r0, r1, None))
-            if r1 < x1:
-                pieces.append((r1 + 1, x1, above(x1)))
-        elif above(x0) == above(x1):
-            pieces.append((x0, x1, above(x0)))
-        else:
-            c = max(x0 + 1, min(x1, t0 if above(x0) else b0))
-            pieces.append((x0, c - 1, above(x0)))
-            pieces.append((c, x1, above(x1)))
-
-        out = []
-        for a, b, kind in pieces:
-            if kind is None:
-                nt, nb = (fn, bfn) if side else (tfn, fn)
-            elif kind == side:
-                nt, nb = tfn, bfn
-            else:
-                continue                    # the line ran past the far side
-            d = (nb[0] - nt[0], nb[1] - nt[1])
-            if evd(d, a) > 0 or evd(d, b) > 0:
-                out.append((a, b, nt, nb))
-        return out
-
-
-def evd(d, x):
-    """Evaluate a difference function (slope, intercept) at a column."""
-    if d[0] == 0:
-        return d[1]
-    return fp_mul8(d[0], x) + d[1]
-
-
-def pw(f, g, x0, x1, want_max):
-    """Piecewise max (or min) of two linear functions over the inclusive
-    column range [x0, x1].
-
-    Comparisons run on the difference f - g, so parallel boundaries - which
-    includes the common both-flat case - cost no multiply, and the crossover
-    is a single divide rather than a search.
-    """
-    d = (f[0] - g[0], f[1] - g[1])
-    d0 = evd(d, x0)
-    d1 = evd(d, x1)
-    if want_max:
-        if d0 >= 0 and d1 >= 0: return [(x0, x1, f)]
-        if d0 <= 0 and d1 <= 0: return [(x0, x1, g)]
-    else:
-        if d0 <= 0 and d1 <= 0: return [(x0, x1, f)]
-        if d0 >= 0 and d1 >= 0: return [(x0, x1, g)]
-    if d[0] == 0:
-        keep_f = (d0 >= 0) if want_max else (d0 <= 0)
-        return [(x0, x1, f if keep_f else g)]
-    cx = div8s(-d[1], d[0])
-    cx = max(x0 + 1, min(x1, cx))
-    dc = evd(d, cx)
-    fwins = (dc >= 0) if want_max else (dc <= 0)
-    if fwins:
-        cx += 1
-        if cx > x1:
-            return [(x0, x1, f)]
-    else:
-        if cx <= x0:
-            return [(x0, x1, g)]
-    first_f = (d0 > 0) if want_max else (d0 < 0)
-    if first_f:
-        return [(x0, cx - 1, f), (cx, x1, g)]
-    return [(x0, cx - 1, g), (cx, x1, f)]
-
-
-def cross_col(d, xa, xb):
-    """First column in [xa, xb] on the side where the linear d(x) >= 0.
-
-    Only reached when d disagrees in sign at the two ends, so exactly one
-    divide settles it; the column is then verified rather than trusted.
-    """
-    if d[0] == 0:
-        return None
-    xc = div8s(-d[1], d[0])
-    xc = max(xa, min(xb, xc))
-    if evd(d, xc) < 0:
-        if d[0] > 0:
-            xc += 1
-            if xc > xb:
-                return None
-        else:
-            xc -= 1
-            if xc < xa:
-                return None
-    return xc
-
-
-def ge_range(v0, v1, d, x0, x1):
-    """The sub-interval of [x0, x1] on which the linear d(x) is >= 0, given
-    its already-known values v0, v1 at the two ends.
-
-    The ends are compared as evaluated boundaries rather than as a difference,
-    which keeps the flat-boundary short circuit; the difference is only formed
-    when they disagree and a crossing has to be divided out.  d disagrees in
-    sign at most once, so the answer is one contiguous piece anchored at an
-    end.  Empty comes back as (x0+1, x0).
-    """
-    if v0 >= 0 and v1 >= 0:
-        return x0, x1
-    if v0 < 0 and v1 < 0:
-        return x0 + 1, x0
-    xc = cross_col(d, x0, x1)
-    if xc is None:
-        return x0 + 1, x0
-    return (xc, x1) if v0 < 0 else (x0, xc)
-
-
-def clip_to_trap(fn, xa, xb, tfn, bfn, ta_, ba_, tb_, bb_):
-    """Clip the line y = fn to the trapezoid, in column space.
-
-    The boundaries are evaluated once per span by the caller and shared by
-    every line clipped against it; evaluating them directly rather than as
-    differences from the line keeps the flat-boundary short circuit - well
-    over a third of them are flat - and leaves the exact aperture in hand, so
-    the endpoint clamp costs nothing extra.
-    """
-    ya, yb = evl(fn, xa), evl(fn, xb)
-
-    if ya < ta_ or yb < tb_:                       # y >= top(x)
-        if ya < ta_ and yb < tb_:
-            return None
-        xc = cross_col((fn[0] - tfn[0], fn[1] - tfn[1]), xa, xb)
-        if xc is None:
-            return None
-        if ya < ta_:
-            xa = xc
-            ya, ta_, ba_ = evl(fn, xa), ev(tfn, xa), ev(bfn, xa)
-        else:
-            xb = xc
-            yb, tb_, bb_ = evl(fn, xb), ev(tfn, xb), ev(bfn, xb)
-        if xa > xb:
-            return None
-
-    if ya > ba_ or yb > bb_:                       # y <= bot(x)
-        if ya > ba_ and yb > bb_:
-            return None
-        xc = cross_col((bfn[0] - fn[0], bfn[1] - fn[1]), xa, xb)
-        if xc is None:
-            return None
-        if ya > ba_:
-            xa = xc
-            ya, ta_, ba_ = evl(fn, xa), ev(tfn, xa), ev(bfn, xa)
-        else:
-            xb = xc
-            yb, tb_, bb_ = evl(fn, xb), ev(tfn, xb), ev(bfn, xb)
-        if xa > xb:
-            return None
-
-    ya = ta_ if ya < ta_ else (ba_ if ya > ba_ else ya)
-    yb = tb_ if yb < tb_ else (bb_ if yb > bb_ else yb)
-    return (xa, ya, xb, yb)
+            for ln in extra:
+                self._draw_only(ln, s, ox0, ox1)
+            if s.xs < ox0:
+                new.append(Span(s.xs, ox0 - 1, s.top, s.bot))
+            for p in self._apply(tln, s, ox0, ox1, True, emit_t):
+                new.extend(self._apply(bln, p, p.xs, p.xlast, False, emit_b))
+            if s.xlast > ox1:
+                new.append(Span(ox1 + 1, s.xlast, s.top, s.bot))
+        self._finish(new, list(extra) + [tln, bln])
 
 
 # ---------------------------------------------------------------------------
@@ -936,9 +932,9 @@ class Renderer:
                 solid = True
 
         if sx1 < sx2:
-            mk = lambda a, b: linfn(a, b, sx1, sx2)
+            mk = lambda a, b: Line(sx1, a + Y_BIAS, sx2, b + Y_BIAS)
         else:
-            mk = lambda a, b: linfn(b, a, sx2, sx1)
+            mk = lambda a, b: Line(sx2, b + Y_BIAS, sx1, a + Y_BIAS)
         extra, verts = [], []
         if solid:
             if ch > vz:

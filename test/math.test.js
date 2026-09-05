@@ -1,5 +1,6 @@
-const { ZHarness, s16, s24 } = require('/Users/ebenupton/doom_z80/tools/zcall.js');
-const z = new ZHarness('/Users/ebenupton/doom_z80/test/t_math.z80');
+const { ZHarness, s16, s24 } = require('../tools/zcall.js');
+const ROOT = require('path').resolve(__dirname, '..') + '/';
+const z = new ZHarness(ROOT + 'test/t_math.z80');
 console.log('image', z.size, 'bytes @', z.org.toString(16));
 let fail = 0, tested = 0;
 function chk(name, got, want, ctx) {

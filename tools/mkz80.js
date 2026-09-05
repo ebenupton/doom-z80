@@ -21,10 +21,19 @@ function build() {
   banks[0].set(fs.readFileSync(path.join(ROOT, "build/bank0.bin")), 0);
   banks[5].set(fs.readFileSync(path.join(ROOT, "build/nodebb.bin")), 0x6580 - 0x4000);
   banks[5].set(fs.readFileSync(path.join(ROOT, "build/l8.bin")), 0x6200 - 0x4000);
-  banks[2].set(fs.readFileSync(path.join(ROOT, "build/doom.bin")), 0x8400 - 0x8000);
+  banks[5].set(fs.readFileSync(path.join(ROOT, "build/atan.bin")), 0x5B00 - 0x4000);
+  { const b4 = fs.readFileSync(path.join(ROOT, "build/bank4.bin")); banks[4].set(b4, 0);
+    const img = fs.readFileSync(path.join(ROOT, "build/doom.bin")).subarray(0, -b4.length);   // the raw image carries a copy of bank 4 on its tail
+    banks[2].set(img.subarray(0, Math.min(img.length, 0xc000 - 0x8400)), 0x8400 - 0x8000);
+    if (img.length > 0xc000 - 0x8400) { banks[6].set(img.subarray(0xc000 - 0x8400), 0); banks[7].set(img.subarray(0xc000 - 0x8400), 0); } }
 
   const start = sym.get("START");
-  const hdr = Buffer.alloc(30 + 2 + 54);
+  // A v2 extended header (bonus length 23) with hardware byte 3 = 128K: this
+  // is the universally-recognised 128K .z80 encoding.  (A v3 header, length
+  // 54, would use hardware byte 4 for 128K, but some loaders - Tom Harte's
+  // CLK among them - follow the v2 numbering and reject byte 4, so v2 is the
+  // portable choice.)
+  const hdr = Buffer.alloc(30 + 2 + 23);
   // --- v1 header ---
   hdr[0] = 0;                        // A
   hdr[1] = 0;                        // F
@@ -44,14 +53,14 @@ function build() {
   hdr.writeUInt16LE(0, 25);          // IX
   hdr[27] = 0; hdr[28] = 0;          // IFF1 / IFF2 off; the engine sets IM2
   hdr[29] = 1;                       // IM 1 until setup_im2 runs
-  // --- v3 extension ---
-  hdr.writeUInt16LE(54, 30);         // extra header length
+  // --- v2 extension ---
+  hdr.writeUInt16LE(23, 30);         // bonus header length (v2)
   hdr.writeUInt16LE(start, 32);      // PC
-  hdr[34] = 4;                       // hardware: 128K
+  hdr[34] = 3;                       // hardware: 128K (v2 numbering)
   hdr[35] = 0x10;                    // $7FFD: bank 0 at $C000, 48K ROM
-  hdr[36] = 0;
-  hdr[37] = 0;
-  hdr[38] = 0;                       // $FFFD
+  hdr[36] = 0;                       // (unused)
+  hdr[37] = 0;                       // no 'hardware modify' bit
+  hdr[38] = 0;                       // $FFFD (AY latch)
 
   const parts = [hdr];
   for (let b = 0; b < 8; b++) {

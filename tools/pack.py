@@ -4,12 +4,16 @@
 Layout (see src/spec.inc for the matching EQUs):
 
   bank 0 ($C000, uncontended) - geometry, paged in for the whole of pass 1
-    $C000  VERTS   455 x 4   prescaled s16 x, s16 y
+    $C000  VP_OX/VP_OY/VP_PG  3 x 512  x lo, y lo, page nibble
     $C720  SEGS    644 x 16
     $EF60  SSEC    196 x 3   count, first_lo, first_hi
     $F1B0  SECFH   85 x s8
     $F210  SECCH   85 x s8
-    $F270  NODES   195 x 16
+    $F270  NODES   195 x 12  (+10: nid*8, the NODEBB index)
+    $FBA0  SSSEC   196 x u8
+    $FC70  EYEZ    85 x s8
+    $FCD0  VSDESC  455 x u8
+    $FEA0  VSEXPL  95 x 3
 
   bank 2 ($8000, uncontended) - code and hot tables
     $8800  RECIP_M8  256
@@ -22,9 +26,9 @@ Seg record:
     +0  v1_lo      +1  v2_lo      +2  vhi (bit0 = v1>>8, bit1 = v2>>8)
     +3  flags      +4  fh (s8)    +5  ch (s8)
     +6  bfh (s8)   +7  bch (s8)
-    +8  lx (s16)   +10 ly (s16)   back-face reference point, prescaled
+    +8  lx (s16)   +10 ly (s16)   back-face reference point, prescaled 8.8:
+    +14 lxf (u8)   +15 lyf (u8)   the integer parts, then the fractions
     +12 ldx (s8)   +13 ldy (s8)   direction, already signed for the seg's side
-    +14 spare
 
 Node record:
     +0  px (s16 world)  +2  py (s16 world)
@@ -44,18 +48,22 @@ O_SSEC = 0x2F60
 O_SECFH = 0x31B0
 O_SECCH = 0x3210
 O_NODES = 0x3270
-O_SSSEC = 0x3EA0        # sector index per subsector
-O_EYEZ = 0x3F70         # prescaled eye height per sector
+O_SSSEC = 0x3BA0        # sector index per subsector
+O_EYEZ = 0x3C70         # prescaled eye height per sector
+O_VSDESC = 0x3CD0       # vertex-span descriptors, one per vertex
+O_VSEXPL = 0x3EA0       # their explicit entries, (lo, hi, cont)
 
 SEG_STRIDE = 16
-NODE_STRIDE = 16
+NODE_STRIDE = 12
 
 # --- seg flags --------------------------------------------------------------
 SF_SOLID = 0x80
-SF_NOVT1 = 0x40
-SF_NOVT2 = 0x20
+SF_STEPUP_T = 0x40      # portal: bch > ch (the front ceiling edge is an aperture edge)
+SF_STEPUP_B = 0x20      # portal: bfh < fh
 SF_LDX0 = 0x10          # ldx == 0: back-face test needs no y term
 SF_LDY0 = 0x08          # ldy == 0
+SF_NEEDBT = 0x04        # portal: bch < ch (the back ceiling is the aperture's top)
+SF_NEEDBB = 0x02        # portal: bfh > fh
 
 BBOX_SHIFT = 2          # node bboxes are stored in quarter-prescale units
 
@@ -75,10 +83,13 @@ def build(md):
 
     # --- vertices ---------------------------------------------------------
     assert len(md.vx) <= 455
+    # the BBC port's page-split planes: a low byte per axis and a nibble
+    # holding each axis's page (+2, so the map's -512..511 fits two bits)
     for i, (x, y) in enumerate(zip(md.vx, md.vy)):
-        o = O_VERTS + i * 4
-        b0[o:o + 2] = s16b(x)
-        b0[o + 2:o + 4] = s16b(y)
+        assert -512 <= x < 512 and -512 <= y < 512, (i, x, y)
+        b0[O_VERTS + i] = x & 0xff
+        b0[O_VERTS + 0x200 + i] = y & 0xff
+        b0[O_VERTS + 0x400 + i] = (((x >> 8) + 2) & 3) | ((((y >> 8) + 2) & 3) << 2)
 
     # --- sectors ----------------------------------------------------------
     assert len(md.sec_fh) <= 85
@@ -99,11 +110,12 @@ def build(md):
         back = sg["back"]
         fh, ch = sg["fh"], sg["ch"]
         solid = back < 0
-        bfh = bch = 0
+        bfh, bch = fh, ch           # a solid seg's back pair aliases its front
         if not solid:
             bfh, bch = md.sec_fh[back], md.sec_ch[back]
             if bch <= fh or bfh >= ch:
                 solid = True
+                bfh, bch = fh, ch
 
         # Fold the seg's direction into the linedef delta so the runtime test
         # is a plain  ldy*(px-lx) - ldx*(py-ly) > 0.
@@ -114,10 +126,11 @@ def build(md):
         flags = 0
         if solid:
             flags |= SF_SOLID
-        if sg["no_vt1"]:
-            flags |= SF_NOVT1
-        if sg["no_vt2"]:
-            flags |= SF_NOVT2
+        else:
+            if bch < ch: flags |= SF_NEEDBT
+            if bfh > fh: flags |= SF_NEEDBB
+            if bch > ch: flags |= SF_STEPUP_T
+            if bfh < fh: flags |= SF_STEPUP_B
         if ldx == 0:
             flags |= SF_LDX0
         if ldy == 0:
@@ -132,6 +145,8 @@ def build(md):
         b0[o + 10:o + 12] = s16b(sg["ly"])
         b0[o + 12] = s8b(ldx)
         b0[o + 13] = s8b(ldy)
+        b0[o + 14] = sg["lxf"]
+        b0[o + 15] = sg["lyf"]
 
     # --- subsectors -------------------------------------------------------
     assert len(md.ssectors) <= 196
@@ -145,21 +160,46 @@ def build(md):
     # --- nodes ------------------------------------------------------------
     assert len(md.nodes) <= 195
     nodebb = bytearray(195 * 8)
-    for i, nd in enumerate(md.nodes):
-        o = O_NODES + i * NODE_STRIDE
-        b0[o:o + 2] = s16b(nd["x"])
-        b0[o + 2:o + 4] = s16b(nd["y"])
-        b0[o + 4] = s8b(nd["rdx"])
-        b0[o + 5] = s8b(nd["rdy"])
+    own_box = {}                        # node -> the box it occupies in its parent
+    for nd in md.nodes:
         for k in (0, 1):
             c = nd["child"][k]
-            b0[o + 6 + k * 2] = c & 0xff
-            b0[o + 7 + k * 2] = (c >> 8) & 0xff
+            if not (c & 0x8000):
+                own_box[c] = nd["bboxp"][k]
+    # The node records and the walk's tables live in bank 4 (walkdata.bin,
+    # see build_walkdata): only the policy bits are derived here
+    node_pol = bytearray(256)
+    for i, nd in enumerate(md.nodes):
+        # the BBC port's always-descend policy (adesc_policy.json: (node,
+        # side) pairs whose box check is skipped): $40 = side 0, $80 = side 1
+        # ...and its SAME-AS-PARENT serve in bits 4/5: a near child whose box
+        # is its parent's own box inherits the parent's verdict (the check
+        # that admitted the parent was on that very box)
+        bb = 0
+        if (i, 0) in md._dw.ADESC: bb |= 0x40
+        if (i, 1) in md._dw.ADESC: bb |= 0x80
         for k in (0, 1):
-            # ref.py has already rounded these outward to multiples of four.
+            if i in own_box and nd["bboxp"][k] == own_box[i]:
+                bb |= 0x10 << k
+        node_pol[i] = bb
+        for k in (0, 1):
             for j, v in enumerate(nd["bboxp"][k]):
                 assert v % 4 == 0, v
-                nodebb[i * 8 + k * 4 + j] = s8b(max(-128, min(127, v >> BBOX_SHIFT)))
+                nodebb[i * 8 + k * 4 + j] = max(0, min(255, (v >> BBOX_SHIFT) + 128))   # (unused now)
+    global _NODE_POL
+    _NODE_POL = bytes(node_pol)
+
+    # --- the vertex-span descriptors, straight from the BBC port's build ----
+    dw = md._dw
+    desc = list(dw.vspan_desc)
+    assert max((i for i, d in enumerate(desc) if d), default=0) < len(md.vx) + 1
+    for i in range(len(md.vx)):
+        b0[O_VSDESC + i] = desc[i] & 0xff
+    assert len(dw.vspan_expl) * 3 <= 0x4000 - O_VSEXPL
+    for i, (lo, hi, cont) in enumerate(dw.vspan_expl):
+        b0[O_VSEXPL + i * 3] = lo & 0xff
+        b0[O_VSEXPL + i * 3 + 1] = hi & 0xff
+        b0[O_VSEXPL + i * 3 + 2] = 1 if cont else 0
 
     # --- per-subsector sector, and the eye height it implies ---------------
     dw = md._dw
@@ -216,24 +256,113 @@ def build(md):
     tables[0x282:0x482] = atan         # $8A82  ATANEXP
     tables[0x482:0x583] = angtox       # $8C82
 
-    return b0, bytes(tables), bytes(nodebb), bytes(l8)
+    # the bank-5 angle tables, one image from $5B00: ANGTOX (256), the display
+    # list's pages (zero), then the atan planes at $6000/$6100
+    b5 = bytes(angtox[:256]) + bytes(0x400) + bytes(atan[0::2]) + bytes(atan[1::2])
+    return b0, bytes(tables), bytes(nodebb), bytes(l8), b5
+
+
+def build_objects(md):
+    """Bank 4 data at OBJ_DATA: the static objects' planes (x lo/hi, y lo/hi,
+    home subsector, kind, top, floor - the BBC's OBJ_OX/OY/PG unfolded to
+    s16 since the Z80 rotates s16 coordinates), the per-subsector bitmap
+    and per-octet first-index run table, then at +$200 the 768-byte art
+    template blob exactly as the BBC packer builds it."""
+    dw = md._dw
+    objs = dw.fp_objects
+    n = len(objs)
+    N_OBJ = 50
+    assert n == N_OBJ, f"{n} objects; spec.inc says N_OBJ = {N_OBJ}"
+    bits_len = (len(md.ssectors) + 7) // 8
+    assert bits_len == 25
+    od = bytearray(0x200 + 768)
+    bits = 8 * n
+    run8 = bits + bits_len
+    od[run8:run8 + bits_len] = b"\xff" * bits_len
+    for i, o in enumerate(objs):
+        x, y = o["x"], o["y"]
+        assert i == 0 or objs[i - 1]["ss"] <= o["ss"], "planes must be ss-sorted"
+        for pl, v in enumerate((x & 0xff, (x >> 8) & 0xff, y & 0xff, (y >> 8) & 0xff,
+                                o["ss"], o["asp"], o["zt"] & 0xff, o["zb"] & 0xff)):
+            od[pl * n + i] = v
+        od[bits + (o["ss"] >> 3)] |= 1 << (o["ss"] & 7)
+        if od[run8 + (o["ss"] >> 3)] == 0xff:
+            od[run8 + (o["ss"] >> 3)] = i
+    L = dw.packed_layout
+    assert L["art_len"] == 768
+    od[0x200:0x200 + 768] = bytes(dw.packed_rom_main[L["off_obj_art"]:L["off_obj_art"] + 768])
+    print(f"  objects:     {n} billboards, {bits_len} B bitmap, 768 B art")
+    return bytes(od)
+
+
+def build_walkdata(md):
+    """Bank 4 from NODES4 ($D800) up: the node records (stride 10: px, py
+    s16 world; rdx, rdy s8; child0, child1 u16), the BBC port's bounding-box
+    planes verbatim (its packed_bbox_table: field*$400 + hi*$200 + side*$100
+    + node, hi bytes offset-binned), its 1025-entry VATOX, L8, the 12-bit
+    ATANEXP planes, the corner-phi memo seed (KDXH plane $80 = never
+    written) and the node policy plane."""
+    import json as _json
+    dw = md._dw
+    NODES4, BBP, VATOX, L8, AE_LO, AE_HI, CPM, ND_POL, BCA_WS, END = (
+        0xD800, 0xE000, 0xF000, 0xF500, 0xF600, 0xF700, 0xF800, 0xFB00, 0xFC00, 0xFC40)
+    w = bytearray(END - NODES4)
+    def at(a): return a - NODES4
+    for i, nd in enumerate(md.nodes):
+        o = at(NODES4) + i * 10
+        w[o:o + 2] = s16b(nd["x"])
+        w[o + 2:o + 4] = s16b(nd["y"])
+        w[o + 4] = s8b(nd["rdx"])
+        w[o + 5] = s8b(nd["rdy"])
+        for k in (0, 1):
+            c = nd["child"][k]
+            w[o + 6 + k * 2] = c & 0xff
+            w[o + 7 + k * 2] = (c >> 8) & 0xff
+    assert len(md.nodes) * 10 <= BBP - NODES4
+    bt = bytes(dw.packed_bbox_table)
+    assert len(bt) == 4096
+    w[at(BBP):at(BBP) + 4096] = bt
+    import angle_bbox as A                      # the BBC's own module (ref.py put its dir on the path)
+    ft = _json.load(open(os.path.join(ref.REF_DIR, "tools", "atanexp_tables.json")))
+    assert ft["EPSILON"] == 12 and ft["TA0"] == 0 and ft["ATANEXP"][0] == 512 and max(ft["ATANEXP"]) <= 512
+    for k in range(1025):
+        c = (A._vatox_lo[k + 512] + A._vatox_hi[k + 512]) // 2
+        w[at(VATOX) + k] = max(0, min(255, c))
+    assert w[at(VATOX)] == 0 and w[at(VATOX) + 1024] == 255
+    for i in range(256):
+        w[at(L8) + i] = ft["L8"][i] & 0xff
+        w[at(AE_LO) + i] = ft["ATANEXP"][i] & 0xff
+        w[at(AE_HI) + i] = (ft["ATANEXP"][i] >> 8) & 0xff
+    assert list(ft["L8"]) == list(ref._L8[:256])
+    w[at(CPM) + 0x80:at(CPM) + 0x100] = b"\x80" * 128
+    w[at(ND_POL):at(ND_POL) + 256] = _NODE_POL
+    # the octant compose (view.s pa_base_hi / pa_sign): base hi | sign << 7
+    w[at(BCA_WS) + 0x10:at(BCA_WS) + 0x18] = bytes([0x84, 0x00, 0x0C, 0x80, 0x04, 0x88, 0x8C, 0x08])
+    print(f"  walkdata:    {len(md.nodes)} nodes, 4 KB bbox planes, VATOX, L8/AE, memo, policy ({len(w)} B)")
+    return bytes(w)
 
 
 def main():
     md = ref.load_from_reference()
-    b0, tables, nodebb, l8 = build(md)
+    b0, tables, nodebb, l8, atan = build(md)
     outdir = os.path.join(os.path.dirname(os.path.abspath(__file__)), "..", "build")
     os.makedirs(outdir, exist_ok=True)
 
-    used = O_EYEZ + len(md.sec_fh)
+    used = O_VSEXPL + 3 * len(md._dw.vspan_expl)
     with open(os.path.join(outdir, "bank0.bin"), "wb") as f:
         f.write(b0)
     with open(os.path.join(outdir, "tables.bin"), "wb") as f:
         f.write(tables)
     with open(os.path.join(outdir, "nodebb.bin"), "wb") as f:
         f.write(nodebb)
+    with open(os.path.join(outdir, "atan.bin"), "wb") as f:   # $5B00 ANGTOX .. $6100 AE_HI
+        f.write(atan)
     with open(os.path.join(outdir, "l8.bin"), "wb") as f:
         f.write(l8)
+    with open(os.path.join(outdir, "objdata.bin"), "wb") as f:
+        f.write(build_objects(md))
+    with open(os.path.join(outdir, "walkdata.bin"), "wb") as f:
+        f.write(build_walkdata(md))
 
     sx, sy, sa, eye = md.start
     meta = {
@@ -266,6 +395,8 @@ def main():
         f.write(f"MAP_CENTER_Y    EQU     {md.map_center[1]}\n")
     print(f"start x={sx} y={sy} angle={sa} px88={st['px88']} "
           f"py88={st['py88']} vz={st['vz']}")
+    print(f"vspan: {sum(1 for d in md._dw.vspan_desc[:len(md.vx)] if d)} vertices, "
+          f"{len(md._dw.vspan_expl)} explicit")
 
 
 if __name__ == "__main__":

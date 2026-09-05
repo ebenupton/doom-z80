@@ -1,0 +1,2825 @@
+; ---------------------------------------------------------------------------
+; The span clipper: a transcription of the BBC port's shipping 6502 clipper
+; (src/clip/{pool,query,mark_solid,interp,dcl,dcl_s16,fused,fusedw,tfr}.s),
+; compare for compare - the Spectrum port matches that engine's pixels, not
+; the Python model it grew from.
+;
+; The visible region is a sorted linked list of spans, each a half-open
+; column range [xs, xe) with a top line and a bottom line: y at two anchor
+; columns (xlo and xlo + den), and the extremes of the two values, outer
+; and inner.  Every y is a byte biased by Y_BIAS: rows [0, 159] are
+; [48, 207].  Column 255 does not exist (the screen span is [0, 255)).
+;
+; Record (SLOT_SIZE 16, IX/IY addressed; NEXT = 0 ends the list):
+;   +0 next(2)  +2 xs  +3 xe
+;   +4 txlo  +5 tden  +6 tl  +7 tr       the top line
+;   +8 bxlo  +9 bden  +10 bl  +11 br     the bottom line
+;   +12 ot  +13 it  +14 ob  +15 ib       min/max(tl,tr), max/min(bl,br)
+;
+; Lines arrive as s16 (lc_x1/lc_y1 - lc_x2/lc_y2, rows biased), are clipped
+; to the u8 box by dcl_s16 (s16 interpolation, half away from zero), and
+; walked in bytes by draw_clipped_line, which plots the visible runs.  A
+; portal's aperture edges go through the FUSED walker instead: the same
+; clip, but each visible run is applied to the spans it covers as the new
+; boundary (the whole line, a pure copy) as soon as it is plotted.
+; ---------------------------------------------------------------------------
+
+; ===========================================================================
+; Arithmetic
+; ===========================================================================
+
+; --- udiv16_8 : HL / C -> A = the quotient (fits a byte: H < C), L = the
+; remainder
+udiv16_8:
+                ld      a,h
+                call    div8b                   ; L = q, A = r
+                ld      c,l
+                ld      l,a
+                ld      a,c
+                ret
+
+; --- umul_round_div : A = |dy|, B = the offset, C = den
+;     -> A = (off * |dy| + den/2) / den                    (umul_round_div)
+umul_round_div:
+                ld      h,a
+                ld      l,b
+                push    bc
+                MUL_U8_BODY                     ; HL = off * |dy|
+                pop     bc
+                ld      a,c
+                srl     a
+                add     a,l
+                ld      l,a
+                jr      nc,urd_1
+                inc     h
+urd_1:          jp      udiv16_8
+
+; --- interp_store : A = x -> A = y on the line in the workspace
+; (iw_x0, iw_den, iw_y0, iw_y1): y0 at the anchor, y1 at anchor + den, in
+; between (off * |dy| + den/2) / den taken in the line's direction.  IX,
+; IY preserved.                                              (interp_store)
+interp_store:
+                ld      hl,iw_x0
+                sub     (hl)                    ; the offset
+                jr      z,is_y0
+                inc     hl                      ; iw_den
+                cp      (hl)
+                jr      z,is_y1
+                ld      b,a
+                ld      c,(hl)
+                inc     hl                      ; iw_y0
+                ld      e,(hl)
+                inc     hl                      ; iw_y1
+                ld      a,(hl)
+                sub     e
+                jr      z,is_ye
+                jr      c,is_desc
+                call    umul_round_div
+                ld      hl,iw_y0
+                add     a,(hl)
+                ret
+is_desc:        neg
+                call    umul_round_div
+                ld      e,a
+                ld      a,(iw_y0)
+                sub     e
+                ret
+is_y0:          ld      a,(iw_y0)
+                ret
+is_y1:          ld      a,(iw_y1)
+                ret
+is_ye:          ld      a,e
+                ret
+
+; the workspace staged from the u8 line (line_interp_store), the walker's
+; line, or a span's top or bottom line
+stage_line_ws:
+                ld      a,(lc_x1)
+                ld      (iw_x0),a
+                ld      a,(cd_dx)
+                ld      (iw_den),a
+                ld      a,(lc_y1)
+                ld      (iw_y0),a
+                ld      a,(lc_y2)
+                ld      (iw_y1),a
+                ret
+stage_fwl_ws:
+                ld      a,(fwl_xl)
+                ld      (iw_x0),a
+                ld      a,(fwl_dx)
+                ld      (iw_den),a
+                ld      a,(fwl_yl)
+                ld      (iw_y0),a
+                ld      a,(fwl_yr)
+                ld      (iw_y1),a
+                ret
+stage_top_ws:                                   ; IX = the span
+                ld      a,(ix+SP_TXLO)
+                ld      (iw_x0),a
+                ld      a,(ix+SP_TDEN)
+                ld      (iw_den),a
+                ld      a,(ix+SP_TL)
+                ld      (iw_y0),a
+                ld      a,(ix+SP_TR)
+                ld      (iw_y1),a
+                ret
+stage_bot_ws:
+                ld      a,(ix+SP_BXLO)
+                ld      (iw_x0),a
+                ld      a,(ix+SP_BDEN)
+                ld      (iw_den),a
+                ld      a,(ix+SP_BL)
+                ld      (iw_y0),a
+                ld      a,(ix+SP_BR)
+                ld      (iw_y1),a
+                ret
+
+; --- line_y8 : A = x -> A = the u8 line's y there   (dcl_line_y_at_a)
+line_y8:
+                push    af
+                call    stage_line_ws
+                pop     af
+                jp      interp_store
+; --- cb_top_at / cb_bot_at : A = x -> the span's boundary there
+cb_top_at:
+                push    af
+                call    stage_top_ws
+                pop     af
+                jp      interp_store
+cb_bot_at:
+                push    af
+                call    stage_bot_ws
+                pop     af
+                jp      interp_store
+
+; --- dcl_boundary_ix : the column where the line crosses a boundary, from
+; the distances |d1| (tmp0) at cb_cx1 and |d2| (tmp1) at cb_cx2, on the
+; other side: A = 1 rounds up (clipping the left end), 0 down.
+;   ix = cx1 + (cx2 - cx1) * |d1| / (|d1| + |d2|), clamped to cx2
+; A nine-bit denominator is halved with the product; the floor arm rounds
+; the halved denominator up when the dropped bit was set.
+dcl_boundary_ix:
+                ld      (bix_ceil),a
+                ld      a,(cb_cx2)
+                ld      hl,cb_cx1
+                sub     (hl)
+                jr      z,bix_cx1               ; dx = 0
+                ld      b,a
+                ld      a,(tmp0)
+                or      a
+                jr      z,bix_cx1               ; |d1| = 0: at cx1
+                ld      h,a
+                ld      l,b
+                MUL_U8_BODY                     ; HL = dx * |d1|
+                ex      de,hl                   ; DE = the product
+                ld      a,(tmp0)
+                ld      c,a
+                ld      a,(tmp1)
+                add     a,c                     ; den, nine bits
+                jr      nc,bix_norm
+                rr      a                       ; den >> 1, carry = the dropped bit
+                ld      c,a
+                sbc     a,a
+                ld      l,a                     ; L = -1 when a bit was dropped
+                ld      a,(bix_ceil)
+                or      a
+                jr      nz,bix_half             ; the ceiling arm keeps the floored den
+                ld      a,l
+                or      a
+                jr      z,bix_half
+                inc     c                       ; the floor arm rounds den up
+bix_half:       srl     d
+                rr      e                       ; the product too
+                jr      bix_norm2
+bix_norm:       ld      c,a
+bix_norm2:      ld      a,(bix_ceil)
+                or      a
+                jr      z,bix_div
+                ld      a,c
+                dec     a
+                add     a,e                     ; + den - 1
+                ld      e,a
+                jr      nc,bix_div
+                inc     d
+bix_div:        ex      de,hl
+                call    udiv16_8                ; A = q
+                ld      hl,cb_cx1
+                add     a,(hl)
+                ld      hl,cb_cx2
+                cp      (hl)
+                ret     c
+                ld      a,(hl)                  ; clamped to cx2
+                ret
+bix_cx1:        ld      a,(cb_cx1)
+                ret
+
+; --- The wide arithmetic, for clipping a line's s16 ends to the box ------
+; interp_s16 : HL = x, IX -> (x0, y0, x1, y1) s16 -> HL = y, rounded half
+; away from zero with |offset|, |den| and |dy|             (s16_interp)
+interp_s16:
+                ld      e,(ix+0)
+                ld      d,(ix+1)
+                or      a
+                sbc     hl,de
+                ld      (i_off),hl              ; x - x0
+                ld      l,(ix+4)
+                ld      h,(ix+5)
+                or      a
+                sbc     hl,de                   ; x1 - x0
+                ld      a,h
+                or      l
+                jp      z,is16_y0
+                bit     7,h
+                jr      z,is16_dp
+                call    neg_hl
+                ld      (i_den),hl
+                ld      hl,(i_off)
+                call    neg_hl
+                ld      (i_off),hl
+                jr      is16_dy
+is16_dp:        ld      (i_den),hl
+is16_dy:        ld      hl,(i_off)
+                ld      a,h
+                or      l
+                jp      z,is16_y0               ; at the first anchor
+                ld      de,(i_den)
+                or      a
+                sbc     hl,de
+                jp      z,is16_y1               ; at the second
+                ld      l,(ix+6)
+                ld      h,(ix+7)
+                ld      e,(ix+2)
+                ld      d,(ix+3)
+                or      a
+                sbc     hl,de                   ; y1 - y0
+                jr      z,is16_y0               ; level
+                xor     a
+                ld      (i_neg),a
+                bit     7,h
+                jr      z,is16_dyp
+                call    neg_hl
+                ld      a,1
+                ld      (i_neg),a
+is16_dyp:       ld      (i_dy),hl
+                ; the byte tier (the BBC port's si_general u8 path): every
+                ; operand a byte -> one 8x8 and a 16/8, the quotient a byte
+                ld      a,h
+                ld      hl,(i_off)
+                or      h
+                ld      hl,(i_den)
+                or      h
+                jr      nz,is16_wide
+                ld      a,(i_dy)
+                ld      hl,(i_off)
+                ld      h,a                     ; H = |dy|, L = |off| (< den)
+                call    mul_u8                  ; HL = |off| * |dy|
+                ld      a,(i_den)
+                ld      c,a
+                srl     a
+                add     a,l
+                ld      l,a
+                jr      nc,is16_b1
+                inc     h
+is16_b1:        call    udiv16_8                ; A = q (off < den keeps it a byte)
+                ld      l,a
+                ld      h,0
+                jr      is16_q
+is16_wide:
+                ld      bc,(i_off)
+                ld      de,(i_dy)
+                call    umul16                  ; DE:HL = |off| * |dy|
+                ld      bc,(i_den)
+                srl     b
+                rr      c
+                add     hl,bc
+                jr      nc,is16_2
+                inc     de
+is16_2:         ld      bc,(i_den)
+                call    udiv32_16               ; HL = q
+is16_q:         ld      e,(ix+2)
+                ld      d,(ix+3)
+                ld      a,(i_neg)
+                or      a
+                jr      nz,is16_fall
+                add     hl,de
+                ret
+is16_fall:      ex      de,hl
+                or      a
+                sbc     hl,de
+                ret
+is16_y0:        ld      l,(ix+2)
+                ld      h,(ix+3)
+                ret
+is16_y1:        ld      l,(ix+6)
+                ld      h,(ix+7)
+                ret
+
+; s16_at : HL = the target on the free axis -> HL = the s16 result, A = it
+; clamped to a byte
+s16_at:
+                ld      ix,lci
+                call    interp_s16
+clamp8:         bit     7,h
+                jr      nz,c8_lo
+                ld      a,h
+                or      a
+                jr      nz,c8_hi
+                ld      a,l
+                ret
+c8_lo:          xor     a
+                ret
+c8_hi:          ld      a,255
+                ret
+
+umul16:                                         ; BC * DE -> DE:HL
+                ; the 8x8 partials (arith.s si_general), zero halves skipped
+                ld      (um_bc),bc
+                ld      (um_de),de
+                ld      h,c
+                ld      l,e
+                MUL_U8_BODY                     ; C * E
+                ld      (um_r0),hl
+                ld      hl,0
+                ld      (um_r2),hl
+                ld      a,(um_bc+1)             ; B
+                or      a
+                jr      z,um_nob
+                ld      h,a
+                ld      a,(um_de)
+                ld      l,a
+                MUL_U8_BODY                     ; B * E, at byte 1
+                call    um_add1
+                ld      a,(um_de+1)             ; D
+                or      a
+                jr      z,um_nod
+                ld      h,a
+                ld      a,(um_bc+1)
+                ld      l,a
+                MUL_U8_BODY                     ; B * D, at byte 2
+                ld      de,(um_r2)
+                add     hl,de
+                ld      (um_r2),hl
+um_nob:         ld      a,(um_de+1)             ; D
+                or      a
+                jr      z,um_nod
+                ld      h,a
+                ld      a,(um_bc)
+                ld      l,a
+                MUL_U8_BODY                     ; C * D, at byte 1
+                call    um_add1
+um_nod:         ld      hl,(um_r0)
+                ld      de,(um_r2)
+                ret
+um_add1:        ld      a,(um_r0+1)
+                add     a,l
+                ld      (um_r0+1),a
+                ld      a,(um_r2)
+                adc     a,h
+                ld      (um_r2),a
+                ld      a,(um_r2+1)
+                adc     a,0
+                ld      (um_r2+1),a
+                ret
+
+udiv32_16:                                      ; DE:HL / BC -> HL = q
+                ; DE < BC (else q = 0, arith.s's no_u16_quot), BC < $8000.
+                ; The BBC port's tiers: eight steps when the top three bytes
+                ; fall short of the divisor (the quotient is a byte), else
+                ; sixteen.  Each step shifts a dividend bit into the
+                ; remainder and collects the borrow through RLA; the
+                ; complement of the borrows is the quotient.
+                ld      a,d
+                cp      b
+                jr      c,ud_ok
+                jp      nz,ud_zero
+                ld      a,e
+                cp      c
+                jp      nc,ud_zero
+ud_ok:          ld      a,d
+                or      a
+                jp      nz,ud_16
+                ld      a,e
+                cp      b
+                jr      c,ud_8
+                jp      nz,ud_16
+                ld      a,h
+                cp      c
+                jp      nc,ud_16
+ud_8:           ld      a,l                     ; the byte to bring in
+                ld      l,h
+                ld      h,e                     ; the remainder, E:H
+                or      a
+                DUP     8
+                rla
+                adc     hl,hl
+                sbc     hl,bc
+                jr      nc,1F
+                add     hl,bc
+                scf
+1:
+                EDUP
+                rla
+                cpl
+                ld      l,a
+                ld      h,0
+                ret
+ud_16:          ex      de,hl                   ; HL = the remainder, DE = the low word
+                ld      a,d
+                or      a
+                DUP     8
+                rla
+                adc     hl,hl
+                sbc     hl,bc
+                jr      nc,1F
+                add     hl,bc
+                scf
+1:
+                EDUP
+                rla
+                cpl
+                ld      d,a                     ; q hi
+                ld      a,e
+                DUP     8
+                rla
+                adc     hl,hl
+                sbc     hl,bc
+                jr      nc,1F
+                add     hl,bc
+                scf
+1:
+                EDUP
+                rla
+                cpl
+                ld      e,a                     ; q lo
+                ex      de,hl
+                ret
+ud_zero:        ld      hl,0
+                ret
+
+; cl_range : HL = lo, DE = hi (s16) -> B = max(0, lo), C = min(255, hi) as
+; bytes, carry set when the range [B, C) is not empty
+cl_range:
+                bit     7,h
+                jr      z,cr_1
+                ld      hl,0
+cr_1:           ld      a,h
+                or      a
+                ret     nz                      ; lo >= 256 (carry clear)
+                ld      b,l
+                bit     7,d
+                ret     nz                      ; hi < 0
+                ld      a,d
+                or      a
+                jr      z,cr_2
+                ld      e,RENDER_W-1
+cr_2:           ld      c,e
+                ld      a,b
+                cp      c
+                ret                             ; carry: ilo < ihi
+
+; ===========================================================================
+; The pool                                                          (pool.s)
+; ===========================================================================
+; sp_reset : the screen span, the free chain behind it
+sp_reset:
+                ld      hl,SPANS_BASE+SLOT_SIZE
+                ld      (sp_free),hl
+                ld      de,SPANS_BASE+SLOT_SIZE*2
+                ld      bc,SLOT_SIZE
+                ld      a,SPANS_MAX-2
+sr_l:           ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                dec     hl
+                add     hl,bc
+                ex      de,hl
+                add     hl,bc
+                ex      de,hl
+                dec     a
+                jr      nz,sr_l
+                ld      (hl),0
+                inc     hl
+                ld      (hl),0
+                ld      hl,SPANS_BASE
+                ld      (sp_head),hl
+                ld      de,SPANS_BASE
+                ld      hl,sr_init
+                ld      bc,SLOT_SIZE
+                ldir
+                xor     a
+                ld      (fw_mode),a
+                ld      (fw_touch),a
+                ret
+sr_init:        DW      0                       ; next
+                DB      0,RENDER_W-1            ; [0, 255)
+                DB      0,255,Y_BIAS,Y_BIAS     ; the top: 48 at 0 and 255
+                DB      0,255,Y_BIAS+RENDER_H-1,Y_BIAS+RENDER_H-1
+                DB      Y_BIAS,Y_BIAS,Y_BIAS+RENDER_H-1,Y_BIAS+RENDER_H-1
+
+; sp_next : IX -> its successor in DE, Z when there is none
+                MACRO   SP_NEXT_DE
+                ld      e,(ix+SP_NEXT)
+                ld      d,(ix+SP_NEXT+1)
+                ld      a,e
+                or      d
+                ENDM
+                MACRO   IX_FROM_DE
+                ld      ixl,e
+                ld      ixh,d
+                ENDM
+
+; ===========================================================================
+; sp_hasgap : HL = lo, DE = hi (s16, half-open) -> carry when a live span
+; overlaps [max(0, lo), min(255, hi)).  One cached span answers the common
+; repeat.                                                          (query.s)
+; ===========================================================================
+sp_hasgap:
+                call    cl_range                ; B = ilo, C = ihi
+                ret     nc
+; hg_u8 : B = ilo, C = ihi already bytes with ilo < ihi (the box checks)
+hg_u8:                                          ; the walk in HL (free here);
+                ld      hl,(sp_head)            ; B = ilo, C = ihi ride
+                ; BBC 62a60e7: the has_gap candidate cache is retired - a miss
+                ; walks only ~1.8 spans, so the probe cost about what it saved
+                ; and the store ran every call (costlier still on the Z80)
+hg_l:           ld      a,h
+                or      l
+                ret     z                       ; (carry clear)
+                ld      a,l
+                or      SP_XE
+                ld      l,a                     ; -> XE
+                ld      a,(hl)
+                cp      b
+                jr      z,hg_n
+                jr      c,hg_n                  ; xe <= lo: wholly left
+                ld      a,l
+                and     $F0
+                ld      l,a                     ; -> base
+                inc     l
+                inc     l                       ; -> XS
+                ld      a,(hl)
+                cp      c                       ; carry: xs < hi, a gap
+                ret
+hg_n:           ld      a,l
+                and     $F0
+                ld      l,a                     ; -> base (SP_NEXT)
+                ld      a,(hl)
+                ld      e,a
+                inc     l
+                ld      h,(hl)
+                ld      l,e                     ; HL -> next span
+                jr      hg_l
+
+; ===========================================================================
+; sp_marksolid : HL = lo, DE = hi (s16): the columns [lo, hi) become solid.
+; Lazy: the spans' lines are copied verbatim across a split.
+;                                                             (mark_solid.s)
+; ===========================================================================
+sp_marksolid:
+                call    cl_range
+                ret     nc
+                ld      a,b
+                ld      (cl_ilo),a
+                ld      a,c
+                ld      (cl_ihi),a
+ms_u8:                                          ; B = ilo, C = ihi
+                ; HL walks the slots (16-aligned: a field is L's low nibble,
+                ; the link at +0); DE is the successor when a slot goes
+                ld      hl,0
+                ld      (sp_prev),hl
+                ld      hl,(sp_head)
+ms_loop:        ld      a,h
+                or      l
+                ret     z
+                ld      a,l
+                or      SP_XE
+                ld      l,a
+                ld      a,(hl)                  ; xe
+                cp      b
+                jr      z,ms_adv
+                jr      c,ms_adv                ; xe <= lo: wholly left
+                dec     l
+                ld      a,(hl)                  ; xs
+                cp      c
+                ret     nc                      ; xs >= hi: past the range
+                cp      b
+                jr      c,ms_has_left           ; xs < lo
+                inc     l
+                ld      a,c
+                cp      (hl)
+                jr      nc,ms_free              ; hi >= xe: the whole span
+                dec     l
+                ld      (hl),c                  ; [hi, xe) survives
+                ret
+ms_free:        ; unlink it and give it back
+                ld      a,l
+                and     $F0
+                ld      l,a                     ; the slot
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)                  ; DE = the successor
+                dec     l
+                push    de
+                ld      de,(sp_free)
+                ld      (hl),e
+                inc     l
+                ld      (hl),d
+                dec     l
+                ld      (sp_free),hl
+                pop     de
+                ld      hl,(sp_prev)
+                ld      a,h
+                or      l
+                jr      z,ms_free_head
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                jr      ms_cont
+ms_free_head:   ld      (sp_head),de
+ms_cont:        ex      de,hl
+                jr      ms_loop
+ms_adv:         ld      a,l
+                and     $F0
+                ld      l,a
+                ld      (sp_prev),hl
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)
+                ex      de,hl
+                jr      ms_loop
+ms_has_left:
+                inc     l                       ; -> xe
+                ld      a,c
+                cp      (hl)
+                jr      nc,ms_left_only         ; hi >= xe: [xs, lo) survives
+                ; [xs, lo) and [hi, xe): a fresh slot takes the right part
+                ld      de,(sp_free)
+                ld      a,d
+                or      e
+                jr      z,ms_left_only          ; the pool is spent
+                ld      a,(hl)                  ; the old xe
+                ld      (hl),b                  ; this: xe = lo
+                ex      af,af'
+                ld      a,l
+                and     $F0
+                ld      l,a                     ; HL = this, DE = the new slot
+                push    bc
+                ld      a,(de)                  ; the free list moves on
+                ld      c,a
+                inc     e
+                ld      a,(de)
+                ld      b,a
+                dec     e
+                ld      (sp_free),bc
+                ld      c,(hl)                  ; new.next = this.next
+                inc     l
+                ld      b,(hl)
+                ld      (hl),d                  ; this.next = new
+                dec     l
+                ld      (hl),e
+                ld      a,c
+                ld      (de),a
+                inc     e
+                ld      a,b
+                ld      (de),a
+                pop     bc
+                inc     e                       ; -> XS
+                ld      a,c
+                ld      (de),a                  ; new.xs = hi
+                inc     e
+                ex      af,af'
+                ld      (de),a                  ; new.xe = the old xe
+                inc     e                       ; -> TXLO
+                ld      a,l
+                or      SP_TXLO
+                ld      l,a
+                DUP     SLOT_SIZE-SP_TXLO
+                ld      a,(hl)                  ; the lines and extremes
+                ld      (de),a
+                inc     l
+                inc     e
+                EDUP
+                ret
+ms_left_only:
+                ld      (hl),b                  ; xe = lo
+                jr      ms_adv
+; ===========================================================================
+; The display list
+; ===========================================================================
+; dl_emit : A = x0, B = y0, C = x1, D = y1 (screen rows): plotted at once.
+; The rasteriser's bank is paged in around the plot and the caller's bank
+; (cur_port, kept by set_page) put back, both from here in main RAM, so a
+; bank-4 caller's return address is mapped again by the time it is used.
+; OUT (n),A reaches $7FFD because the 128's paging port decodes only A15
+; and A1, and the byte written never has bit 7 set.  Clobbers BC, DE, HL,
+; IY, AF' (plot_line's).  BEEB NOTE: the display list this replaces cost
+; ~250 T a line (emit + the render loop); this is ~95.
+dl_emit:
+                ld      e,c
+                ld      c,a
+                ld      a,(rast_port)
+                out     (PORT_7FFD & 255),a
+                call    plot_line
+                ld      a,(cur_port)
+                out     (PORT_7FFD & 255),a
+                ret
+
+; dcl_emit_segment : the run (ss_x, ss_y) - (ox1, tmp0), unless it is a
+; point
+dcl_emit_segment:
+                ld      a,(ss_x)
+                ld      hl,ox1
+                cp      (hl)
+                jr      nz,des_go
+                ld      a,(ss_y)
+                ld      hl,tmp0
+                cp      (hl)
+                ret     z
+des_go:         ld      a,(ss_y)
+                sub     Y_BIAS
+                ld      b,a
+                ld      a,(tmp0)
+                sub     Y_BIAS
+                ld      d,a
+                ld      a,(ox1)
+                ld      c,a
+                ld      a,(ss_x)
+                cp      c
+                jp      nz,dl_emit
+                ld      a,b                     ; a vertical goes out top first,
+                cp      d                       ; as the 6502's des_to_v orders it
+                ld      a,c
+                jp      c,dl_emit
+                ld      e,b
+                ld      b,d
+                ld      d,e
+                jp      dl_emit
+
+; ===========================================================================
+; draw_clipped_line : the u8 line lc_x1/lc_y1 - lc_x2/lc_y2 (low bytes),
+; x1 <= x2, clipped to the spans and plotted as runs.  Read-only.  (dcl.s)
+; ===========================================================================
+draw_clipped_line:
+                ; The common line sits wholly inside one span with its rows
+                ; inside the span's inner extremes: it goes out as it is,
+                ; the very segment the walk below would build (ox0 = xl,
+                ; ox1 = xr, the run closed by the exit check).  The walk
+                ; takes over from that span otherwise.
+                ld      a,(lc_x2)
+                ld      hl,lc_x1
+                sub     (hl)
+                jp      z,dcl_vertical
+                ld      (cd_dx),a
+                ld      ix,(sp_head)
+                ld      a,ixh
+                or      ixl
+                ret     z
+                ld      c,(hl)                  ; C = xl
+                ld      a,(lc_x2)
+                ld      b,a                     ; B = xr
+dcl_fx:         ld      a,(ix+SP_XE)
+                cp      c
+                jr      z,dcl_fn
+                jr      c,dcl_fn                ; xe <= xl: wholly left
+                ld      a,(ix+SP_XS)
+                cp      c
+                jr      z,dcl_f1
+                jr      nc,dcl_general          ; xs > xl: the line starts in a hole
+dcl_f1:         ld      a,(ix+SP_XE)
+                cp      b
+                jr      c,dcl_general           ; xe < xr: it runs on past the span
+                ld      a,(lc_y1)
+                ld      e,a
+                ld      a,(lc_y2)
+                cp      e
+                jr      nc,dcl_f2
+                ld      d,a                     ; E = ylo, A = yhi
+                ld      a,e
+                ld      e,d
+dcl_f2:         cp      (ix+SP_IB)
+                jr      z,dcl_f3
+                jr      nc,dcl_general          ; yhi > IB
+dcl_f3:         ld      a,e
+                cp      (ix+SP_IT)
+                jr      c,dcl_general           ; ylo < IT
+                ld      a,c                     ; wholly inside: the line itself
+                ex      af,af'
+                ld      c,b
+                ld      a,(lc_y2)
+                sub     Y_BIAS
+                ld      d,a
+                ld      a,(lc_y1)
+                sub     Y_BIAS
+                ld      b,a
+                ex      af,af'
+                jp      dl_emit
+dcl_fn:         SP_NEXT_DE
+                ret     z
+                IX_FROM_DE
+                jr      dcl_fx
+dcl_general:
+                ; the walk proper, register-resident: C = xl, B = xr, D = ylo,
+                ; E = yhi, IX = the span, H = ox0, L = ox1.  The trapezoid clip
+                ; (dcl_cb_clip) works from the workspace and re-enters through
+                ; the reload stubs.
+                ld      a,(lc_y2)
+                ld      hl,lc_y1
+                sub     (hl)
+                ld      (cd_dy),a
+                ld      a,(lc_y1)
+                ld      e,a
+                ld      a,(lc_y2)
+                cp      e
+                jr      nc,dcl_bb1              ; yr >= yl
+                ld      d,a
+                ld      a,e
+                ld      e,d
+dcl_bb1:        ld      d,e                     ; D = ylo
+                ld      e,a                     ; E = yhi
+                ld      (cd_yhi),a
+                ld      a,d
+                ld      (cd_ylo),a
+                ld      a,$ff
+                ld      (ss_x),a
+dcl_not_left:                                   ; IX = a span with xe > xl
+                ld      a,(ix+SP_XS)
+                cp      b
+                jp      nc,dcl_flush            ; xs >= xr: done
+                cp      c
+                jr      nc,dcl_ox0
+                ld      a,c                     ; ox0 = max(xs, xl)
+dcl_ox0:        ld      h,a
+                ld      a,(ix+SP_XE)
+                cp      b
+                jr      c,dcl_ox1
+                ld      a,b                     ; ox1 = min(xe, xr)
+dcl_ox1:        ld      l,a
+dcl_entry_path:
+                ld      a,d
+                cp      (ix+SP_IT)
+                jr      c,dcl_ent_top           ; ylo < IT: above or ambiguous
+                ld      a,(ix+SP_IB)
+                cp      e
+                jr      c,dcl_ent_bot           ; IB < yhi: below or ambiguous
+dcl_accept:
+                ld      a,(ss_x)
+                inc     a
+                jr      nz,dcl_acc_haveopen
+dcl_acc_open:
+                ld      a,h
+                ld      (ss_x),a
+                cp      c
+                jr      z,dcl_accept_yl
+                ld      a,(cd_dy)
+                or      a
+                jr      z,dcl_accept_yl
+                ld      a,h
+                push    hl
+                push    de
+                push    bc
+                call    line_y8
+                pop     bc
+                pop     de
+                pop     hl
+                jr      dcl_acc_sy
+dcl_accept_yl:  ld      a,(lc_y1)
+dcl_acc_sy:     ld      (ss_y),a
+dcl_acc_extend:
+                ld      a,l
+                ld      (se_x),a
+dcl_exit_check:
+                ld      a,(ix+SP_XE)
+                cp      b
+                jr      c,dcl_next              ; the line runs on
+                ld      a,(lc_y2)
+                ld      (tmp0),a
+                ld      a,l
+                ld      (ox1),a
+                jp      dcl_emit_segment        ; the line ends here: its run
+dcl_acc_haveopen:
+                ld      a,(se_x)
+                cp      h
+                jr      z,dcl_acc_extend        ; contiguous
+                push    hl
+                push    de
+                push    bc
+                call    dcl_emit_open
+                pop     bc
+                pop     de
+                pop     hl
+                jr      dcl_acc_open
+dcl_ent_bot:
+                ld      a,(ix+SP_OB)
+                cp      d
+                jr      c,dcl_reject            ; OB < ylo: wholly below
+                jr      dcl_cb_go
+dcl_ent_top:
+                ld      a,e
+                cp      (ix+SP_OT)
+                jr      nc,dcl_cb_go
+dcl_reject:                                     ; wholly outside: close a run
+                ld      a,(ss_x)
+                inc     a
+                jr      z,dcl_next
+                push    hl
+                push    de
+                push    bc
+                call    dcl_emit_open
+                pop     bc
+                pop     de
+                pop     hl
+                ld      a,$ff
+                ld      (ss_x),a
+dcl_next:
+                ld      l,(ix+SP_NEXT)
+                ld      h,(ix+SP_NEXT+1)
+                ld      a,h
+                or      l
+                jr      z,dcl_flush
+                push    hl
+                pop     ix
+                jp      dcl_not_left
+dcl_cb_go:      ld      a,h
+                ld      (ox0),a
+                ld      a,l
+                ld      (ox1),a
+                jp      dcl_cb_clip
+; the trapezoid clip comes back here with the walk's state in the workspace
+dcl_next_r:     call    dcl_reload
+                jr      dcl_next
+dcl_exit_check_r:
+                call    dcl_reload
+                ld      a,(ox1)
+                ld      l,a
+                jr      dcl_exit_check
+dcl_reload:     ld      a,(lc_x1)
+                ld      c,a
+                ld      a,(lc_x2)
+                ld      b,a
+                ld      a,(cd_ylo)
+                ld      d,a
+                ld      a,(cd_yhi)
+                ld      e,a
+                ret
+dcl_flush:
+                ld      a,(ss_x)
+                inc     a
+                ret     z
+                ; fall into dcl_emit_open
+; dcl_emit_open : the open run ends at se_x
+dcl_emit_open:
+                ld      a,(ox1)
+                push    af
+                ld      a,(se_x)
+                ld      (ox1),a
+                ld      hl,lc_x2
+                cp      (hl)
+                jr      z,deo_yr
+                ld      a,(cd_dy)
+                or      a
+                jr      z,deo_yr
+                ld      a,(se_x)
+                call    line_y8
+                jr      deo_have
+deo_yr:         ld      a,(lc_y2)
+deo_have:       ld      (tmp0),a
+                call    dcl_emit_segment
+                pop     af
+                ld      (ox1),a
+                ret
+dcl_close_open_nx:
+                ld      a,(ss_x)
+                inc     a
+                ret     z
+                call    dcl_emit_open
+                ld      a,$ff
+                ld      (ss_x),a
+                ret
+
+; --- the trapezoid clip on [ox0, ox1] against span IX -----------------------
+dcl_cb_clip:
+                ld      a,(ox0)
+                ld      (cb_cx1),a
+                ld      a,(ox1)
+                ld      (cb_cx2),a
+                ld      a,(cd_dy)
+                or      a
+                jr      nz,dcb_cy_slow
+                ld      a,(lc_y1)
+                ld      (cb_cy1),a
+                ld      (cb_cy2),a
+                jr      dcb_cy_done
+dcb_cy_slow:
+                call    stage_line_ws
+                ld      a,(cb_cx1)
+                ld      hl,lc_x1
+                cp      (hl)
+                jr      z,dcb_cy1_yl
+                call    interp_store
+                jr      dcb_cy1_have
+dcb_cy1_yl:     ld      a,(lc_y1)
+dcb_cy1_have:   ld      (cb_cy1),a
+                ld      a,(cb_cx2)
+                ld      hl,lc_x2
+                cp      (hl)
+                jr      z,dcb_cy2_yr
+                call    interp_store
+                jr      dcb_cy2_have
+dcb_cy2_yr:     ld      a,(lc_y2)
+dcb_cy2_have:   ld      (cb_cy2),a
+dcb_cy_done:
+                ld      a,(cb_cy2)
+                cp      (ix+SP_IT)
+                jr      c,dcb_top_c2u
+                ld      a,(cb_cy1)
+                cp      (ix+SP_IT)
+                jr      c,dcb_top_c1only
+                jp      dcb_top_done            ; both at or under IT
+dcb_top_c2u:
+                ld      a,(cb_cy1)
+                cp      (ix+SP_IT)
+                jr      c,dcb_top_eval          ; both above IT: two-sided
+                ld      a,(cb_cx2)
+                call    cb_top_at
+                ld      (cb_top2),a
+                ld      hl,cb_cy2
+                cp      (hl)
+                jp      z,dcb_top_done
+                jp      c,dcb_top_done          ; top2 <= cy2: no clip
+                ld      a,(cb_cx1)
+                call    cb_top_at
+                ld      (cb_top1),a
+                jp      dcb_top_p2clip
+dcb_top_c1only:
+                ld      a,(cb_cx1)
+                call    cb_top_at
+                ld      (cb_top1),a
+                ld      hl,cb_cy1
+                ld      a,(hl)
+                ld      hl,cb_top1
+                cp      (hl)
+                jp      nc,dcb_top_done         ; cy1 >= top1: no clip
+                ld      a,(cb_cx2)
+                call    cb_top_at
+                ld      (cb_top2),a
+                jp      dcb_top_clip
+dcb_top_eval:
+                ld      a,(ix+SP_TL)
+                cp      (ix+SP_TR)
+                jr      nz,dcb_top_interp
+                ld      (cb_top1),a
+                ld      (cb_top2),a
+                jr      dcb_top_evaled
+dcb_top_interp:
+                call    stage_top_ws
+                ld      a,(cb_cx1)
+                call    interp_store
+                ld      (cb_top1),a
+                ld      a,(cb_cx2)
+                call    interp_store
+                ld      (cb_top2),a
+dcb_top_evaled:
+                ld      a,(cb_cy1)
+                ld      hl,cb_top1
+                cp      (hl)
+                jr      nc,dcb_top_p1_ok
+                ld      a,(cb_cy2)
+                ld      hl,cb_top2
+                cp      (hl)
+                jr      nc,dcb_top_clip
+                jp      dcl_cb_reject           ; both above
+dcb_top_p1_ok:
+                ld      a,(cb_cy2)
+                ld      hl,cb_top2
+                cp      (hl)
+                jr      nc,dcb_top_done         ; both inside
+dcb_top_p2clip:                                 ; cy1 >= top1, cy2 < top2
+                ld      a,(cb_cy1)
+                ld      hl,cb_top1
+                sub     (hl)
+                ld      (tmp0),a                ; |d1| = cy1 - top1
+                ld      a,(cb_top2)
+                ld      hl,cb_cy2
+                sub     (hl)
+                ld      (tmp1),a                ; |d2| = top2 - cy2
+                xor     a
+                call    dcl_boundary_ix
+                ld      (cb_cx2),a
+                call    line_y8
+                ld      (cb_cy2),a
+                jp      dcb_top_done
+dcb_top_clip:                                   ; cy1 < top1, cy2 >= top2
+                ld      a,(cb_top1)
+                ld      hl,cb_cy1
+                sub     (hl)
+                ld      (tmp0),a                ; |d1| = top1 - cy1
+                ld      a,(cb_cy2)
+                ld      hl,cb_top2
+                sub     (hl)
+                ld      (tmp1),a                ; |d2| = cy2 - top2
+                ld      a,1
+                call    dcl_boundary_ix
+                ld      (cb_cx1),a
+                call    line_y8
+                ld      (cb_cy1),a
+                ld      a,(ox0)
+                ld      hl,cb_cx1
+                cp      (hl)
+                jr      nc,dcb_top_done
+                call    dcl_close_open_nx       ; a gap before cx1
+dcb_top_done:
+                ld      a,(cb_cx2)
+                ld      hl,cb_cx1
+                cp      (hl)
+                jp      c,dcl_cb_reject         ; the top left nothing
+dcb_top_ok:
+                ld      a,(ix+SP_IB)
+                ld      hl,cb_cy1
+                cp      (hl)
+                jr      c,dcb_bot_c1o           ; IB < cy1
+                ld      hl,cb_cy2
+                cp      (hl)
+                jr      c,dcb_bot_c2only        ; IB < cy2
+                jp      dcb_bot_done            ; both at or above IB
+dcb_bot_c1o:
+                ld      hl,cb_cy2
+                cp      (hl)
+                jr      c,dcb_bot_eval          ; both below IB: two-sided
+                ld      a,(cb_cx1)
+                call    cb_bot_at
+                ld      (cb_bot1),a
+                ld      hl,cb_cy1
+                cp      (hl)
+                jp      nc,dcb_bot_done         ; bot1 >= cy1: no clip
+                ld      a,(cb_cx2)
+                call    cb_bot_at
+                ld      (cb_bot2),a
+                jp      dcb_bot_clip
+dcb_bot_c2only:
+                ld      a,(cb_cx2)
+                call    cb_bot_at
+                ld      (cb_bot2),a
+                ld      hl,cb_cy2
+                cp      (hl)
+                jp      nc,dcb_bot_done         ; bot2 >= cy2: no clip
+                ld      a,(cb_cx1)
+                call    cb_bot_at
+                ld      (cb_bot1),a
+                jp      dcb_bot_p2clip
+dcb_bot_eval:
+                ld      a,(ix+SP_BL)
+                cp      (ix+SP_BR)
+                jr      nz,dcb_bot_interp
+                ld      (cb_bot1),a
+                ld      (cb_bot2),a
+                jr      dcb_bot_evaled
+dcb_bot_interp:
+                call    stage_bot_ws
+                ld      a,(cb_cx1)
+                call    interp_store
+                ld      (cb_bot1),a
+                ld      a,(cb_cx2)
+                call    interp_store
+                ld      (cb_bot2),a
+dcb_bot_evaled:
+                ld      a,(cb_bot1)
+                ld      hl,cb_cy1
+                cp      (hl)
+                jr      nc,dcb_bot_p1_ok
+                ld      a,(cb_bot2)
+                ld      hl,cb_cy2
+                cp      (hl)
+                jr      nc,dcb_bot_clip
+                jp      dcl_cb_reject           ; both below
+dcb_bot_p1_ok:
+                ld      a,(cb_bot2)
+                ld      hl,cb_cy2
+                cp      (hl)
+                jr      nc,dcb_bot_done         ; both inside
+dcb_bot_p2clip:                                 ; bot1 >= cy1, bot2 < cy2
+                ld      a,(cb_bot1)
+                ld      hl,cb_cy1
+                sub     (hl)
+                ld      (tmp0),a                ; |d1| = bot1 - cy1
+                ld      a,(cb_cy2)
+                ld      hl,cb_bot2
+                sub     (hl)
+                ld      (tmp1),a                ; |d2| = cy2 - bot2
+                xor     a
+                call    dcl_boundary_ix
+                ld      (cb_cx2),a
+                call    line_y8
+                ld      (cb_cy2),a
+                jp      dcb_bot_done
+dcb_bot_clip:                                   ; bot1 < cy1, bot2 >= cy2
+                ld      a,(cb_cy1)
+                ld      hl,cb_bot1
+                sub     (hl)
+                ld      (tmp0),a                ; |d1| = cy1 - bot1
+                ld      a,(cb_bot2)
+                ld      hl,cb_cy2
+                sub     (hl)
+                ld      (tmp1),a                ; |d2| = bot2 - cy2
+                ld      a,1
+                call    dcl_boundary_ix
+                ld      (cb_cx1),a
+                call    line_y8
+                ld      (cb_cy1),a
+                ld      a,(ox0)
+                ld      hl,cb_cx1
+                cp      (hl)
+                jr      nc,dcb_bot_done
+                call    dcl_close_open_nx
+dcb_bot_done:
+                ld      a,(cb_cx2)
+                ld      hl,cb_cx1
+                cp      (hl)
+                jr      c,dcl_cb_reject         ; the bottom left nothing
+                ld      hl,ox1
+                cp      (hl)
+                jr      nc,dcb_no_exit_clip     ; cx2 >= ox1: it runs on
+                ; the line leaves the aperture inside this span
+                ld      a,(ss_x)
+                inc     a
+                jr      z,dcbx_open
+                ld      a,(cb_cx1)
+                ld      hl,se_x
+                cp      (hl)
+                jr      z,dcbx_emit             ; contiguous: extend the run
+                call    dcl_close_open_nx
+dcbx_open:      ld      a,(cb_cx1)
+                ld      (ss_x),a
+                ld      a,(cb_cy1)
+                ld      (ss_y),a
+dcbx_emit:      ld      a,(cb_cx2)
+                ld      (ox1),a
+                ld      a,(cb_cy2)
+                ld      (tmp0),a
+                call    dcl_emit_segment
+                ld      a,$ff
+                ld      (ss_x),a
+                jp      dcl_next_r
+dcb_no_exit_clip:
+                ld      a,(ss_x)
+                inc     a
+                jr      z,dcbn_open
+                ld      a,(cb_cx1)
+                ld      hl,se_x
+                cp      (hl)
+                jr      z,dcbn_extend
+                call    dcl_emit_open           ; a gap: close the old run
+dcbn_open:      ld      a,(cb_cx1)
+                ld      (ss_x),a
+                ld      a,(cb_cy1)
+                ld      (ss_y),a
+dcbn_extend:    ld      a,(cb_cx2)
+                ld      (se_x),a
+                jp      dcl_exit_check_r
+dcl_cb_reject:
+                call    dcl_close_open_nx
+                jp      dcl_next_r
+
+; ===========================================================================
+; Verticals.  dcl_vert_on : A = the column, lc_y1/lc_y2 s16 rows, biased -
+; the descriptors' entry, which clamps the rows into the band first.
+; dcl_vertical : the u8 vertical at lc_x1 from lc_y1 to lc_y2.
+; ===========================================================================
+dcl_vert_on:
+                ld      (lc_x1),a
+                ld      a,(lc_y1+1)
+                or      a
+                jp      nz,dvc_y1_clamp
+dvc_y1_done:    ld      a,(lc_y2+1)
+                or      a
+                jp      nz,dvc_y2_clamp
+dvc_y2_done:    ld      a,(lc_y1)
+                ld      hl,lc_y2
+                cp      (hl)
+                ret     z                       ; a point
+dcl_vertical:
+                ; register-resident: C = x, D = ylo, E = yhi, IX = the column's
+                ; span; the ambiguous cases stage cb_cy1/cb_cy2 as before
+                ld      a,(lc_y1)
+                ld      d,a
+                ld      a,(lc_y2)
+                cp      d
+                jr      nc,dv_bb1               ; yr >= yl
+                ld      e,d
+                ld      d,a
+                ld      a,e
+dv_bb1:         ld      e,a                     ; D = ylo, E = yhi
+                ld      (cd_yhi),a
+                ld      a,d
+                ld      (cd_ylo),a
+                ld      hl,(sp_head)            ; scan in HL (free here); IX only
+                ld      a,h                     ; when the owning span is found
+                or      l
+                ret     z
+                ld      a,(lc_x1)
+                ld      c,a
+                ld      a,l
+                or      SP_XE
+                ld      l,a                     ; HL -> the span's XE field
+dv_x:           ld      a,c
+                cp      (hl)
+                jr      c,dv_own                ; xl < xe: reaches past the column
+                ld      a,l
+                and     $F0
+                ld      l,a                     ; -> base (SP_NEXT); DE holds
+                ld      a,(hl)                  ; ylo/yhi, so advance in HL/B
+                ld      b,a                     ; next lo
+                inc     l
+                ld      h,(hl)
+                ld      l,b                     ; HL -> next span base
+                ld      a,h
+                or      l
+                ret     z
+                ld      a,l
+                or      SP_XE
+                ld      l,a                     ; HL -> next span's XE
+                jr      dv_x
+dv_own:         ld      a,l
+                and     $F0
+                or      SP_XS
+                ld      l,a                     ; -> XS
+                ld      a,c
+                cp      (hl)
+                ret     c                       ; xl < xs: the column is solid
+                ld      a,l
+                and     $F0
+                ld      l,a                     ; -> base
+                push    hl
+                pop     ix
+dv_in:
+                ld      a,d
+                cp      (ix+SP_IT)
+                jr      c,dv_amb_top
+                ld      a,(ix+SP_IB)
+                cp      e
+                jr      c,dv_amb_botonly        ; IB < yhi
+                ld      b,d                     ; the whole column: (ylo, yhi)
+                jr      dv_emit
+dv_amb_botonly:
+                ld      a,(ix+SP_OB)
+                cp      d
+                ret     c                       ; OB < ylo: wholly below
+                ld      a,d
+                ld      (cb_cy1),a
+                jr      dv_bot_eval
+dv_amb_top:
+                ld      a,e
+                cp      (ix+SP_OT)
+                ret     c                       ; yhi < OT: wholly above
+                ld      a,(ix+SP_OB)
+                cp      d
+                ret     c
+dv_fp_exact:
+                ld      a,(ix+SP_TL)
+                cp      (ix+SP_TR)
+                jr      z,dv_top_const
+                push    de
+                push    bc
+                call    stage_top_ws
+                ld      a,(lc_x1)
+                call    interp_store
+                pop     bc
+                pop     de
+dv_top_const:   cp      d
+                jr      c,dv_cy1_ok             ; top1 < ylo: ylo stands
+                jr      z,dv_cy1_ok
+                ld      d,a                     ; cy1 = top1
+dv_cy1_ok:      ld      a,d
+                ld      (cb_cy1),a
+                ld      a,(ix+SP_IB)
+                cp      e
+                jr      nc,dv_bot_skip          ; IB >= yhi
+dv_bot_eval:
+                ld      a,(ix+SP_BL)
+                cp      (ix+SP_BR)
+                jr      z,dv_bot_const
+                push    de
+                push    bc
+                call    stage_bot_ws
+                ld      a,(lc_x1)
+                call    interp_store
+                pop     bc
+                pop     de
+dv_bot_const:   cp      e
+                jr      nc,dv_cy2_ok            ; bot1 >= yhi: yhi stands
+                ld      e,a                     ; cy2 = bot1
+dv_cy2_ok:      ld      a,(cb_cy1)
+                ld      b,a
+                ld      a,e
+                cp      b
+                ret     c                       ; cy2 < cy1: clipped away
+                jr      dv_emit
+dv_bot_skip:
+                ld      a,(cb_cy1)
+                ld      b,a
+                ld      a,e
+                cp      b
+                ret     c
+dv_emit:        ; B = cy1, E = cy2, C = x
+                ld      a,e
+                sub     Y_BIAS
+                ld      d,a
+                ld      a,b
+                sub     Y_BIAS
+                ld      b,a
+                ld      a,c
+                jp      dl_emit
+dvc_y1_clamp:
+                bit     7,a
+                jr      nz,dvc_y1_neg
+                ld      a,(lc_y2+1)             ; y1 below the band
+                bit     7,a
+                jr      nz,dvc_y1_cl
+                or      a
+                ret     nz                      ; y2 below too
+dvc_y1_cl:      ld      a,$ff
+                ld      (lc_y1),a
+                jp      dvc_y1_done
+dvc_y1_neg:     ld      a,(lc_y2+1)             ; y1 above the band
+                bit     7,a
+                ret     nz                      ; y2 above too
+                xor     a
+                ld      (lc_y1),a
+                jp      dvc_y1_done
+dvc_y2_clamp:
+                bit     7,a
+                jr      nz,dvc_y2_neg
+                ld      a,$ff
+                ld      (lc_y2),a
+                jp      dvc_y2_done
+dvc_y2_neg:     xor     a
+                ld      (lc_y2),a
+                jp      dvc_y2_done
+
+; ===========================================================================
+; dcl_s16 : the s16 line lc_x1/lc_y1 - lc_x2/lc_y2 (rows biased), clipped
+; to the u8 box and handed to draw_clipped_line - or, in fused mode, to the
+; walker, with the clipped-off ranges' verdicts applied as flats.
+;                                                               (dcl_s16.s)
+; ===========================================================================
+dcl_s16:
+                ld      a,(lc_x1+1)
+                ld      hl,lc_y1+1
+                or      (hl)
+                ld      hl,lc_x2+1
+                or      (hl)
+                ld      hl,lc_y2+1
+                or      (hl)
+                jr      nz,dcl16_main
+dcl16_fastu8:
+                ld      a,(lc_x1)
+                ld      hl,lc_x2
+                cp      (hl)
+                jp      nz,draw_clipped_line
+                ld      a,(lc_y1)
+                ld      hl,lc_y2
+                cp      (hl)
+                ret     z                       ; a point
+                jp      draw_clipped_line       ; a vertical
+dcl16_main:
+                ld      a,$80
+                ld      (dclv_s16vy),a          ; no pending right verdict
+                ld      a,(lc_x1)
+                ld      hl,lc_x2
+                cp      (hl)
+                jr      nz,mc_ordered
+                ld      a,(lc_x1+1)
+                ld      hl,lc_x2+1
+                cp      (hl)
+                jr      nz,mc_ordered
+                ld      a,(lc_y1)
+                ld      hl,lc_y2
+                cp      (hl)
+                jr      nz,mc_vertical
+                ld      a,(lc_y1+1)
+                ld      hl,lc_y2+1
+                cp      (hl)
+                jr      nz,mc_vertical
+                ret                             ; a point
+mc_vertical:
+                ld      a,(fw_mode)
+                bit     7,a
+                jr      nz,mc_ordered           ; armed verticals take the generic path
+                ld      a,(lc_x1+1)
+                or      a
+                ret     nz                      ; off the screen either side
+                ld      a,(lc_y1+1)
+                or      a
+                jr      z,mcv_y1_done
+                jp      m,mcv_y1_neg
+                ld      a,(lc_y2+1)             ; y1 below the band
+                bit     7,a
+                jr      nz,mcv_y1_cl
+                or      a
+                ret     nz                      ; y2 below too
+mcv_y1_cl:      ld      a,$ff
+                ld      (lc_y1),a
+                xor     a
+                ld      (lc_y1+1),a
+                jr      mcv_y1_done
+mcv_y1_neg:     ld      a,(lc_y2+1)             ; y1 above the band
+                bit     7,a
+                ret     nz
+                xor     a
+                ld      (lc_y1),a
+                ld      (lc_y1+1),a
+mcv_y1_done:
+                ld      a,(lc_y2+1)
+                or      a
+                jr      z,mcv_y2_done
+                jp      m,mcv_y2_neg
+                ld      a,$ff
+                ld      (lc_y2),a
+                xor     a
+                ld      (lc_y2+1),a
+                jr      mcv_y2_done
+mcv_y2_neg:     xor     a
+                ld      (lc_y2),a
+                ld      (lc_y2+1),a
+mcv_y2_done:
+                ld      a,(lc_y1)
+                ld      hl,lc_y2
+                cp      (hl)
+                ret     z
+                jp      draw_clipped_line
+mc_ordered:
+                ld      a,(lc_x1+1)
+                bit     7,a
+                jr      z,x1_in_or_big
+                ld      a,(lc_x2+1)
+                bit     7,a
+                jr      z,not_both_x
+                jp      dcl_rec_s16r_flush      ; both x < 0
+x1_in_or_big:
+                or      a
+                jr      z,not_both_x            ; x1 in [0, 255]
+                ld      a,(lc_x2+1)
+                bit     7,a
+                jr      nz,not_both_x
+                or      a
+                jr      z,not_both_x
+                jp      dcl_rec_s16r_flush      ; both x > 255
+not_both_x:
+                ld      a,(lc_y1+1)
+                ld      hl,lc_y2+1
+                or      (hl)
+                jp      z,mc_xonly
+                ld      a,(lc_y1+1)
+                bit     7,a
+                jr      z,y1_in_or_big
+                ld      a,(lc_y2+1)
+                bit     7,a
+                jr      z,not_both_y
+                ld      a,(fw_mode)             ; armed: keep the flat verdict
+                bit     7,a
+                jr      nz,not_both_y
+                jp      dcl_rec_s16r_flush
+y1_in_or_big:
+                or      a
+                jr      z,not_both_y
+                ld      a,(lc_y2+1)
+                bit     7,a
+                jr      nz,not_both_y
+                or      a
+                jr      z,not_both_y
+                ld      a,(fw_mode)
+                bit     7,a
+                jr      nz,not_both_y
+                jp      dcl_rec_s16r_flush
+not_both_y:
+                ld      a,(lc_x1+1)
+                ld      hl,lc_x2+1
+                or      (hl)
+                jp      z,skip_xclip
+                ; --- the x clip: each end outside [0, 255] moves to the edge,
+                ; its y the s16 interpolation there (unclamped) ---
+                call    stage_lc_xy
+                ld      a,(lc_x1+1)
+                bit     7,a
+                jr      z,x1_not_neg
+                ld      hl,0
+                call    s16_at
+                ld      (lc_y1),hl
+                ld      hl,0
+                ld      (lc_x1),hl
+                jr      x1_done
+x1_not_neg:     or      a
+                jr      z,x1_done
+                ld      hl,255
+                call    s16_at
+                ld      (lc_y1),hl
+                ld      hl,255
+                ld      (lc_x1),hl
+x1_done:
+                ld      a,(lc_x2+1)
+                bit     7,a
+                jr      z,x2_not_neg
+                ld      hl,0
+                call    s16_at
+                ld      (lc_y2),hl
+                ld      hl,0
+                ld      (lc_x2),hl
+                jr      skip_xclip
+x2_not_neg:     or      a
+                jr      z,skip_xclip
+                ld      hl,255
+                call    s16_at
+                ld      (lc_y2),hl
+                ld      hl,255
+                ld      (lc_x2),hl
+skip_xclip:
+                ld      a,(lc_y1+1)
+                bit     7,a
+                jr      z,y1a_in_or_big
+                ld      a,(lc_y2+1)
+                bit     7,a
+                jr      z,not_both_y2
+                xor     a                       ; the whole line above the band
+                call    dcl_rec_flat_line
+                jp      dcl_rec_s16r_flush
+y1a_in_or_big:
+                or      a
+                jr      z,not_both_y2
+                ld      a,(lc_y2+1)
+                bit     7,a
+                jr      nz,not_both_y2
+                or      a
+                jr      z,not_both_y2
+                ld      a,$ff                   ; the whole line below the band
+                call    dcl_rec_flat_line
+                jp      dcl_rec_s16r_flush
+not_both_y2:
+                ld      a,(lc_y1+1)
+                ld      hl,lc_y2+1
+                or      (hl)
+                jp      z,y_in_range
+                ; --- the y clip, axes swapped: an end outside the band moves
+                ; to the band's edge, its x the interpolation there ---
+                call    stage_lc_yx
+                ld      a,(lc_x1)
+                ld      (lc_ox1),a              ; the flats' originals
+                ld      a,(lc_x2)
+                ld      (lc_ox2),a
+                ld      a,(lc_y1+1)
+                bit     7,a
+                jr      z,y1c_not_neg
+                ld      hl,0
+                call    s16_at
+                ld      (lc_x1),a
+                xor     a
+                ld      (lc_x1+1),a
+                ld      (lc_y1),a
+                ld      (lc_y1+1),a
+                ld      a,(fw_mode)
+                bit     7,a
+                jr      z,y1c_done
+                xor     a                       ; [orig xl, xl) left via the top
+                call    dcl_rec_flat_y1
+                jr      y1c_done
+y1c_not_neg:    or      a
+                jr      z,y1c_done
+                ld      hl,255
+                call    s16_at
+                ld      (lc_x1),a
+                xor     a
+                ld      (lc_x1+1),a
+                ld      a,$ff
+                ld      (lc_y1),a
+                xor     a
+                ld      (lc_y1+1),a
+                ld      a,(fw_mode)
+                bit     7,a
+                jr      z,y1c_done
+                ld      a,$ff                   ; [orig xl, xl) left via the bottom
+                call    dcl_rec_flat_y1
+y1c_done:
+                ld      a,(lc_y2+1)
+                bit     7,a
+                jr      z,y2c_not_neg
+                ld      hl,0
+                call    s16_at
+                ld      (lc_x2),a
+                xor     a
+                ld      (lc_x2+1),a
+                ld      (lc_y2),a
+                ld      (lc_y2+1),a
+                ld      (dclv_s16vy),a          ; [xr, orig xr) left via the top
+                jr      y_in_range
+y2c_not_neg:    or      a
+                jr      z,y_in_range
+                ld      hl,255
+                call    s16_at
+                ld      (lc_x2),a
+                xor     a
+                ld      (lc_x2+1),a
+                ld      a,$ff
+                ld      (lc_y2),a
+                xor     a
+                ld      (lc_y2+1),a
+                ld      a,$ff
+                ld      (dclv_s16vy),a          ; [xr, orig xr) left via the bottom
+y_in_range:
+                ld      a,(lc_x1)
+                ld      hl,lc_x2
+                cp      (hl)
+                jr      c,dispatch_dcl
+                jr      nz,rsac                 ; the clip reordered the ends
+                ld      a,(lc_y1)
+                ld      hl,lc_y2
+                cp      (hl)
+                jp      z,dcl_rec_s16r_flush    ; a point
+dispatch_dcl:
+                ld      a,(fw_mode)
+                bit     7,a
+                jr      nz,dd_fused
+                call    draw_clipped_line
+                jp      dcl_rec_s16r_flush
+dd_fused:       call    fw_walk_line
+                jp      dcl_rec_s16r_flush
+rsac:           ld      a,(lc_x1)
+                ld      hl,lc_x2
+                ld      b,(hl)
+                ld      (hl),a
+                ld      a,b
+                ld      (lc_x1),a
+                ld      a,(lc_y1)
+                ld      hl,lc_y2
+                ld      b,(hl)
+                ld      (hl),a
+                ld      a,b
+                ld      (lc_y1),a
+                jr      dispatch_dcl
+
+; the x clip alone: both rows in the band
+mc_xonly:
+                call    stage_lc_xy
+                ld      a,(lc_x1+1)
+                bit     7,a
+                jr      z,xo_x1_notneg
+                ld      hl,0
+                call    s16_at
+                ld      (lc_y1),a
+                ld      hl,0
+                ld      (lc_x1),hl
+                jr      xo_x2
+xo_x1_notneg:   or      a
+                jr      z,xo_x2
+                ld      hl,255
+                call    s16_at
+                ld      (lc_y1),a
+                ld      hl,255
+                ld      (lc_x1),hl
+xo_x2:
+                ld      a,(lc_x2+1)
+                bit     7,a
+                jr      z,xo_x2_notneg
+                ld      hl,0
+                call    s16_at
+                ld      (lc_y2),a
+                ld      hl,0
+                ld      (lc_x2),hl
+                jr      xo_disp
+xo_x2_notneg:   or      a
+                jr      z,xo_disp
+                ld      hl,255
+                call    s16_at
+                ld      (lc_y2),a
+                ld      hl,255
+                ld      (lc_x2),hl
+xo_disp:
+                ld      a,(lc_x1)
+                ld      hl,lc_x2
+                cp      (hl)
+                jp      z,dcl16_fastu8          ; vertical or point
+                ld      a,(fw_mode)
+                bit     7,a
+                jp      nz,fw_walk_line
+                jp      draw_clipped_line
+
+; the s16 interp block: (x0, y0, x1, y1) from the line, or with the axes
+; swapped for the y clip
+stage_lc_xy:
+                ld      hl,(lc_x1)
+                ld      (lci),hl
+                ld      hl,(lc_y1)
+                ld      (lci+2),hl
+                ld      hl,(lc_x2)
+                ld      (lci+4),hl
+                ld      hl,(lc_y2)
+                ld      (lci+6),hl
+                ret
+stage_lc_yx:
+                ld      hl,(lc_y1)
+                ld      (lci),hl
+                ld      hl,(lc_x1)
+                ld      (lci+2),hl
+                ld      hl,(lc_y2)
+                ld      (lci+4),hl
+                ld      hl,(lc_x2)
+                ld      (lci+6),hl
+                ret
+
+; --- the clipped-off ranges' verdicts: a flat 'above' (0) or 'below'
+; ($FF) over a column range, applied at once in fused mode ---------------
+dcl_rec_flat_line:                              ; A = the verdict, the whole line
+                ld      (dclv_yv),a
+                ld      a,(lc_x1)
+                ld      (dclv_x0),a
+                ld      a,(lc_x2)
+                ld      (dclv_x1),a
+                jr      dcl_rec_flat_v
+dcl_rec_flat_y1:                                ; [orig xl, xl)
+                ld      (dclv_yv),a
+                ld      a,(lc_ox1)
+                ld      (dclv_x0),a
+                ld      a,(lc_x1)
+                ld      (dclv_x1),a
+                jr      dcl_rec_flat_v
+dcl_rec_s16r_flush:                             ; [xr, orig xr), if pending
+                ld      a,(dclv_s16vy)
+                cp      $80
+                ret     z
+                ld      (dclv_yv),a
+                ld      a,$80
+                ld      (dclv_s16vy),a
+                ld      a,(lc_x2)
+                ld      (dclv_x0),a
+                ld      a,(lc_ox2)
+                ld      (dclv_x1),a
+dcl_rec_flat_v:
+                ld      a,(fw_mode)
+                bit     7,a
+                ret     z                       ; plain draws keep no verdicts
+                ld      a,(dclv_x0)
+                ld      hl,dclv_x1
+                cp      (hl)
+                ret     nc                      ; empty
+                ld      c,(hl)
+                ld      hl,dclv_yv
+                ld      b,(hl)
+                ld      (fw_pol),a              ; (below: fused_flat takes B)
+                ld      a,b
+                ld      (fw_pol),a
+                ld      a,(dclv_x0)
+                jp      fused_flat
+
+; ===========================================================================
+; The FUSED walker: an aperture edge is clipped like any line, its visible
+; runs plotted, and each run applied at once as the side's new boundary on
+; the spans it covers.                                    (fused.s, fusedw.s)
+; ===========================================================================
+; fused_line : the s16 line in lc_*, A = the side (0 top, $80 bottom)
+fused_line:
+                ld      (fw_side),a
+                ld      a,(lc_y1+1)
+                ld      hl,lc_y2+1
+                or      (hl)
+                ld      hl,lc_x1+1
+                or      (hl)
+                ld      hl,lc_x2+1
+                or      (hl)
+                jr      nz,fh_slow
+                ld      a,(lc_x1)
+                ld      (fwl_xl),a
+                ld      hl,lc_x2
+                cp      (hl)
+                jr      z,fh_vert
+                ld      a,(hl)
+                ld      (fwl_xr),a
+                ld      a,(lc_y1)
+                ld      (fwl_yl),a
+                ld      a,(lc_y2)
+                ld      (fwl_yr),a
+                jp      fw_walk_staged
+fh_vert:        ld      a,(lc_y1)
+                ld      hl,lc_y2
+                cp      (hl)
+                ret     z                       ; a point
+                jp      draw_clipped_line       ; a vertical: plotted as ever
+fh_slow:        ld      a,$80
+                ld      (fw_mode),a
+                call    dcl16_main
+                xor     a
+                ld      (fw_mode),a
+                ret
+
+; fw_walk_line : the u8 line in lc_* (the s16 dispatch lands here)
+fw_walk_line:
+                ld      a,(lc_x1)
+                ld      hl,lc_x2
+                cp      (hl)
+                jp      z,draw_clipped_line     ; a vertical
+                ld      (fwl_xl),a
+                ld      a,(hl)
+                ld      (fwl_xr),a
+                ld      a,(lc_y1)
+                ld      (fwl_yl),a
+                ld      a,(lc_y2)
+                ld      (fwl_yr),a
+fw_walk_staged:
+                ld      a,(fwl_yr)
+                ld      hl,fwl_yl
+                sub     (hl)
+                ld      (fwl_dy),a
+                ld      a,(fwl_xr)
+                ld      hl,fwl_xl
+                sub     (hl)
+                ld      (fwl_dx),a
+                ld      a,(fwl_yl)
+                ld      b,a
+                ld      a,(fwl_yr)
+                cp      b
+                jr      nc,wl_min
+                ld      c,a
+                ld      a,b
+                ld      b,c
+wl_min:         ld      (fwl_hi),a
+                ld      a,b
+                ld      (fwl_lo),a
+                ld      a,$ff
+                ld      (fwl_run),a             ; no open run
+                ld      ix,(sp_head)
+                ld      a,ixh
+                or      ixl
+                jr      z,wl_flush
+                ld      a,(fwl_xl)
+                ld      c,a
+wl_sx:          cp      (ix+SP_XE)
+                jr      c,wl_proc
+                SP_NEXT_DE
+                jr      z,wl_flush
+                IX_FROM_DE
+                ld      a,c
+                jr      wl_sx
+wl_proc:
+                ld      a,(ix+SP_XS)
+                ld      hl,fwl_xr
+                cp      (hl)
+                jr      nc,wl_flush             ; xs >= xr: done
+                ld      (fw_slot),ix
+                ld      e,(ix+SP_NEXT)
+                ld      d,(ix+SP_NEXT+1)
+                ld      (fw_next),de
+                call    fw_clip_span            ; A = xs rides in
+                ld      ix,(fw_next)
+                ld      a,ixh
+                or      ixl
+                jr      nz,wl_proc
+wl_flush:
+                ld      a,(fwl_run)
+                inc     a
+                ret     z
+                jp      fw_close_run
+
+; fw_clip_span : the line on span IX's overlap [zx0, zx1): A = xs
+fw_clip_span:
+                ld      hl,fwl_xl
+                cp      (hl)
+                jr      nc,cs_ox0
+                ld      a,(hl)
+cs_ox0:         ld      (fwl_zx0),a
+                ld      a,(ix+SP_XE)
+                ld      hl,fwl_xr
+                cp      (hl)
+                jr      c,cs_ox1
+                ld      a,(hl)
+cs_ox1:         ld      (fwl_zx1),a
+                ld      a,(fwl_lo)
+                cp      (ix+SP_IT)
+                jr      c,cs_ent_top
+                ld      a,(ix+SP_IB)
+                ld      hl,fwl_hi
+                cp      (hl)
+                jr      c,cs_ent_bot
+                ; visible over the whole overlap
+                ld      a,$ff
+                ld      (cp_vy0),a              ; the entry y comes lazily
+                ld      a,(fwl_zx0)
+                ld      (cp_vx0),a
+                ld      a,(fwl_zx1)
+                ld      (cp_vx1),a
+                ld      a,$80
+                ld      (cp_vev),a              ; an open end
+                jp      fw_run_visible
+cs_ent_top:
+                ld      a,(fwl_hi)
+                cp      (ix+SP_OT)
+                jp      nc,fw_cb
+cs_rej_above:                                   ; 'above': kills on the bottom side
+                call    fw_touch_close
+                ld      a,(fw_side)
+                bit     7,a
+                ret     z
+                jr      cs_kill
+cs_ent_bot:
+                ld      a,(ix+SP_OB)
+                ld      hl,fwl_lo
+                cp      (hl)
+                jp      nc,fw_cb
+cs_rej_below:                                   ; 'below': kills on the top side
+                call    fw_touch_close
+                ld      a,(fw_side)
+                bit     7,a
+                ret     nz
+cs_kill:        ld      a,(fwl_zx1)
+                ld      c,a
+                ld      a,(fwl_zx0)
+                jp      fused_kill
+
+; the flat's bookkeeping: it counts, and closes any open run first
+fw_touch_close:
+                ld      a,1
+                ld      (fw_touch),a
+                ld      a,(fwl_run)
+                inc     a
+                ret     z
+                jp      fw_close_run
+
+; --- fw_cb : the trapezoid clip on [zx0, zx1), the flats and run closes
+; applied at once ---------------------------------------------------------
+fw_cb:
+                ld      a,$80
+                ld      (fwl_pend),a
+                ld      a,(fwl_zx0)
+                ld      (fwl_leftf),a
+                ld      (cb_cx1),a
+                ld      a,(fwl_zx1)
+                ld      (cb_cx2),a
+                ld      a,(fwl_dy)
+                or      a
+                jr      nz,fcb_cy_slow
+                ld      a,(fwl_yl)
+                ld      (cb_cy1),a
+                ld      (cb_cy2),a
+                jr      fcb_cy_done
+fcb_cy_slow:
+                call    stage_fwl_ws
+                ld      a,(cb_cx1)
+                ld      hl,fwl_xl
+                cp      (hl)
+                jr      z,fcb_cy1_yl
+                call    interp_store
+                jr      fcb_cy1_have
+fcb_cy1_yl:     ld      a,(fwl_yl)
+fcb_cy1_have:   ld      (cb_cy1),a
+                ld      a,(cb_cx2)
+                ld      hl,fwl_xr
+                cp      (hl)
+                jr      z,fcb_cy2_yr
+                call    interp_store
+                jr      fcb_cy2_have
+fcb_cy2_yr:     ld      a,(fwl_yr)
+fcb_cy2_have:   ld      (cb_cy2),a
+fcb_cy_done:
+                ld      ix,(fw_slot)
+                ld      a,(cb_cy2)
+                cp      (ix+SP_IT)
+                jr      c,fcb_top_eval
+                ld      a,(cb_cy1)
+                cp      (ix+SP_IT)
+                jr      c,fcb_top_eval
+                jp      fcb_top_done            ; both at or under IT
+fcb_top_eval:
+                ld      a,(ix+SP_TL)
+                cp      (ix+SP_TR)
+                jr      nz,fcb_top_interp
+                ld      (fw_top1),a
+                ld      (fw_top2),a
+                jr      fcb_top_evaled
+fcb_top_interp:
+                call    stage_top_ws
+                ld      a,(cb_cx1)
+                call    interp_store
+                ld      (fw_top1),a
+                ld      a,(cb_cx2)
+                call    interp_store
+                ld      (fw_top2),a
+fcb_top_evaled:
+                ld      a,(cb_cy1)
+                ld      hl,fw_top1
+                cp      (hl)
+                jr      nc,fcb_top_p1_ok
+                ld      a,(cb_cy2)
+                ld      hl,fw_top2
+                cp      (hl)
+                jr      nc,fcb_top_clip_p1
+                jp      fcb_whole_above
+fcb_top_p1_ok:
+                ld      a,(cb_cy2)
+                ld      hl,fw_top2
+                cp      (hl)
+                jr      nc,fcb_top_done         ; both inside
+                ld      a,(cb_cy1)              ; p2 leaves through the top
+                ld      hl,fw_top1
+                sub     (hl)
+                ld      (tmp0),a
+                ld      a,(fw_top2)
+                ld      hl,cb_cy2
+                sub     (hl)
+                ld      (tmp1),a
+                xor     a
+                call    dcl_boundary_ix
+                ld      (cb_cx2),a
+                call    fw_bval_top
+                ld      (cb_cy2),a
+                xor     a
+                ld      (fwl_pend),a            ; a right flat 'above'
+                jp      fcb_top_done
+fcb_top_clip_p1:                                ; cy1 < top1, cy2 >= top2
+                ld      a,(fw_top1)
+                ld      hl,cb_cy1
+                sub     (hl)
+                ld      (tmp0),a
+                ld      a,(cb_cy2)
+                ld      hl,fw_top2
+                sub     (hl)
+                ld      (tmp1),a
+                ld      a,1
+                call    dcl_boundary_ix
+                ld      (cb_cx1),a
+                call    fw_bval_top
+                ld      (cb_cy1),a
+                ld      a,(fwl_zx0)
+                ld      hl,cb_cx1
+                cp      (hl)
+                jr      nc,fcb_top_done
+                call    fw_touch_close          ; the left flat 'above'
+                ld      a,(fw_side)
+                bit     7,a
+                jr      z,fcb_tlf_done          ; top side: neutral
+                ld      a,(cb_cx1)
+                ld      c,a
+                ld      a,(fwl_leftf)
+                call    fused_kill
+fcb_tlf_done:   ld      a,(cb_cx1)
+                ld      (fwl_leftf),a
+fcb_top_done:
+                ld      a,(cb_cx2)
+                ld      hl,cb_cx1
+                cp      (hl)
+                jp      c,fcb_whole_above
+fcb_bot:
+                ld      ix,(fw_slot)
+                ld      a,(ix+SP_IB)
+                ld      hl,cb_cy1
+                cp      (hl)
+                jr      c,fcb_bot_eval
+                ld      hl,cb_cy2
+                cp      (hl)
+                jr      c,fcb_bot_eval
+                jp      fcb_bot_done            ; both at or above IB
+fcb_bot_eval:
+                ld      a,(ix+SP_BL)
+                cp      (ix+SP_BR)
+                jr      nz,fcb_bot_interp
+                ld      (fw_top1),a             ; (the slots serve as bot1/bot2)
+                ld      (fw_top2),a
+                jr      fcb_bot_evaled
+fcb_bot_interp:
+                call    stage_bot_ws
+                ld      a,(cb_cx1)
+                call    interp_store
+                ld      (fw_top1),a
+                ld      a,(cb_cx2)
+                call    interp_store
+                ld      (fw_top2),a
+fcb_bot_evaled:
+                ld      a,(fw_top1)
+                ld      hl,cb_cy1
+                cp      (hl)
+                jr      nc,fcb_bot_p1_ok
+                ld      a,(fw_top2)
+                ld      hl,cb_cy2
+                cp      (hl)
+                jr      nc,fcb_bot_clip_p1
+                jp      fcb_whole_below
+fcb_bot_p1_ok:
+                ld      a,(fw_top2)
+                ld      hl,cb_cy2
+                cp      (hl)
+                jr      nc,fcb_bot_done         ; both inside
+                ld      a,(fw_top1)             ; p2 leaves through the bottom
+                ld      hl,cb_cy1
+                sub     (hl)
+                ld      (tmp0),a
+                ld      a,(cb_cy2)
+                ld      hl,fw_top2
+                sub     (hl)
+                ld      (tmp1),a
+                xor     a
+                call    dcl_boundary_ix
+                ld      (cb_cx2),a
+                call    fw_bval_bot
+                ld      (cb_cy2),a
+                ld      a,$ff
+                ld      (fwl_pend),a            ; a right flat 'below'
+                jp      fcb_bot_done
+fcb_bot_clip_p1:                                ; bot1 < cy1, bot2 >= cy2
+                ld      a,(cb_cy1)
+                ld      hl,fw_top1
+                sub     (hl)
+                ld      (tmp0),a
+                ld      a,(fw_top2)
+                ld      hl,cb_cy2
+                sub     (hl)
+                ld      (tmp1),a
+                ld      a,1
+                call    dcl_boundary_ix
+                ld      (cb_cx1),a
+                call    fw_bval_bot
+                ld      (cb_cy1),a
+                ld      a,(fwl_zx0)
+                ld      hl,cb_cx1
+                cp      (hl)
+                jr      nc,fcb_bot_done
+                call    fw_touch_close          ; the left flat 'below'
+                ld      a,(fw_side)
+                bit     7,a
+                jr      nz,fcb_blf_done         ; bottom side: neutral
+                ld      a,(cb_cx1)
+                ld      c,a
+                ld      a,(fwl_leftf)
+                call    fused_kill
+fcb_blf_done:   ld      a,(cb_cx1)
+                ld      (fwl_leftf),a
+fcb_bot_done:
+                ld      a,(cb_cx2)
+                ld      hl,cb_cx1
+                cp      (hl)
+                jr      c,fcb_whole_below
+                ; the visible piece [cx1, cx2)
+                ld      a,(cb_cx1)
+                ld      (cp_vx0),a
+                ld      a,(cb_cy1)
+                ld      (cp_vy0),a
+                ld      a,(cb_cx2)
+                ld      (cp_vx1),a
+                ld      hl,fwl_zx1
+                cp      (hl)
+                ld      a,$80                   ; an open end...
+                jr      nc,fcb_end_open
+                ld      a,(cb_cy2)              ; ...or the crossing value
+fcb_end_open:   ld      (cp_vev),a
+                call    fw_run_visible
+                ; the right flat, if one is pending
+                ld      a,(fwl_pend)
+                cp      $80
+                ret     z
+                ld      a,1
+                ld      (fw_touch),a
+                ld      a,(cb_cx2)
+                ld      hl,fwl_zx1
+                cp      (hl)
+                ret     nc                      ; empty
+                ld      a,(fw_side)
+                bit     7,a
+                ld      a,(fwl_pend)
+                jr      nz,fcb_rp_bot
+                inc     a                       ; top side: 'below' ($FF) kills
+                ret     nz
+                jr      fcb_rp_kill
+fcb_rp_bot:     or      a                       ; bottom side: 'above' (0) kills
+                ret     nz
+fcb_rp_kill:    ld      a,(fwl_zx1)
+                ld      c,a
+                ld      a,(cb_cx2)
+                jp      fused_kill
+fcb_whole_above:
+                call    fw_touch_close
+                ld      a,(fw_side)
+                bit     7,a
+                jr      nz,fcb_wf_kill
+                ret
+fcb_whole_below:
+                call    fw_touch_close
+                ld      a,(fw_side)
+                bit     7,a
+                ret     nz
+fcb_wf_kill:    ld      a,(fwl_leftf)
+                ld      hl,fwl_zx1
+                cp      (hl)
+                ret     nc                      ; nothing left to kill
+                ld      c,(hl)
+                jp      fused_kill
+
+; the boundary value at a crossing: constant when the two evaluations
+; agreed, else the interpolation on the span's line
+fw_bval_top:
+                ld      hl,fw_top1
+                ld      b,(hl)
+                inc     hl
+                ld      c,a
+                ld      a,(hl)
+                cp      b
+                ld      a,c
+                jr      z,fw_bval_const
+                ld      ix,(fw_slot)
+                jp      cb_top_at
+fw_bval_bot:
+                ld      hl,fw_top1
+                ld      b,(hl)
+                inc     hl
+                ld      c,a
+                ld      a,(hl)
+                cp      b
+                ld      a,c
+                jr      z,fw_bval_const
+                ld      ix,(fw_slot)
+                jp      cb_bot_at
+fw_bval_const:  ld      a,b
+                ret
+
+; --- fw_run_visible : a visible piece (cp_vx0, cp_vy0) - (cp_vx1), its end
+; value cp_vev ($80 = open), joins the run or starts one -------------------
+fw_run_visible:
+                ld      a,(cp_vx0)
+                ld      hl,cp_vx1
+                cp      (hl)
+                jr      z,rv_degen
+                ld      a,(fwl_run)
+                inc     a
+                jr      z,rv_open
+                ld      a,(cp_vx0)
+                ld      hl,fwl_rend
+                cp      (hl)
+                jr      z,rv_extend             ; contiguous
+                call    fw_close_run
+                jr      rv_open
+rv_extend:      ld      a,(cp_vx1)
+                ld      (fwl_rend),a
+                ld      a,(cp_vev)
+                ld      (fwl_rendv),a
+                ret
+rv_open:
+                ld      hl,(fw_slot)
+                ld      (fw_rslot),hl           ; the apply starts here
+                ld      a,(cp_vx0)
+                ld      (fwl_run),a
+                ld      a,(cp_vy0)
+                cp      $ff
+                jr      nz,rv_have_y
+                ld      a,(cp_vx0)              ; the lazy entry y
+                ld      hl,fwl_xl
+                cp      (hl)
+                jr      z,rv_y_yl
+                ld      a,(fwl_dy)
+                or      a
+                jr      z,rv_y_yl
+                call    stage_fwl_ws
+                ld      a,(cp_vx0)
+                call    interp_store
+                jr      rv_have_y
+rv_y_yl:        ld      a,(fwl_yl)
+rv_have_y:      ld      (fwl_ry0),a
+                ld      a,(cp_vx1)
+                ld      (fwl_rend),a
+                ld      a,(cp_vev)
+                ld      (fwl_rendv),a
+                ld      a,1
+                ld      (fw_touch),a
+                ret
+rv_degen:                                       ; a contiguous point closes the
+                ld      a,(fwl_run)             ; run at its end with the value
+                inc     a
+                ret     z
+                ld      a,(cp_vx0)
+                ld      hl,fwl_rend
+                cp      (hl)
+                jr      nz,fw_close_run
+                ld      a,(cp_vev)
+                ld      (fwl_rendv),a
+                ; fall into fw_close_run
+
+; --- fw_close_run : plot the run, then apply it ----------------------------
+fw_close_run:
+                ld      a,(fwl_rendv)
+                cp      $80
+                jr      nz,cr_store
+                ld      a,(fwl_rend)
+                ld      hl,fwl_xr
+                cp      (hl)
+                jr      z,cr_yr
+                ld      a,(fwl_dy)
+                or      a
+                jr      z,cr_yl
+                call    stage_fwl_ws
+                ld      a,(fwl_rend)
+                call    interp_store
+                jr      cr_store
+cr_yr:          ld      a,(fwl_yr)
+                jr      cr_store
+cr_yl:          ld      a,(fwl_yl)
+cr_store:       ld      (tmp0),a
+                ld      a,(fwl_run)
+                ld      (ss_x),a
+                ld      a,(fwl_ry0)
+                ld      (ss_y),a
+                ld      a,(fwl_rend)
+                ld      (ox1),a
+                call    dcl_emit_segment
+                ld      a,(fwl_run)
+                ld      (fw_ax0),a
+                ld      a,(fwl_rend)
+                ld      (fw_ax1),a
+                ld      a,$ff
+                ld      (fwl_run),a
+                ; fall into fused_apply_run
+; --- fused_apply_run : the whole line becomes the side's boundary on every
+; span overlapping [fw_ax0, fw_ax1), partial edges split first ----------
+fused_apply_run:
+                ; HL walks the spans from fw_rslot (slots are 16-aligned, so
+                ; a field is `ld a,l / or SP_x / ld l,a`); a span the run
+                ; straddles is split at the run's ends first (fw_split_r),
+                ; then the side's line and extremes are written into it
+                ld      hl,(fw_rslot)
+ar_walk:        ld      a,h
+                or      l
+                ret     z
+                ld      a,l
+                or      SP_XE
+                ld      l,a
+                ld      a,(fw_ax0)
+                cp      (hl)
+                jp      nc,ar_next              ; ax0 >= xe: wholly left
+                dec     l
+                ld      b,(hl)                  ; xs
+                ld      a,(fw_ax1)
+                cp      b
+                ret     c                       ; xs > ax1: done
+                ret     z                       ; xs = ax1: done
+                ld      a,(fw_ax0)
+                cp      b
+                jr      c,ar_no_lsplit          ; xs > ax0: no left part
+                jr      z,ar_no_lsplit          ; xs = ax0: no left part
+                ld      c,a                     ; split at ax0
+                ld      a,l
+                and     $F0
+                ld      l,a
+                call    fw_split_r              ; HL keeps [xs, ax0)
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)
+                dec     l
+                ld      a,d
+                or      e
+                jr      z,ar_no_lsplit          ; spent: the whole span takes it
+                ex      de,hl
+ar_no_lsplit:   ld      a,l
+                and     $F0
+                or      SP_XE
+                ld      l,a
+                ld      a,(fw_ax1)
+                cp      (hl)
+                jr      nc,ar_no_rsplit         ; ax1 >= xe
+                ld      c,a
+                ld      a,l
+                and     $F0
+                ld      l,a
+                call    fw_split_r              ; HL keeps [xs, ax1)
+ar_no_rsplit:   ld      a,(fw_side)
+                bit     7,a
+                jr      nz,ar_bot
+                ld      a,l
+                and     $F0
+                or      SP_TXLO
+                ld      l,a
+                ld      a,(fwl_xl)
+                ld      (hl),a
+                inc     l
+                ld      a,(fwl_dx)
+                ld      (hl),a
+                inc     l
+                ld      a,(fwl_yl)
+                ld      (hl),a
+                inc     l
+                ld      a,(fwl_yr)
+                ld      (hl),a
+                ld      a,l
+                and     $F0
+                or      SP_OT
+                ld      l,a
+                ld      a,(fwl_lo)
+                ld      (hl),a
+                inc     l
+                ld      a,(fwl_hi)
+                ld      (hl),a
+                jr      ar_next
+ar_bot:         ld      a,l
+                and     $F0
+                or      SP_BXLO
+                ld      l,a
+                ld      a,(fwl_xl)
+                ld      (hl),a
+                inc     l
+                ld      a,(fwl_dx)
+                ld      (hl),a
+                inc     l
+                ld      a,(fwl_yl)
+                ld      (hl),a
+                inc     l
+                ld      a,(fwl_yr)
+                ld      (hl),a
+                ld      a,l
+                and     $F0
+                or      SP_OB
+                ld      l,a
+                ld      a,(fwl_hi)
+                ld      (hl),a
+                inc     l
+                ld      a,(fwl_lo)
+                ld      (hl),a
+ar_next:        ld      a,l
+                and     $F0
+                ld      l,a
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)
+                ex      de,hl
+                jp      ar_walk
+
+; fw_split_r : span HL (at its base) keeps [xs, C); a fresh slot takes
+; [C, xe) with every field copied, linked after it.  No slot: no-op.  HL
+; comes back at the base; B, C kept.
+; BEEB NOTE: an unrolled byte copy (12 x ld a,(hl)/ld (de),a/inc l/inc e =
+; 336 T) against LDIR's 21 T/byte plus the IX/IY setup; the 6502 version
+; already does this with indexed loads.
+fw_split_r:
+                ld      de,(sp_free)
+                ld      a,d
+                or      e
+                ret     z
+                push    hl
+                ex      de,hl
+                ld      e,(hl)                  ; the free list moves on
+                inc     l
+                ld      d,(hl)
+                dec     l
+                ld      (sp_free),de
+                ex      de,hl
+                pop     hl
+                ld      a,(hl)                  ; new.next = this.next
+                ld      (de),a
+                inc     l
+                inc     e
+                ld      a,(hl)
+                ld      (de),a
+                ld      (hl),d                  ; this.next = new
+                dec     l
+                ld      a,e
+                dec     a
+                ld      (hl),a
+                inc     e                       ; -> XS
+                ld      a,c
+                ld      (de),a                  ; new.xs = the split
+                inc     e                       ; -> XE
+                ld      a,l
+                or      SP_XE
+                ld      l,a
+                ld      a,(hl)
+                ld      (de),a                  ; new.xe = this.xe
+                ld      (hl),c                  ; this.xe = the split
+                inc     e
+                inc     l                       ; both -> TXLO
+                DUP     SLOT_SIZE-SP_TXLO-1
+                ld      a,(hl)
+                ld      (de),a
+                inc     l
+                inc     e
+                EDUP
+                ld      a,(hl)
+                ld      (de),a
+                ld      a,l
+                and     $F0
+                ld      l,a
+                ret
+
+; fused_kill : the columns [A, C) close (mark_solid, the seg's range kept)
+fused_kill:
+                ld      b,a
+                ld      hl,(cl_ilo)             ; ilo, ihi
+                ld      (fk_save),hl
+                ld      a,b
+                ld      (cl_ilo),a
+                ld      a,c
+                ld      (cl_ihi),a
+                call    ms_u8
+                ld      hl,(fk_save)
+                ld      (cl_ilo),hl
+                ret
+
+; fused_flat : a verdict fw_pol over [A, C): counts, kills when it is the
+; killing polarity for the side
+fused_flat:
+                ld      b,a
+                ld      a,1
+                ld      (fw_touch),a
+                ld      a,(fw_side)
+                bit     7,a
+                ld      a,(fw_pol)
+                jr      nz,ff_bot
+                inc     a                       ; top side: 'below' kills
+                ret     nz
+                jr      ff_kill
+ff_bot:         or      a                       ; bottom side: 'above' kills
+                ret     nz
+ff_kill:        ld      a,b
+                jp      fused_kill
+
+; ===========================================================================
+; fused_merge_range : HL = lo, DE = hi (s16): every value-equal abutting
+; pair of spans inside the range coalesces
+; ===========================================================================
+fused_merge_range:
+                ; HL = P, DE = Q its successor, both at their bases; B = ilo,
+                ; C = ihi ride in registers
+                call    cl_range
+                ret     nc
+                ld      hl,(sp_head)
+                ld      a,h
+                or      l
+                ret     z
+                ld      a,l
+                or      SP_XE
+                ld      l,a
+                ld      a,b
+                cp      (hl)
+                jr      c,fm_found0             ; ilo < xe: the head starts it
+fm_sx:          ld      a,l                     ; P = HL: Q = its successor
+                and     $F0
+                ld      l,a
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)
+                dec     l
+                ld      a,d
+                or      e
+                ret     z
+                ld      a,e
+                or      SP_XE
+                ld      e,a
+                ex      de,hl
+                ld      a,b
+                cp      (hl)
+                jr      nc,fm_sx                ; ilo >= Q.xe: P = Q, on
+                ex      de,hl                   ; ilo < Q.xe: the pair (P, Q)
+                ld      a,e
+                and     $F0
+                or      SP_XS
+                ld      e,a
+                jp      fm_pair
+fm_found0:      ld      a,l
+                and     $F0
+                ld      l,a
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)
+                dec     l
+                ld      a,d
+                or      e
+                ret     z
+fm_chk:         ld      a,e
+                or      SP_XS
+                ld      e,a
+                ld      a,(de)                  ; Q.xs
+                cp      c
+                jr      c,fm_pair               ; xs < ihi: still in range
+                ret     nz
+fm_pair:        ; P absorbs Q when they abut and the eight line bytes match
+                ld      a,l
+                or      SP_XE
+                ld      l,a
+                ld      a,(de)                  ; Q.xs
+                cp      (hl)                    ; P.xe
+                jr      nz,fm_stepq
+                inc     l                       ; -> TXLO
+                inc     e
+                inc     e
+                DUP     SP_BR-SP_TXLO
+                ld      a,(de)
+                cp      (hl)
+                jr      nz,fm_stepq
+                inc     l
+                inc     e
+                EDUP
+                ld      a,(de)
+                cp      (hl)
+                jr      nz,fm_stepq
+                ld      a,e
+                and     $F0
+                or      SP_XE
+                ld      e,a
+                ld      a,(de)                  ; P.xe = Q.xe
+                ld      b,a
+                ld      a,l
+                and     $F0
+                or      SP_XE
+                ld      l,a
+                ld      (hl),b
+                ld      a,e
+                and     $F0
+                ld      e,a
+                ld      a,l
+                and     $F0
+                ld      l,a
+                ld      a,(de)                  ; P.next = Q.next
+                ld      (hl),a
+                inc     l
+                inc     e
+                ld      a,(de)
+                ld      (hl),a
+                dec     l
+                push    hl                      ; P
+                ex      de,hl                   ; HL = Q + 1
+                ld      de,(sp_free)            ; Q -> the free list
+                ld      (hl),d
+                dec     l
+                ld      (hl),e
+                ld      (sp_free),hl
+                pop     hl
+                ld      e,(hl)                  ; Q = P.next
+                inc     l
+                ld      d,(hl)
+                dec     l
+                ld      a,d
+                or      e
+                jr      nz,fm_chk
+                ret
+fm_stepq:       ld      a,e
+                and     $F0
+                ld      e,a
+                ex      de,hl                   ; P = old Q
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)
+                dec     l
+                ld      a,d
+                or      e
+                jp      nz,fm_chk
+                ret
+
+; ===========================================================================
+; seg_zero_rec_solid : a portal whose armed edges touched nothing: carry
+; when its opening is wholly off the screen (every column closes), from the
+; seg's projected rows (s16, unbiased): sg_ft1/ft2, sg_fb1/fb2, and the
+; back pair where the flags need it.                             (tfr.s)
+; ===========================================================================
+seg_zero_rec_solid:
+                ld      hl,(sg_fb1)
+                call    szr_lt
+                jr      c,szr_b1
+                ld      a,(sg_flags)
+                and     SF_NEEDBB
+                jr      z,szr_top
+                ld      hl,(sg_bb1)
+                call    szr_lt
+                jr      nc,szr_top
+szr_b1:         ld      hl,(sg_fb2)
+                call    szr_lt
+                jr      c,szr_closed
+                ld      a,(sg_flags)
+                and     SF_NEEDBB
+                jr      z,szr_top
+                ld      hl,(sg_bb2)
+                call    szr_lt
+                jr      c,szr_closed
+szr_top:        ld      hl,(sg_ft1)
+                call    szr_gt
+                jr      c,szr_t1
+                ld      a,(sg_flags)
+                and     SF_NEEDBT
+                jr      z,szr_open
+                ld      hl,(sg_bt1)
+                call    szr_gt
+                jr      nc,szr_open
+szr_t1:         ld      hl,(sg_ft2)
+                call    szr_gt
+                jr      c,szr_closed
+                ld      a,(sg_flags)
+                and     SF_NEEDBT
+                jr      z,szr_open
+                ld      hl,(sg_bt2)
+                jp      szr_gt
+szr_open:       or      a
+                ret
+szr_closed:     scf
+                ret
+szr_lt:                                         ; carry when the biased row is above the screen
+                ld      de,Y_BIAS
+                or      a
+                sbc     hl,de
+                bit     7,h
+                jr      nz,szr_closed
+                or      a
+                ret
+szr_gt:                                         ; carry when the biased row is below the screen
+                ld      de,Y_BIAS+RENDER_H
+                or      a
+                sbc     hl,de
+                bit     7,h
+                jr      nz,szr_open
+                scf
+                ret

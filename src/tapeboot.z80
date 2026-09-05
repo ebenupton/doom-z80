@@ -22,8 +22,23 @@ BOOT:
                 ld      ix,GEO_BASE
                 ld      de,16384
                 call    load_block
+                ld      a,BANK_OBJ or P7_ROM48  ; the objects' bank
+                ld      bc,PORT_7FFD
+                out     (c),a
+                ld      ix,OBJ_CODE
+                ld      de,BANK4_LEN
+                call    load_block
+                ld      a,BANK_GEOM or P7_ROM48
+                ld      bc,PORT_7FFD
+                out     (c),a
                 ld      ix,NODEBB
                 ld      de,1560
+                call    load_block
+                ld      ix,L8TAB
+                ld      de,L8_LEN
+                call    load_block
+                ld      ix,ANGTOX
+                ld      de,ATAN_LEN
                 call    load_block
                 ld      ix,CODE_IMAGE
                 ld      de,IMAGE_LEN

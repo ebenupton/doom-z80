@@ -15,6 +15,7 @@
 ; ---------------------------------------------------------------------------
 
                 DEVICE  ZXSPECTRUM128
+                DEFINE  BANK4_FILE "build/bank4.bin"
                 include "spec.inc"
                 include "start.inc"
 
@@ -46,26 +47,24 @@
                 ; $8E00..$91FF holds the per-frame product tables, built at
                 ; run time; pad so the image loads contiguously from $8800.
                 DS      ORG_ADDR-$, 0
+                include "chains.z80"
 START:
                 di
                 ld      sp,STACK_TOP
                 call    init_video
                 call    sq_init
+                ld      a,BANK_RASTER_A         ; the rasteriser's bank
+                call    set_page
                 call    raster_init
                 call    setup_int
                 call    init_player
 main_loop:
-                ; --- pass 1: geometry ------------------------------------
-                ld      a,BANK_GEOM
-                call    set_page
-                call    update_world_pos
-                call    find_eye_height
-                call    render_frame
-
-                ; --- pass 2: rasterise into the back buffer --------------
+                ; --- the back buffer: cleared, its row tables selected -----
+                ; the rasteriser is mirrored in banks 6 and 7: buffer B's own
+                ; bank when drawing into B, the uncontended one for A
                 ld      a,(back_buf)
                 or      a
-                ld      a,BANK_GEOM
+                ld      a,BANK_RASTER_A
                 jr      z,ml_pg
                 ld      a,BANK_SCREEN_B
 ml_pg:          call    set_page
@@ -73,10 +72,18 @@ ml_pg:          call    set_page
                 call    raster_select
                 ld      a,(back_buf)
                 call    raster_clear
-                call    dl_render
+
+                ; --- the frame: geometry, clipping, and every line plotted
+                ; as it is emitted (dl_emit pages the rasteriser in) -------
+                ld      a,BANK_GEOM
+                call    set_page
+                call    update_world_pos
+                call    find_eye_height
+                call    render_frame
 
                 ; --- flip -----------------------------------------------
-                ei
+                ld      iy,$5c3a                ; the ROM handler's IY (the
+                ei                              ; engine uses IY freely)
                 halt
                 di
                 ld      a,(back_buf)
@@ -87,23 +94,6 @@ ml_pg:          call    set_page
 
                 call    read_input
                 jr      main_loop
-
-; ---------------------------------------------------------------------------
-; set_page : A = bank to map at $C000.  The displayed screen follows back_buf:
-; whichever buffer is not being drawn into is the one on show.
-; ---------------------------------------------------------------------------
-set_page:
-                ld      e,a
-                ld      a,(back_buf)
-                xor     1                       ; 1 when buffer B is displayed
-                rlca
-                rlca
-                rlca                            ; -> bit 3 of $7FFD
-                or      e
-                or      P7_ROM48
-                ld      bc,PORT_7FFD
-                out     (c),a
-                ret
 
 ; ---------------------------------------------------------------------------
 ; setup_int : the engine only wants the interrupt as a frame-boundary signal
@@ -164,30 +154,14 @@ update_world_pos:
 ; the prescaled eye height baked for its sector.
 ; ---------------------------------------------------------------------------
 find_eye_height:
+                ld      a,BANK_OBJ              ; the records are in the walk bank
+                call    set_page
                 ld      hl,(bsp_root)
-fe_loop:
-                bit     7,h
-                jr      nz,fe_leaf
-                add     hl,hl
-                add     hl,hl
-                add     hl,hl
-                add     hl,hl
-                ld      de,NODES
-                add     hl,de
-                ld      (bsp_node),hl
-                call    point_on_side
-                ld      hl,(bsp_node)
-                ld      de,ND_CHILD0
-                or      a
-                jr      z,fe_c0
-                ld      de,ND_CHILD1
-fe_c0:
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ex      de,hl
-                jr      fe_loop
+                call    fe_descend
+                ld      a,BANK_GEOM
+                push    hl
+                call    set_page
+                pop     hl
 fe_leaf:
                 res     7,h
                 ld      de,SSSEC
@@ -431,12 +405,6 @@ mvt_sign:
                 ld      a,b
                 or      a
                 ret     z
-neg_hl:
-                ex      de,hl
-                ld      hl,0
-                or      a
-                sbc     hl,de
-                ret
 
 ; add_px / add_py : add a signed 8.8 delta to the player position.
 add_px:
@@ -479,10 +447,24 @@ add_py:
                 ret
 
                 include "math.z80"
-                include "raster.z80"
                 include "view.z80"
-                include "spans.z80"
+                include "clip.z80"
                 include "bsp.z80"
 
 CODE_END:
-                ASSERT  CODE_END <= SPANS_BASE  ; code must not reach the span pool
+                DISPLAY "code ends at ", /H, CODE_END, ", span pool at ", /H, SPANS_BASE
+                ASSERT  CODE_END <= VDONE       ; code must not reach the vertex stamps
+
+; ---------------------------------------------------------------------------
+; The rasteriser lives in bank 7, above screen B's bitmap and attributes:
+; the raster pass always runs with bank 7 paged at $C000 (drawing into
+; buffer B needs it there anyway, and buffer A is always mapped), which
+; frees bank 2 for the geometry pipeline.  The image is padded through the
+; pool, variables, stack and screen B, all of which are rebuilt at run time.
+; ---------------------------------------------------------------------------
+                DS      RASTER_BASE-$,0
+                include "raster.z80"
+RASTER_END:
+                DISPLAY "rasteriser ends at ", /H, RASTER_END
+                ASSERT  RASTER_END <= $FF00
+                include "bank4.inc"

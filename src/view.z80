@@ -84,59 +84,17 @@ view_setup:
                 cp      b
                 jp      z,vs_origin
 vs_rebuild:
-                ; the angle moved, so every stored rotation is stale
-                ld      hl,VXVALID
-                ld      de,VXVALID+1
-                ld      bc,VXVALID_LEN-1
-                ld      (hl),0
-                ldir
                 ld      a,(pl_ang)
                 ld      (vs_lastang),a
                 ld      a,1
                 ld      (vs_haveang),a
-                ld      a,(pl_ang)
-                call    sincos_lookup
-                ld      a,c
-                ld      (vs_smag),a
-                ld      a,b
-                ld      (vs_sneg),a
-                ld      a,e
-                ld      (vs_sunity),a
-                ld      a,(pl_ang)
-                add     a,64
-                call    sincos_lookup
-                ld      a,c
-                ld      (vs_cmag),a
-                ld      a,b
-                ld      (vs_cneg),a
-                ld      a,e
-                ld      (vs_cunity),a
-
-                ; product tables
-                ; patch the rotation dispatchers
-                ld      hl,rot_sin_gen
-                ld      a,(vs_sunity)
-                or      a
-                jr      z,vs_s1
-                ld      hl,rot_sin_unity
-vs_s1:          ld      (rs_k+1),hl
-                ld      a,(vs_smag)
-                ld      (rsm1+1),a
-                ld      hl,rsn
-                ld      a,(vs_sneg)
-                call    patch_sign
-
-                ld      hl,rot_cos_gen
-                ld      a,(vs_cunity)
-                or      a
-                jr      z,vs_c1
-                ld      hl,rot_cos_unity
-vs_c1:          ld      (rc_k+1),hl
-                ld      a,(vs_cmag)
-                ld      (rcm1+1),a
-                ld      hl,rcn
-                ld      a,(vs_cneg)
-                call    patch_sign
+                ; the trig state and every patch site it feeds live in
+                ; bank 4 (fsetup.z80): once an angle change, not in the walk
+                ld      a,BANK_OBJ
+                call    set_page
+                call    vs_rebuild_b4
+                ld      a,BANK_GEOM
+                call    set_page
 
 vs_origin:
                 ; --- origin term ----------------------------------------
@@ -404,210 +362,149 @@ rp_ok:          ld      l,a
 
 
 project_y:
-                ; A = height delta, E = M8, D = S -> HL = screen y.
+                ; A = height delta, E = M8, D = S -> HL = screen y (biased).
                 ; The whole input tuple is the key, so an entry survives
                 ; frames and positions and a hit is the body's own answer by
                 ; construction.  A live reciprocal never has S = 0, so the S
-                ; plane doubles as the valid flag and nothing needs clearing.
-                ld      (py_h),a
+                ; plane doubles as the valid flag: cleared once by cpm_init.
+                ; 256 slots on h ^ M8; the planes are pages, so the slot is L
+                ; and the walk between them is INC H.  DE is kept.
+                ld      c,a                     ; h
                 xor     e
-                and     127
-                ld      c,a
-                or      128
-                ld      b,a
-                ld      h,VYC_M8>>8
-                ld      l,b
+                ld      l,a                     ; the slot
+                ld      h,VYC_H>>8
+                ld      a,c
+                cp      (hl)
+                jr      nz,py_miss
+                inc     h                       ; VYC_M8
                 ld      a,e
                 cp      (hl)
                 jr      nz,py_miss
-                ld      h,VYC_S>>8
-                ld      l,c
+                inc     h                       ; VYC_S
                 ld      a,d
                 cp      (hl)
                 jr      nz,py_miss
-                ld      h,VYC_H>>8
-                ld      a,(py_h)
-                cp      (hl)
-                jr      nz,py_miss
-                ld      h,VYC_L>>8
-                ld      l,b
+                inc     h                       ; VYC_L
                 ld      a,(hl)
-                ld      h,VYC_HI>>8
-                ld      l,c
+                inc     h                       ; VYC_HI
                 ld      h,(hl)
                 ld      l,a
                 ret
 py_miss:
-                push    bc                      ; the slot, for the writeback
+                ld      h,VYC_H>>8
+                ld      (hl),c                  ; the key first: h,
+                inc     h
+                ld      (hl),e                  ;   M8,
+                inc     h
+                ld      (hl),d                  ;   S (valid: nothing can
+                inc     h                       ;   interrupt the fill)
+                push    hl                      ; -> VYC_L slot
                 push    de                      ; (M8, S)
-                ld      a,(py_h)
-                ld      h,a
+                push    bc                      ; h (the multiply eats BC)
+                ld      h,c
                 ld      l,e
                 call    mul_s8_u8               ; HL = h * M8 (signed)
-                ld      a,(py_h)
-                ld      d,a
+                pop     bc
+                ld      d,c
                 ld      e,0                     ; DE = h << 8
                 add     hl,de                   ; HL = h * m9, fits s16
                 pop     de
                 ld      b,d
                 call    rns_hl                  ; leaves DE alone
-                ld      a,HALF_H
-                sub     l
+                ld      a,HALF_H+Y_BIAS         ; the row, in the clipper's
+                sub     l                       ; biased units
                 ld      l,a
                 ld      a,0
                 sbc     a,h
-                ld      h,a                     ; HL = sy
-                pop     bc
-                ld      (py_res),hl
-                ld      a,(py_h)
-                ld      h,VYC_H>>8
-                ld      l,c
-                ld      (hl),a
-                ld      h,VYC_M8>>8
-                ld      l,b
-                ld      (hl),e
-                ld      h,VYC_L>>8
-                ld      a,(py_res)
-                ld      (hl),a
-                ld      h,VYC_HI>>8
-                ld      l,c
-                ld      a,(py_res+1)
-                ld      (hl),a
-                ld      h,VYC_S>>8
-                ld      (hl),d                  ; last: it is the valid flag
-                ld      hl,(py_res)
+                ld      h,a                     ; HL = sy + Y_BIAS
+                pop     bc                      ; the VYC_L slot
+                ld      a,l
+                ld      (bc),a
+                inc     b                       ; VYC_HI
+                ld      a,h
+                ld      (bc),a
                 ret
 
 ; ---------------------------------------------------------------------------
-; project_x : HL = tvx (s16 counts), rc_m8 / rc_s set -> HL = screen x (s16)
+; project_x : HL = tvx (s16 counts), E = M8, D = S -> HL = screen column, s16.
 ;
-;   X88 = tvx << 3   (exact 8.8 view x)
-;   shrink X88 into s16, decrementing S (or counting a deficit past its floor)
-;   B32 = (X88 << 8) + X88 * M8
-;   sx  = 128 + rns(B32, S + 8)
-; ---------------------------------------------------------------------------
-; ---------------------------------------------------------------------------
-; project_x : HL = tvx (s16 counts), E = M8, D = S -> HL = screen column,
-; saturated to s16 (far off-screen endpoints only need sign and order).
-;
-;   sx = HALF_W + rns(X88 * m9, S + 8),  X88 = tvx << 3,  m9 = 256 + M8
-;
-; X88 is first shrunk to s16 - halved with S decremented, to a floor of 1
-; beyond which the halvings become a deficit shifted back at the end.  Every
-; bit below the eighth of the product is shifted out, so
-;       (X88 * m9) >> 8  ==  ((X88 * M8) >> 8) + X88
-; which is one signed 8x8 and the high byte of an unsigned one.
+; The BBC's project_x_c (bsp/project.s) compare-for-compare:
+;       Q  = floor(tvx * m9 / 256),  m9 = 256 + M8
+;       sx = HALF_W + Q << (3 - S)          S < 3
+;                   + Q                     S = 3   (no rounding)
+;                   + rns(Q, S - 3)         S > 3
+; The floor is the whole low byte of tvx * M8 dropped, so Q is tvx plus the
+; signed 24-bit product's top two bytes.  (The earlier version rounded at
+; S = 3 and kept three more bits for S < 3, which put a vertex one column
+; off in 5 of 1000 frames.)  Eats A, BC, DE.
 ; ---------------------------------------------------------------------------
 project_x:
-                ld      c,0                     ; the deficit
-                ld      a,h
-                add     a,16
-                cp      32
-                jr      c,px_k0                 ; tvx fits 13 bits
-                ld      a,h
-                add     a,32
-                cp      64
-                jr      c,px_k1
-                ld      a,h
-                add     a,64
-                cp      128
-                jr      c,px_k2
-                ld      b,3                     ; X88 = tvx
-                jr      px_sadj
-px_k2:          add     hl,hl
-                ld      b,2
-                jr      px_sadj
-px_k1:          add     hl,hl
-                add     hl,hl
-                ld      b,1
-px_sadj:        ; each halving costs a unit of S down to its floor of one;
-                ; the rest are deficit
-                ld      a,d
-                cp      2
-                jr      c,px_sdef
-                dec     d
-                djnz    px_sadj
-                jr      px_mul
-px_sdef:        ld      c,b
-                jr      px_mul
-px_k0:          add     hl,hl
-                add     hl,hl
-                add     hl,hl
-px_mul:         ; HL = X88, E = M8, D = S, C = deficit
-                push    de
-                push    bc
-                push    hl
                 ld      a,e
-                ld      l,a                     ; H = vx (s8), L = M8
-                push    af
-                call    mul_s8_u8               ; HL = vx * M8
-                pop     af
-                pop     de                      ; DE = X88
+                or      a
+                jr      z,px_q                  ; m9 = 256: Q = tvx
+                ; floor(tvx * M8 / 256) = hi * M8 + floor(lo * M8 / 256) for
+                ; tvx = 256 * hi + lo (hi signed, lo unsigned): two 8x8s,
+                ; and none at all for the high byte when it is 0 or -1
+                push    de                      ; (M8, S)
+                push    hl                      ; tvx
+                ld      h,l                     ; lo
+                ld      l,e                     ; M8
+                MUL_U8_BODY                     ; HL = lo * M8
+                ld      a,h
+                ld      (px_lop),a              ; the low partial
+                pop     hl                      ; tvx
+                pop     de                      ; (M8, S)
+                ld      a,h
+                or      a
+                jr      z,px_hi0
+                inc     a
+                jr      z,px_him1
+                dec     a
                 push    de
                 push    hl
-                ld      h,e                     ; H = frac
-                ld      l,a
-                MUL_U8_BODY                     ; HL = frac * M8
-                ld      a,h
-                pop     hl                      ; vx * M8
-                pop     de                      ; X88
-                ld      c,a                     ; the fraction's carry byte
-                ld      a,h
-                rla
-                sbc     a,a
-                ld      b,a
-                ld      a,d
-                rla
-                sbc     a,a
-                add     hl,de
-                adc     a,b                     ; A:HL = vx*M8 + X88
-                ld      e,c
-                ld      d,0
-                add     hl,de
-                adc     a,0                     ; A:HL = (X88 * m9) >> 8
-                pop     bc                      ; C = deficit
-                pop     de                      ; D = S
-                ld      b,d
-                ld      d,a
-                ld      a,c
-                or      a
-                jr      nz,px_defpath
-                ld      a,d
-                call    rns_ahl
-                ld      de,HALF_W
-                add     hl,de
-                adc     a,0
-                jp      sat_ahl
-px_defpath:
-                ; the shrink's truncation is the only rounding here: the
-                ; product, whole, shifted back up by all but one
-                dec     a
-                ld      b,a
-                ld      a,d
-                jr      z,px_dfdone
-px_dfsh:        add     hl,hl
-                rla
-                djnz    px_dfsh
-px_dfdone:
-                ld      de,HALF_W
-                add     hl,de
-                adc     a,0
-                jp      sat_ahl
-
-
-sat_ahl:
-                ld      d,a
-                ld      a,h
-                rla
-                sbc     a,a
-                cp      d
-                ret     z                       ; already fits
+                ld      h,a                     ; hi, as unsigned
+                ld      l,e                     ; M8
+                MUL_U8_BODY                     ; HL = hi_u * M8
+                pop     de                      ; tvx
+                pop     bc                      ; C = M8, B = S
                 bit     7,d
-                jr      nz,sat_neg
-                ld      hl,$7fff
-                ret
-sat_neg:
-                ld      hl,$8000
+                jr      z,px_hp
+                ld      a,h
+                sub     c
+                ld      h,a                     ; signed: less M8 << 8
+px_hp:          ld      a,(px_lop)
+                add     a,l
+                ld      l,a
+                ld      a,0
+                adc     a,h
+                ld      h,a                     ; hi * M8 + the low partial
+                add     hl,de                   ; Q
+                ld      d,b                     ; S
+                jr      px_q
+px_hi0:         ld      a,(px_lop)              ; Q = tvx + the low partial
+                add     a,l
+                ld      l,a
+                jr      nc,px_q
+                inc     h
+                jr      px_q
+px_him1:        ld      a,(px_lop)              ; Q = tvx + the partial - M8,
+                sub     e                       ;   the difference in [-M8, -1]
+                ld      c,a
+                ld      b,$ff
+                add     hl,bc
+px_q:           ld      a,d
+                sub     3
+                jr      z,px_done
+                jr      c,px_left
+                ld      b,a
+                call    rns_hl                  ; round half up by S - 3
+                jr      px_done
+px_left:        add     hl,hl                   ; S = 2: one doubling,
+                inc     a
+                jr      z,px_done
+                add     hl,hl                   ; S = 1: two
+px_done:        ld      de,HALF_W
+                add     hl,de
                 ret
 
 ; ---------------------------------------------------------------------------

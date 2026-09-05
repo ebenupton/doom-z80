@@ -28,6 +28,17 @@ from endpoint_spans import EndpointClipSpans  # noqa: E402
 
 os.chdir(_saved_cwd)
 
+# The 6502 engine drops a seg whose projected pair comes out REVERSED
+# (sx1 > sx2: a one-pixel sliver inverted by rounding; seg_emit.s stage 3,
+# 2026-08-22) where the Python fp path still draws it.  The Spectrum port
+# follows the 6502, so the oracle is patched to match it.
+import inspect as _inspect
+_src = _inspect.getsource(dw.fp_render_seg)
+_old = "    if sx1 == sx2:\n        return\n"
+assert _old in _src, "fp_render_seg: the tie cull moved"
+_src = _src.replace(_old, "    if sx1 >= sx2:\n        return     # reversed too: the 6502's rule\n", 1)
+exec(compile(_src, dw.__file__, "exec"), dw.__dict__)
+
 FB_W, FB_H = dw.FP_RENDER_W, dw.FP_RENDER_H   # 256 x 160
 
 _calls = []

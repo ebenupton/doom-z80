@@ -23,11 +23,21 @@ class ZHarness {
     this.asmOut = r.out;
     this.sym = readSymbols(r.sym);
     this.m = new Spectrum128({ contention: opts.contention !== false });
-    const data = fs.readFileSync(bin);
+    let data = fs.readFileSync(bin);
+    const b4p = bin.replace(/\.bin$/, "_b4.bin");   // the objects' bank, when the source builds one
+    if (fs.existsSync(b4p) && fs.statSync(b4p).mtimeMs >= fs.statSync(bin).mtimeMs - 5000) {
+      const b4 = fs.readFileSync(b4p);
+      this.m.ram[4].set(b4, 0);
+      data = data.subarray(0, data.length - b4.length);   // the raw image carries a copy on its tail
+    }
     this.org = this.sym.get("IMAGE_BASE");
     if (this.org === undefined) this.org = this.sym.get("ORG_ADDR");
     if (this.org === undefined) this.org = 0x8400;
-    for (let i = 0; i < data.length; i++) this.m.poke(this.org + i, data[i]);
+    for (let i = 0; i < data.length; i++) {
+      const a = this.org + i;
+      if (a >= 0xc000) { this.m.ram[6][a - 0xc000] = data[i]; this.m.ram[7][a - 0xc000] = data[i]; }   // the rasteriser's banks
+      else this.m.poke(a, data[i]);
+    }
     this.m.poke(SENTINEL, 0x76); // HALT
     this.size = data.length;
   }
@@ -66,6 +76,7 @@ class ZHarness {
     while (m.tstates - t0 < limit) {
       m.step();
       const s = m.cpu.getState();
+      if (opts.hook) opts.hook(s);
       if (s.halted) {
         const out = m.cpu.getState();
         out.tstates = m.tstates - t0;

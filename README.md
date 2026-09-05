@@ -210,10 +210,16 @@ outside the BBC harness's counted region too.
 | | 6502 cycles / Z80 T | fps |
 |---|---|---|
 | BBC Micro port | 2,956,217 | 12.2 |
-| this port | 11,479,813 | 5.6 |
+| this port | 11,029,948 | 5.8 |
 
-That is 2.19× off parity, from 3.72× when the engine first ran and 2.81×
-before the register-file campaign below.
+That is 2.10× off parity, from 3.72× when the engine first ran, 2.81× before
+the register-file campaign below, and 2.30× before two later rounds: immediate
+rasterisation (the display list is gone — each clipped line is plotted as it
+is emitted) and porting the BBC engine's own newer walk changes — descending
+the near BSP child unconditionally as `r_bsp.c` does, and retiring the
+static always-descend and has-gap caches that turned out to cost more than
+they saved. Every step stays pixel-identical to the 6502 engine across all
+1000 golden frames.
 
 ### What came over from the BBC port
 

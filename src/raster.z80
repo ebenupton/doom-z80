@@ -68,6 +68,9 @@ raster_select:
                 ld      a,ROWLO_B>>8
 rs_set:
                 ld      (rsel1+1),a
+                ld      (rsel_s+1),a
+                ld      (rsel_h+1),a
+                ld      (rsel_v+1),a
                 ret
 
 ; ---------------------------------------------------------------------------
@@ -123,48 +126,622 @@ dl_go:
                 call    plot_line
                 pop     hl
                 jr      dl_loop
+; ROW_UP : HL = a byte in the bitmap -> the same byte one pixel row up.
+; Within a character cell that is DEC H; at the cell's top row the byte is
+; 32 back, in row 7 of the cell above, and a borrow crosses into the third
+; of the screen above.  A is preserved.
+                MACRO   ROW_UP
+                ex      af,af'
+                ld      a,h
+                and     7
+                jr      z,.cross
+                dec     h
+                jr      .done
+.cross:         ld      a,l
+                sub     32
+                ld      l,a
+                ld      a,h
+                jr      nc,.same
+                sub     8
+.same:          or      7
+                ld      h,a
+.done:          ex      af,af'
+                ENDM
+
+
 
 ; ---------------------------------------------------------------------------
 ; plot_line : C = x1, B = y1, E = x2, D = y2   (y in 0..RENDER_H-1)
 ; ---------------------------------------------------------------------------
 plot_line:
-                ld      a,c
-                cp      e
-                jp      z,plot_vert
-                jr      c,pl_ordered
-                ld      a,c                     ; order by x
+                ; C = x0, B = y0, E = x1, D = y1: the BBC port's NJ rasteriser,
+                ; pixel for pixel (nj_raster.py).  Lines are drawn bottom to
+                ; top: the endpoint with the larger y goes first, and the
+                ; direction is left-going when its x is the larger.  The
+                ; front end stays in registers: the row's base comes from the
+                ; row planes (its low byte is at most 224, so adding x >> 3
+                ; never carries), and the shallow core's start mask and chain
+                ; entry come from one table by x0 & 7.
+                ld      a,b
+                cp      d
+                jr      nc,pl_sorted
+                ld      a,c                     ; swap the endpoints
                 ld      c,e
                 ld      e,a
                 ld      a,b
                 ld      b,d
                 ld      d,a
-pl_ordered:
-                ld      a,e
-                sub     c
-                ld      (ln_dx),a
-                ld      l,a                     ; L = dx (>= 1)
-                ld      a,d
-                sub     b                       ; dy
-                jp      z,plot_horiz
-                jr      nc,pl_dypos
+pl_sorted:      ld      a,b
+                sub     d
+                jr      z,pl_horiz              ; dy = 0
+                ld      d,a                     ; D = dy
+                ld      a,c
+                sub     e
+                jr      z,pl_vert               ; dx = 0
+                jr      nc,pl_left
                 neg
-                ld      h,a
-                ld      a,$ff                   ; sy = -1
-                jr      pl_dyset
-pl_dypos:
-                ld      h,a
-                ld      a,1
-pl_dyset:
-                ld      (ln_sy),a
-                ld      a,h
+                ld      e,a                     ; E = dx, right-going
+                cp      d
+                jp      c,pl_steep_r
+                ld      a,PLTAB_R & 255
+                jr      pl_shallow
+pl_left:        ld      e,a                     ; E = dx, left-going
+                cp      d
+                jp      c,pl_steep_l
+                ld      a,PLTAB_L & 255
+pl_shallow:
+                ; A = the direction's table; C = x0, B = y0, D = dy, E = dx
+                ld      iyh,a
+                ld      a,e
+                srl     a
+                ld      (ln_errs),a             ; err = errs = dx >> 1
+                ex      af,af'
+                ld      a,2
+                ld      (ln_ls),a
+                ld      a,b
+                and     7
+                inc     a
+                ld      iyl,a                   ; rows left in the cell, going up
+                ld      l,b
+rsel_s:         ld      h,ROWLO_A>>8            ; (patched by raster_select)
+                ld      a,(hl)
+                inc     h
+                ld      h,(hl)
+                ld      l,a                     ; HL = the row's base
+                ld      a,c
+                rrca
+                rrca
+                rrca
+                and     $1f
+                add     a,l
+                ld      l,a                     ; HL = the byte
+                ld      a,c
+                and     7
+                add     a,a
+                add     a,a                     ; (mask, -, entry) by x0 & 7
+                add     a,iyh
+                push    hl
+                ld      l,a
+                ld      h,PLTAB_R >> 8
+                ld      c,(hl)                  ; the run's start mask
+                inc     l
+                inc     l
+                ld      a,(hl)
+                inc     l
+                ld      h,(hl)
+                ld      l,a                     ; the chain entry
+                ex      (sp),hl                 ; HL = the byte, the entry down
+                ld      b,d                     ; cnt = dy
+                ex      af,af'                  ; A = err
+                ret                             ; into the chain
+pl_steep_r:     xor     a
+                jr      pl_steep_x
+pl_steep_l:     ld      a,1
+pl_steep_x:     ld      (ln_left),a
+                ld      a,d
                 ld      (ln_dy),a
-                cp      l
-                jp      c,plot_shallow          ; |dy| < dx
-                jp      plot_steep
+                jp      pl_steep
 
-; ---------------------------------------------------------------------------
-; addr_of : C = x, B = y  ->  HL = screen byte, A = single-pixel mask.
-; ---------------------------------------------------------------------------
+pl_horiz:       ; B = the row; C, E = the x's in either order
+                ld      a,c
+                cp      e
+                jp      c,plot_horiz
+                ld      c,e
+                ld      e,a
+                jp      plot_horiz
+
+pl_vert:        ; B = y0 (the bottom), D = dy, C = x
+                ld      a,b
+                sub     d
+                ld      d,b                     ; D = the bottom row
+                ld      b,a                     ; B = the top row
+                jp      plot_vert
+
+                ALIGN   64
+PLTAB_R:        DB      $ff,0
+                DW      pr0
+                DB      $7f,0
+                DW      pr1
+                DB      $3f,0
+                DW      pr2
+                DB      $1f,0
+                DW      pr3
+                DB      $0f,0
+                DW      pr4
+                DB      $07,0
+                DW      pr5
+                DB      $03,0
+                DW      pr6
+                DB      $01,0
+                DW      pr7
+PLTAB_L:        DB      $80,0
+                DW      pl0
+                DB      $c0,0
+                DW      pl1
+                DB      $e0,0
+                DW      pl2
+                DB      $f0,0
+                DW      pl3
+                DB      $f8,0
+                DW      pl4
+                DB      $fc,0
+                DW      pl5
+                DB      $fe,0
+                DW      pl6
+                DB      $ff,0
+                DW      pl7
+
+pl_steep:
+                ld      a,e
+                or      a
+                jp      z,pl_vert
+                ld      a,d
+                srl     a
+                ld      (ln_errs),a
+                ld      (ln_err),a
+                ld      a,2
+                ld      (ln_ls),a
+                ld      a,b                     ; rows left in the cell
+                and     7
+                inc     a
+                ld      iyl,a
+                push    de
+                call    addr_of                 ; HL = the byte, A = the mask
+                pop     de
+                ld      c,a                     ; C = the pixel mask
+                ld      b,e                     ; B = cnt = dx
+                ld      a,e
+                ld      d,a                     ; D = step = dx
+                ld      a,(ln_dy)
+                ld      e,a                     ; E = dy
+                ld      a,(ln_left)
+                or      a
+                ld      a,(ln_err)
+                jp      nz,st_left
+st_right:
+                ex      af,af'
+                ld      a,(hl)
+                or      c
+                ld      (hl),a
+                ex      af,af'
+                sub     d                       ; r -= step
+                jr      c,st_rx
+st_r1:          dec     iyl
+                jr      z,st_rc
+                dec     h
+                jr      st_right
+st_rc:          call    row_cross
+                jr      st_right
+st_rx:          call    st_xstep
+                rrc     c
+                jr      nc,st_r1
+                inc     l
+                jr      st_r1
+st_left:
+                ex      af,af'
+                ld      a,(hl)
+                or      c
+                ld      (hl),a
+                ex      af,af'
+                sub     d
+                jr      c,st_lx
+st_l1:          dec     iyl
+                jr      z,st_lc
+                dec     h
+                jr      st_left
+st_lc:          call    row_cross
+                jr      st_left
+st_lx:          call    st_xstep
+                rlc     c
+                jr      nc,st_l1
+                dec     l
+                jr      st_l1
+
+; row_cross : HL -> row 0 of a cell -> row 7 of the cell above (a borrow
+; crosses into the third above), IYL = the rows left there.  A preserved.
+row_cross:
+                ld      iyl,8
+                ex      af,af'
+                ld      a,l
+                sub     32
+                ld      l,a
+                ld      a,h
+                jr      nc,rc_same
+                sub     8
+rc_same:        or      7
+                ld      h,a
+                ex      af,af'
+                ret
+
+st_xstep:
+                add     a,e
+                dec     b
+                ret     nz
+                push    hl
+                ld      hl,ln_ls
+                dec     (hl)
+                pop     hl
+                jr      z,st_done
+                push    hl
+                ld      hl,ln_errs
+                sub     (hl)
+                pop     hl
+                jr      c,st_done
+                ld      b,1
+                ret
+st_done:        pop     hl
+                ret
+
+; --- the shallow core, right-going: bit n of the byte is mask $80 >> n --
+; A = err, D = dy, E = dx, B = cnt, C = the run mask, HL = the byte.
+; Each position marks its bit in the run, then err -= dy: no borrow means
+; the run extends to the next bit; a borrow is a y-step, which plots the
+; run and moves up a row.
+; --- the shallow core, right-going: bit n of the byte is mask $80 >> n --
+; A = err, D = dy, E = dx, B = cnt, HL = the byte, IYL = rows left in the
+; cell, C = the run's start mask (every bit from the start rightwards).
+; Each position tests err -= dy: no borrow means the run extends to the
+; next bit; a borrow is a y-step, which plots the run up to this bit (the
+; static mask of the position) and moves up a row.
+pr0:            sub     d
+                jr      c,yr0
+pr1:            sub     d
+                jr      c,yr1
+pr2:            sub     d
+                jr      c,yr2
+pr3:            sub     d
+                jr      c,yr3
+pr4:            sub     d
+                jp      c,yr4
+pr5:            sub     d
+                jp      c,yr5
+pr6:            sub     d
+                jp      c,yr6
+pr7:            sub     d
+                jp      c,yr7
+                ex      af,af'                  ; the byte is full: plot the run
+                ld      a,c
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                ld      c,$ff
+                inc     l
+                jp      pr0
+yr0:
+                ex      af,af'
+                ld      a,c
+                and     $80
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yr0_c
+                dec     h
+yr0_b:          ld      c,$7f
+                jp      pr1
+yr0_c:       call    row_cross
+                jr      yr0_b
+yr1:
+                ex      af,af'
+                ld      a,c
+                and     $c0
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yr1_c
+                dec     h
+yr1_b:          ld      c,$3f
+                jp      pr2
+yr1_c:       call    row_cross
+                jr      yr1_b
+yr2:
+                ex      af,af'
+                ld      a,c
+                and     $e0
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yr2_c
+                dec     h
+yr2_b:          ld      c,$1f
+                jp      pr3
+yr2_c:       call    row_cross
+                jr      yr2_b
+yr3:
+                ex      af,af'
+                ld      a,c
+                and     $f0
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yr3_c
+                dec     h
+yr3_b:          ld      c,$0f
+                jp      pr4
+yr3_c:       call    row_cross
+                jr      yr3_b
+yr4:
+                ex      af,af'
+                ld      a,c
+                and     $f8
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yr4_c
+                dec     h
+yr4_b:          ld      c,$07
+                jp      pr5
+yr4_c:       call    row_cross
+                jr      yr4_b
+yr5:
+                ex      af,af'
+                ld      a,c
+                and     $fc
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yr5_c
+                dec     h
+yr5_b:          ld      c,$03
+                jp      pr6
+yr5_c:       call    row_cross
+                jr      yr5_b
+yr6:
+                ex      af,af'
+                ld      a,c
+                and     $fe
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yr6_c
+                dec     h
+yr6_b:          ld      c,$01
+                jp      pr7
+yr6_c:       call    row_cross
+                jr      yr6_b
+yr7:
+                ex      af,af'
+                ld      a,c
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yr7_c
+                dec     h
+yr7_b:          ld      c,$ff
+                inc     l
+                jp      pr0
+yr7_c:       call    row_cross
+                jr      yr7_b
+; --- and left-going: the run grows toward mask $80 -----------------------
+pl7:            sub     d
+                jr      c,yl7
+pl6:            sub     d
+                jr      c,yl6
+pl5:            sub     d
+                jr      c,yl5
+pl4:            sub     d
+                jr      c,yl4
+pl3:            sub     d
+                jp      c,yl3
+pl2:            sub     d
+                jp      c,yl2
+pl1:            sub     d
+                jp      c,yl1
+pl0:            sub     d
+                jp      c,yl0
+                ex      af,af'
+                ld      a,c
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                ld      c,$ff
+                dec     l
+                jp      pl7
+yl7:
+                ex      af,af'
+                ld      a,c
+                and     $01
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yl7_c
+                dec     h
+yl7_b:          ld      c,$fe
+                jp      pl6
+yl7_c:       call    row_cross
+                jr      yl7_b
+yl6:
+                ex      af,af'
+                ld      a,c
+                and     $03
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yl6_c
+                dec     h
+yl6_b:          ld      c,$fc
+                jp      pl5
+yl6_c:       call    row_cross
+                jr      yl6_b
+yl5:
+                ex      af,af'
+                ld      a,c
+                and     $07
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yl5_c
+                dec     h
+yl5_b:          ld      c,$f8
+                jp      pl4
+yl5_c:       call    row_cross
+                jr      yl5_b
+yl4:
+                ex      af,af'
+                ld      a,c
+                and     $0f
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yl4_c
+                dec     h
+yl4_b:          ld      c,$f0
+                jp      pl3
+yl4_c:       call    row_cross
+                jr      yl4_b
+yl3:
+                ex      af,af'
+                ld      a,c
+                and     $1f
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yl3_c
+                dec     h
+yl3_b:          ld      c,$e0
+                jp      pl2
+yl3_c:       call    row_cross
+                jr      yl3_b
+yl2:
+                ex      af,af'
+                ld      a,c
+                and     $3f
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yl2_c
+                dec     h
+yl2_b:          ld      c,$c0
+                jp      pl1
+yl2_c:       call    row_cross
+                jr      yl2_b
+yl1:
+                ex      af,af'
+                ld      a,c
+                and     $7f
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yl1_c
+                dec     h
+yl1_b:          ld      c,$80
+                jp      pl0
+yl1_c:       call    row_cross
+                jr      yl1_b
+yl0:
+                ex      af,af'
+                ld      a,c
+                or      (hl)
+                ld      (hl),a
+                ex      af,af'
+                add     a,e                     ; err += dx
+                dec     b
+                call    z,ys_phase              ; the y-steps are spent
+                dec     iyl
+                jr      z,yl0_c
+                dec     h
+yl0_b:          ld      c,$ff
+                dec     l
+                jp      pl7
+yl0_c:       call    row_cross
+                jr      yl0_b
+; ys_phase : the y-steps are spent (B = 0): the e-phase, and when the line
+; is done, straight back to plot_line's caller.
+ys_phase:
+                push    hl
+                ld      hl,ln_ls
+                dec     (hl)
+                jr      z,ysp_done
+                ld      hl,ln_errs
+                sub     (hl)                    ; the e-phase
+                jr      c,ysp_done
+                pop     hl
+                ld      b,1
+                ret
+ysp_done:       pop     hl
+                pop     hl
+                ret
+
+
 addr_of:
 rsel1:          ld      h,ROWLO_A>>8
                 ld      l,b
@@ -189,104 +766,103 @@ rsel1:          ld      h,ROWLO_A>>8
 ; ---------------------------------------------------------------------------
 ; plot_vert : C = x, B = y1, D = y2
 ; ---------------------------------------------------------------------------
+; plot_vert : C = x, B and D = the rows, either order.  The unrolled column
+; (vcol.inc) is entered at the top row's plot and left by a RET patched over
+; the byte after the bottom row's; it returns to pv_restore.
+; ---------------------------------------------------------------------------
 plot_vert:
                 ld      a,b
                 cp      d
                 jr      c,pv_ord
-                jr      z,pv_ord
                 ld      a,b
                 ld      b,d
-                ld      d,a
-pv_ord:
-                ld      a,d
-                sub     b
-                inc     a
-                ld      (pv_count),a
-                call    addr_of                 ; HL = byte, A = mask
-                ld      c,a
-                ld      a,b
-                and     7
-                ld      d,a                     ; D = line within the cell
-                ld      a,(pv_count)
-                ld      b,a                     ; B = pixels left
-pv_next:
-                ld      a,8
-                sub     d
-                cp      b
-                jr      c,pv_n2
-                ld      a,b
-pv_n2:
-                ld      e,a                     ; E = pixels this cell (1..8)
-                ld      a,b
-                sub     e
-                ld      b,a                     ; B = remaining
-                ld      a,8
-                sub     e
-                add     a,a
-                add     a,a                     ; (8 - n) * 4
-                add     a,PV8 & $ff
-                ld      (pv_jp+1),a
-pv_jp:          jp      PV8
-
-                ALIGN   32
-PV8:
-                DUP     8
+                ld      d,a                     ; B = the top row, D = the bottom
+pv_ord:         ld      l,b
+rsel_v:         ld      h,ROWLO_A>>8
                 ld      a,(hl)
-                or      c
-                ld      (hl),a
                 inc     h
-                EDUP
-                ld      a,b
-                or      a
-                ret     z
-                ; the cell was completed: fix up the address
-                ld      a,l
-                add     a,32
+                ld      h,(hl)
                 ld      l,a
-                jr      c,pv_cell
-                ld      a,h
-                sub     8
-                ld      h,a
-pv_cell:
-                ld      d,0
-                jr      pv_next
-
-; ---------------------------------------------------------------------------
-; plot_horiz : C = x1, B = y, E = x2  (x1 < x2)
-; ---------------------------------------------------------------------------
-plot_horiz:
                 ld      a,c
-                ld      (ph_x1),a
-                ld      a,e
-                ld      (ph_x2),a
-                call    addr_of                 ; HL = byte holding x1
-                ld      a,(ph_x1)
-                and     7
-                ld      de,MASKR
-                add     a,e
-                ld      e,a
-                ld      a,(de)
-                ld      c,a                     ; C = mask from x1 rightwards
-                ld      a,(ph_x2)
-                and     7
-                ld      de,MASKL
-                add     a,e
-                ld      e,a
-                ld      a,(de)
-                ld      b,a                     ; B = mask up to and incl. x2
-                ld      a,(ph_x2)
-                and     $f8
-                ld      d,a
-                ld      a,(ph_x1)
-                and     $f8
-                ld      e,a
-                ld      a,d
-                sub     e
                 rrca
                 rrca
                 rrca
                 and     $1f
+                add     a,l
+                ld      l,a                     ; HL = the top byte
+                push    hl
+                ld      l,c
+                ld      h,MASKTAB>>8
+                ld      c,(hl)                  ; C = the pixel's bit
+                ld      l,d
+                ld      h,VPE_LO>>8
+                ld      e,(hl)
+                inc     h
+                ld      d,(hl)                  ; the bottom row's plot,
+                inc     de                      ;   three bytes long
+                inc     de
+                inc     de                      ; DE -> the byte after it
+                ld      a,(de)
+                ld      (pv_saved),a
+                ld      (pv_wr+1),de
+                ld      a,$c9
+                ld      (de),a                  ; a RET ends the column there
+                ld      l,b
+                ld      h,VPE_LO>>8
+                ld      e,(hl)
+                inc     h
+                ld      d,(hl)                  ; DE = the top row's plot
+                ld      hl,pv_restore
+                ex      (sp),hl                 ; HL = the byte, the return below
+                push    de
+                ret                             ; into the column
+pv_restore:     ld      a,(pv_saved)
+pv_wr:          ld      (0),a                   ; the patched byte back
+                ret
+pv_saved:       DB      0
+
+                include "vcol.inc"
+
+plot_horiz:
+                ; C = x1 <= E = x2 on row B: byte strips, the same pixels as
+                ; the shallow core would accumulate
+                ld      l,b
+rsel_h:         ld      h,ROWLO_A>>8
+                ld      a,(hl)
+                inc     h
+                ld      h,(hl)
+                ld      l,a                     ; the row's base
+                ld      a,c
+                rrca
+                rrca
+                rrca
+                and     $1f
+                ld      b,a                     ; x1 >> 3
+                add     a,l
+                ld      l,a                     ; HL = the byte holding x1
+                ld      a,e
+                rrca
+                rrca
+                rrca
+                and     $1f
+                sub     b
                 ld      d,a                     ; D = bytes spanned - 1
+                ld      a,c
+                and     7
+                add     a,MASKR & 255
+                ld      c,a
+                ld      b,MASKR >> 8
+                ld      a,(bc)
+                ld      c,a                     ; C = mask from x1 rightwards
+                ld      a,e
+                and     7
+                add     a,MASKL & 255
+                push    hl
+                ld      l,a
+                ld      h,MASKL >> 8
+                ld      b,(hl)                  ; B = mask up to and incl. x2
+                pop     hl
+                ld      a,d
                 or      a
                 jr      nz,ph_multi
                 ld      a,c
@@ -325,205 +901,6 @@ ph_last:
 ; frame's sloped pixels come through here - 880 of them a frame against 21
 ; for the steep path - and they are near-horizontal, so the scanline step the
 ; unrolling makes dearer is paid about one time in six.
-; ---------------------------------------------------------------------------
-plot_shallow:
-                ld      a,c
-                and     7
-                add     a,a
-                ld      l,a
-                ld      h,0
-                ld      de,PSJT
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (ps_go+1),de
-                call    addr_of                 ; HL = byte, C and B consumed
-                call    pl_dirsel
-                ld      a,(ln_dy)
-                ld      d,a
-                ld      a,(ln_dx)
-                ld      e,a
-                inc     a
-                ld      b,a                     ; B = dx + 1 pixels
-                ld      a,e
-                srl     a                       ; A = err = dx >> 1
-ps_go:          jp      0
-
-cp7:            set     7,(hl)
-                dec     b
-                jr      z,ps_ret
-                sub     d
-                jr      c,ys7
-cp6:            set     6,(hl)
-                dec     b
-                jr      z,ps_ret
-                sub     d
-                jr      c,ys6
-cp5:            set     5,(hl)
-                dec     b
-                jr      z,ps_ret
-                sub     d
-                jr      c,ys5
-cp4:            set     4,(hl)
-                dec     b
-                jr      z,ps_ret
-                sub     d
-                jr      c,ys4
-cp3:            set     3,(hl)
-                dec     b
-                jr      z,ps_ret
-                sub     d
-                jr      c,ys3
-cp2:            set     2,(hl)
-                dec     b
-                jr      z,ps_ret
-                sub     d
-                jr      c,ys2
-cp1:            set     1,(hl)
-                dec     b
-                jr      z,ps_ret
-                sub     d
-                jr      c,ys1
-cp0:            set     0,(hl)
-                dec     b
-                jr      z,ps_ret
-                sub     d
-                jr      c,ys0
-                inc     l
-                jp      cp7
-ps_ret:         ret
-
-ys7:            add     a,e
-                call    ps_sl
-                jp      cp6
-ys6:            add     a,e
-                call    ps_sl
-                jp      cp5
-ys5:            add     a,e
-                call    ps_sl
-                jp      cp4
-ys4:            add     a,e
-                call    ps_sl
-                jp      cp3
-ys3:            add     a,e
-                call    ps_sl
-                jp      cp2
-ys2:            add     a,e
-                call    ps_sl
-                jp      cp1
-ys1:            add     a,e
-                call    ps_sl
-                jp      cp0
-ys0:            add     a,e
-                call    ps_sl
-                inc     l
-                jp      cp7
-
-; ps_sl : one scanline, in whichever direction the line runs.  C counts the
-; rows left inside the character cell, so the cell-crossing fixup - the only
-; part that needs A - is paid once in eight.
-ps_sl:          jp      0
-ps_sl_d:
-                inc     h
-                dec     c
-                ret     nz
-                ld      c,8
-                ex      af,af'
-                ld      a,l
-                add     a,32
-                ld      l,a
-                jr      c,psd_r
-                ld      a,h
-                sub     8
-                ld      h,a
-psd_r:          ex      af,af'
-                ret
-ps_sl_u:
-                dec     h
-                dec     c
-                ret     nz
-                ld      c,8
-                ex      af,af'
-                ld      a,h
-                add     a,8
-                ld      h,a
-                ld      a,l
-                sub     32
-                ld      l,a
-                jr      nc,psu_r
-                ld      a,h
-                sub     8
-                ld      h,a
-psu_r:          ex      af,af'
-                ret
-
-PSJT:           DW      cp7, cp6, cp5, cp4, cp3, cp2, cp1, cp0
-
-; ---------------------------------------------------------------------------
-; plot_steep : |dy| >= dx >= 1.  C = x1, B = y1.
-; ---------------------------------------------------------------------------
-plot_steep:
-                ; Twenty-one pixels a frame come through here against 880 in
-                ; the shallow path, so this shares the shallow drawer's
-                ; scanline step and keeps its mask in memory rather than
-                ; carrying a second unrolled copy of everything.
-                ld      a,(ln_dx)
-                ld      (pt_dx+1),a
-                call    addr_of
-                ld      (pt_mask),a
-                call    pl_dirsel
-                ld      a,(ln_dy)
-                ld      d,a
-                srl     a
-                ld      e,a                     ; err = dy >> 1
-                inc     d
-                ld      b,d                     ; B = dy + 1 pixels
-                dec     d                       ; D = dy again
-pt_loop:
-                ld      a,(pt_mask)
-                or      (hl)
-                ld      (hl),a
-                dec     b
-                ret     z
-                ld      a,e
-pt_dx:          sub     0
-                ld      e,a
-                jr      nc,pt_noy
-                add     a,d
-                ld      e,a
-                ld      a,(pt_mask)
-                rrca
-                ld      (pt_mask),a
-                jr      nc,pt_noy
-                inc     l
-pt_noy:
-                call    ps_sl
-                jr      pt_loop
-
-; pl_dirsel : point ps_sl at the right scanline step for ln_sy and prime C
-; with the rows left inside the character cell.
-pl_dirsel:
-                ld      a,h
-                and     7
-                ld      c,a
-                ld      de,ps_sl_d
-                ld      a,(ln_sy)
-                inc     a
-                jr      z,pl_up
-                ld      a,8
-                sub     c
-                ld      c,a
-                jr      pl_set
-pl_up:
-                inc     c
-                ld      de,ps_sl_u
-pl_set:
-                ld      (ps_sl+1),de
-                ret
-
-; ---------------------------------------------------------------------------
-; Pixel mask tables.
 ; ---------------------------------------------------------------------------
                 ALIGN   256
 MASKTAB:        DUP     32

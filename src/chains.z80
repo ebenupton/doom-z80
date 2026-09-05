@@ -1,0 +1,29 @@
+; The unrolled rounding-shift chains sit first in the code region, which
+; starts on a page, so that the byte-indexed dispatch into them never
+; crosses one.
+ra_chain:
+                DUP     9
+                sra     a
+                rr      h
+                rr      l
+                EDUP
+                ld      c,a
+                ld      de,1
+                add     hl,de
+                ld      a,c
+                adc     a,0
+                sra     a
+                rr      h
+                rr      l
+                ret
+                ASSERT  (ra_chain >> 8) == (($ - 1) >> 8), "ra_chain crosses a page"
+rh_chain:
+                DUP     15
+                sra     h
+                rr      l
+                EDUP
+                inc     hl
+                sra     h
+                rr      l
+                ret
+                ASSERT  (rh_chain >> 8) == (($ - 1) >> 8), "rh_chain crosses a page"

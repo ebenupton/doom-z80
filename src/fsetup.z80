@@ -1,0 +1,331 @@
+; ===========================================================================
+; fsetup.z80 : frame setup that runs once an angle change, in bank 4 - the
+; trig lookups and every patch site they feed (view.z80's vs_rebuild body).
+; Entered through the paging stub in vs_rebuild; touches nothing in bank 0.
+; ===========================================================================
+vs_rebuild_b4:
+                ld      a,(pl_ang)
+                call    sincos_lookup
+                ld      a,c
+                ld      (vs_smag),a
+                ld      a,b
+                ld      (vs_sneg),a
+                ld      a,e
+                ld      (vs_sunity),a
+                ld      a,(pl_ang)
+                add     a,64
+                call    sincos_lookup
+                ld      a,c
+                ld      (vs_cmag),a
+                ld      a,b
+                ld      (vs_cneg),a
+                ld      a,e
+                ld      (vs_cunity),a
+
+                ; product tables
+                ; patch the rotation dispatchers
+                ld      hl,rot_sin_gen
+                ld      a,(vs_sunity)
+                or      a
+                jr      z,vs_s1
+                ld      hl,rot_sin_unity
+vs_s1:          ld      (rs_k+1),hl
+                ld      a,(vs_smag)
+                ld      (rsm1+1),a
+                ld      hl,rsn
+                ld      a,(vs_sneg)
+                call    patch_sign
+
+                ld      hl,rot_cos_gen
+                ld      a,(vs_cunity)
+                or      a
+                jr      z,vs_c1
+                ld      hl,rot_cos_unity
+vs_c1:          ld      (rc_k+1),hl
+                ld      a,(vs_cmag)
+                ld      (rcm1+1),a
+                ld      hl,rcn
+                ld      a,(vs_cneg)
+                call    patch_sign
+
+                ; --- the vertex transform: per-angle product tables, the
+                ; page terms and the four sign sites (bsp.z80 vertex_get) ---
+                ld      a,(vs_sunity)
+                or      a
+                ld      de,256
+                jr      nz,vs_ms16
+                ld      a,(vs_smag)
+                ld      e,a
+                ld      d,0
+vs_ms16:        ld      (vs_m16s),de
+                ld      a,(vs_cunity)
+                or      a
+                ld      de,256
+                jr      nz,vs_mc16
+                ld      a,(vs_cmag)
+                ld      e,a
+                ld      d,0
+vs_mc16:        ld      (vs_m16c),de
+                xor     a
+                ld      (vs_tab_valid),a        ; the product tables are built
+                call    vs_pbtab                ; lazily on the first cold vertex
+                                                ; this angle (skipped when a frame
+                                                ; transforms none - sparse views)
+                ; x: 4 [+|-] ox*|s| [-|+] oy*|c|; y: 4 [+|-] ox*|c| [+|-] oy*|s|
+                ld      a,(vs_sneg)
+                ld      hl,vgx1
+                ld      de,$0942                ; add hl,bc / sbc hl,bc
+                call    vs_patch5
+                ld      a,(vs_cneg)
+                xor     1
+                ld      hl,vgx2
+                ld      de,$1952                ; add hl,de / sbc hl,de
+                call    vs_patch5
+                ld      a,(vs_cneg)
+                ld      hl,vgy1
+                ld      de,$0942
+                call    vs_patch5
+                ld      a,(vs_sneg)
+                ld      hl,vgy2
+                ld      de,$1952
+                call    vs_patch5
+                ret
+
+; vs_build_tables : the two per-angle product tables (X*|sin|, X*|cos|),
+; deferred out of vs_rebuild_b4 to the first cold vertex (vg_build_tabs).
+vs_build_tables:
+                ld      de,(vs_m16s)
+                ld      ix,TS_TAB+512
+                call    vs_ptab
+                ld      de,(vs_m16c)
+                ld      ix,TC_TAB+512
+                call    vs_ptab
+                ld      a,1
+                ld      (vs_tab_valid),a
+                ret
+
+; vs_ptab : DE = a magnitude (1..256), IX -> the end of a 256-entry table
+; of (lo, hi) products X * DE, filled top down through the stack pointer
+; (interrupts are off throughout the frame).  255 * 256 wraps to $FF00,
+; which is the right low word.
+vs_ptab:
+                ld      (vs_spsave),sp
+                ld      sp,ix
+                ld      h,e
+                ld      l,0                     ; M << 8 (mod 2^16)
+                or      a
+                sbc     hl,de                   ; HL = 255 * M
+                ld      a,e
+                cpl
+                ld      e,a
+                ld      a,d
+                cpl
+                ld      d,a
+                inc     de                      ; DE = -M
+                ld      b,32
+vpt_l:          DUP     8
+                push    hl
+                add     hl,de
+                EDUP
+                djnz    vpt_l
+                ld      sp,(vs_spsave)
+                ret
+
+; vs_pbtab : the page terms.  kx = sS * 32 * |s|, ky = sC * 32 * |c|;
+; for the nibble pg = pgx | pgy << 2 with fx = pgx - 2, fy = pgy - 2:
+;   PBX[pg] = fx * kx - fy * ky,   PBY[pg] = fx * ky + fy * kx
+vs_pbtab:
+                ld      hl,(vs_m16s)
+                ld      a,(vs_sneg)
+                call    vs_k32
+                ld      (vs_kx),hl
+                ld      ix,vs_fa
+                call    vs_fmul
+                ld      hl,(vs_m16c)
+                ld      a,(vs_cneg)
+                call    vs_k32
+                ld      (vs_ky),hl
+                ld      ix,vs_fb
+                call    vs_fmul
+                ; PBX[pgx | pgy<<2] = FA[pgx] - FB[pgy], PBY = FB[pgx] + FA[pgy]:
+                ; unrolled, DE = -FB[pgy], BC = FA[pgy] per row (was a 600 T/entry
+                ; loop through vs_word: 9.7k T -> 1.6k)
+                ld      hl,(vs_fb+0)
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ex      de,hl                   ; DE = -fy * ky
+                ld      bc,(vs_fa+0)              ; BC = fy * kx
+                ld      hl,(vs_fa+0)
+                add     hl,de
+                ld      (PBX+0),hl
+                ld      hl,(vs_fb+0)
+                add     hl,bc
+                ld      (PBY+0),hl
+                ld      hl,(vs_fa+2)
+                add     hl,de
+                ld      (PBX+2),hl
+                ld      hl,(vs_fb+2)
+                add     hl,bc
+                ld      (PBY+2),hl
+                ld      hl,(vs_fa+4)
+                add     hl,de
+                ld      (PBX+4),hl
+                ld      hl,(vs_fb+4)
+                add     hl,bc
+                ld      (PBY+4),hl
+                ld      hl,(vs_fa+6)
+                add     hl,de
+                ld      (PBX+6),hl
+                ld      hl,(vs_fb+6)
+                add     hl,bc
+                ld      (PBY+6),hl
+                ld      hl,(vs_fb+2)
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ex      de,hl                   ; DE = -fy * ky
+                ld      bc,(vs_fa+2)              ; BC = fy * kx
+                ld      hl,(vs_fa+0)
+                add     hl,de
+                ld      (PBX+8),hl
+                ld      hl,(vs_fb+0)
+                add     hl,bc
+                ld      (PBY+8),hl
+                ld      hl,(vs_fa+2)
+                add     hl,de
+                ld      (PBX+10),hl
+                ld      hl,(vs_fb+2)
+                add     hl,bc
+                ld      (PBY+10),hl
+                ld      hl,(vs_fa+4)
+                add     hl,de
+                ld      (PBX+12),hl
+                ld      hl,(vs_fb+4)
+                add     hl,bc
+                ld      (PBY+12),hl
+                ld      hl,(vs_fa+6)
+                add     hl,de
+                ld      (PBX+14),hl
+                ld      hl,(vs_fb+6)
+                add     hl,bc
+                ld      (PBY+14),hl
+                ld      hl,(vs_fb+4)
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ex      de,hl                   ; DE = -fy * ky
+                ld      bc,(vs_fa+4)              ; BC = fy * kx
+                ld      hl,(vs_fa+0)
+                add     hl,de
+                ld      (PBX+16),hl
+                ld      hl,(vs_fb+0)
+                add     hl,bc
+                ld      (PBY+16),hl
+                ld      hl,(vs_fa+2)
+                add     hl,de
+                ld      (PBX+18),hl
+                ld      hl,(vs_fb+2)
+                add     hl,bc
+                ld      (PBY+18),hl
+                ld      hl,(vs_fa+4)
+                add     hl,de
+                ld      (PBX+20),hl
+                ld      hl,(vs_fb+4)
+                add     hl,bc
+                ld      (PBY+20),hl
+                ld      hl,(vs_fa+6)
+                add     hl,de
+                ld      (PBX+22),hl
+                ld      hl,(vs_fb+6)
+                add     hl,bc
+                ld      (PBY+22),hl
+                ld      hl,(vs_fb+6)
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ex      de,hl                   ; DE = -fy * ky
+                ld      bc,(vs_fa+6)              ; BC = fy * kx
+                ld      hl,(vs_fa+0)
+                add     hl,de
+                ld      (PBX+24),hl
+                ld      hl,(vs_fb+0)
+                add     hl,bc
+                ld      (PBY+24),hl
+                ld      hl,(vs_fa+2)
+                add     hl,de
+                ld      (PBX+26),hl
+                ld      hl,(vs_fb+2)
+                add     hl,bc
+                ld      (PBY+26),hl
+                ld      hl,(vs_fa+4)
+                add     hl,de
+                ld      (PBX+28),hl
+                ld      hl,(vs_fb+4)
+                add     hl,bc
+                ld      (PBY+28),hl
+                ld      hl,(vs_fa+6)
+                add     hl,de
+                ld      (PBX+30),hl
+                ld      hl,(vs_fb+6)
+                add     hl,bc
+                ld      (PBY+30),hl
+                ret
+; vs_k32 : HL = a magnitude, A = its sign flag -> HL = +/- 32 * HL
+vs_k32:         add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                or      a
+                ret     z
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ret
+; vs_fmul : HL = k, IX -> four words: -2k, -k, 0, k
+vs_fmul:        ld      (ix+6),l
+                ld      (ix+7),h
+                ld      (ix+4),0
+                ld      (ix+5),0
+                ex      de,hl
+                ld      hl,0
+                or      a
+                sbc     hl,de                   ; -k
+                ld      (ix+2),l
+                ld      (ix+3),h
+                add     hl,hl                   ; -2k
+                ld      (ix+0),l
+                ld      (ix+1),h
+                ret
+
+; vs_patch5 : HL -> a five-byte site, D = the add opcode, E = the second
+; byte of the sbc, A = nonzero for the subtraction:
+;   add hl,rr / adc a,0 / nop / nop     or     or a / sbc hl,rr / sbc a,0
+vs_patch5:      or      a
+                jr      nz,vp5_sub
+                ld      (hl),d
+                inc     hl
+                ld      (hl),$ce
+                inc     hl
+                ld      (hl),0
+                inc     hl
+                ld      (hl),0
+                inc     hl
+                ld      (hl),0
+                ret
+vp5_sub:        ld      (hl),$b7
+                inc     hl
+                ld      (hl),$ed
+                inc     hl
+                ld      (hl),e
+                inc     hl
+                ld      (hl),$de
+                inc     hl
+                ld      (hl),0
+                ret

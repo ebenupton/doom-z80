@@ -1,0 +1,1144 @@
+; ===========================================================================
+; objects.z80 : the static-object billboards, a transcription of the BBC
+; port's bsp/objects.s.  Lives in bank 4 at OBJ_CODE with its planes, art
+; templates and workspace; obj_subsector_stub (bsp.z80) pages the bank in
+; and restores the geometry bank on return.  Everything called from here -
+; the rotation, the reciprocal, the projections, the clipper - is in the
+; always-mapped bank 2, and nothing here reads bank 0.
+;
+; A subsector's objects are drawn before its segs (subsector.s: an object
+; inside a convex cell stands in front of every wall of that cell).  Each
+; object is rotated and projected like a vertex at its feet, staged with its
+; depth, and then drawn nearest first: a hexagonal prism of width a = H*k/64
+; is fitted to the projected height H, the kind's art template is walked
+; entry by entry (each an x,y byte-offset pair into the vertex block), the
+; plain lines clipped as ordinary lines and the entries after OBJ_ART_ARM
+; applied as a FUSED bottom edge so the object occludes what stands behind
+; it, and finally the spans it touched are merged.
+; ===========================================================================
+
+; OBJ_LDX : A = a byte offset into the vertex block -> (DE) <- the s16
+; there, DE += 2.  HL kept.  (Inline: the stamp loop runs it four times a
+; line.)
+                MACRO   OBJ_LDX
+                add     a,OBJ_XY & 255
+                ld      c,a
+                ld      b,OBJ_XY >> 8
+                ld      a,(bc)
+                ld      (de),a
+                inc     c
+                inc     de
+                ld      a,(bc)
+                ld      (de),a
+                inc     de
+                ENDM
+
+; ---------------------------------------------------------------------------
+; obj_subsector : A = the subsector id.  Every object homed there (a run of
+; the ss-sorted planes, found from the octet's first index) is projected and
+; staged, then the staged ones are drawn nearest first.
+; ---------------------------------------------------------------------------
+obj_subsector:
+                ld      (obj_ss),a
+                ld      c,a
+                xor     a
+                ld      (obj_n),a
+                ld      a,c
+                rrca
+                rrca
+                rrca
+                and     31
+                ld      e,a
+                ld      d,0
+                ld      hl,OBJ_RUN8
+                add     hl,de
+                ld      c,(hl)                  ; the octet's first object
+obj_scan:
+                ld      e,c
+                ld      hl,OBJ_SS
+                add     hl,de                   ; D = 0 throughout
+                ld      a,(obj_ss)
+                cp      (hl)
+                jr      z,obj_hit
+                jr      c,obj_run_end           ; past the run (sorted plane)
+obj_skip:
+                inc     c
+                ld      a,c
+                cp      N_OBJ
+                jr      c,obj_scan
+                jr      obj_run_end
+obj_hit:
+                call    obj_project
+                ld      a,(obj_i)
+                ld      c,a
+                ld      d,0
+                jr      obj_skip
+obj_run_end:
+                ld      a,(obj_n)
+                ld      (obj_left),a
+obj_pick:
+                ld      a,(obj_left)
+                or      a
+                ret     z
+                ld      a,(obj_n)
+                ld      d,a
+                ld      b,0                     ; the nearest so far
+                ld      c,1
+obj_minloop:
+                ld      a,c
+                cp      d
+                jr      nc,obj_gotmin
+                push    bc
+                push    de
+                add     a,a
+                add     a,obj_sd & 255
+                ld      l,a
+                ld      h,obj_sd >> 8
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)                  ; DE = depth[y]
+                ld      a,b
+                add     a,a
+                add     a,obj_sd & 255
+                ld      l,a
+                ld      a,e
+                sub     (hl)
+                inc     l
+                ld      a,d
+                sbc     a,(hl)                  ; carry: depth[y] < depth[best]
+                pop     de
+                pop     bc
+                jr      nc,obj_minnext
+                ld      b,c
+obj_minnext:
+                inc     c
+                jr      obj_minloop
+obj_gotmin:
+                ld      a,b
+                ld      (obj_best),a
+                call    obj_draw_slot
+                ld      a,(obj_best)
+                add     a,a
+                add     a,(obj_sd & 255) + 1
+                ld      l,a
+                ld      h,obj_sd >> 8
+                ld      (hl),$FF                ; drawn: sinks to the far end
+                ld      hl,obj_left
+                dec     (hl)
+                jr      nz,obj_pick
+                ret
+
+; ---------------------------------------------------------------------------
+; obj_project : C = the object.  Rotated with the vertex pipeline's own
+; operations in the same order (vg_cold), so an object lands exactly where a
+; vertex at its feet would; culled behind the near limit; the centre column
+; and the top and floor rows staged with the depth, up to OBJ_MAXSLOT.
+; ---------------------------------------------------------------------------
+obj_project:
+                ld      a,c
+                ld      (obj_i),a
+                ld      a,(obj_n)
+                cp      OBJ_MAXSLOT
+                ret     nc
+                ld      e,c
+                ld      d,0
+                ld      hl,OBJ_OXL
+                add     hl,de
+                ld      de,N_OBJ
+                ld      c,(hl)
+                add     hl,de
+                ld      b,(hl)                  ; BC = wx
+                add     hl,de
+                ld      a,(hl)
+                add     hl,de
+                ld      d,(hl)
+                ld      e,a                     ; DE = wy
+                push    bc
+                push    de
+                call    rot_cos                 ; A:HL = wy * cos
+                ld      (vs_acc),hl
+                ld      (vs_acc+2),a
+                pop     de
+                call    rot_sin                 ; A:HL = wy * sin
+                ld      (vs_acc2),hl
+                ld      (vs_acc2+2),a
+                pop     de                      ; wx
+                push    de
+                call    rot_sin                 ; A:HL = wx * sin
+                ld      de,(vs_acc)
+                or      a
+                sbc     hl,de
+                ld      c,a
+                ld      a,(vs_acc+2)
+                ld      d,a
+                ld      a,c
+                sbc     a,d                     ; wx*sin - wy*cos
+                RNS3
+                ld      de,(vs_rx)
+                add     hl,de                   ; HL = tvx
+                ex      (sp),hl                 ; tvx down, wx up
+                ex      de,hl
+                call    rot_cos                 ; A:HL = wx * cos
+                ld      de,(vs_acc2)
+                add     hl,de
+                ld      d,a
+                ld      a,(vs_acc2+2)
+                adc     a,d                     ; wx*cos + wy*sin
+                RNS3
+                ld      de,(vs_ry)
+                add     hl,de                   ; HL = tvy
+                bit     7,h
+                jr      nz,obj_pj_drop          ; behind
+                ld      a,h
+                or      a
+                jr      nz,obj_pj_ok
+                ld      a,l
+                cp      16
+                jr      c,obj_pj_drop           ; inside the near limit
+obj_pj_ok:
+                ld      (obj_vy),hl
+                call    recip                   ; D = S, E = M8
+                pop     hl                      ; tvx
+                push    de
+                call    project_x
+                ld      (obj_cx),hl             ; the centre column
+                pop     de
+                ld      hl,OBJ_ZT
+                call    obj_pj_z
+                ld      (obj_yt),hl
+                ld      hl,OBJ_ZB
+                call    obj_pj_z
+                ld      (obj_yb),hl
+                ; stage it
+                ld      a,(obj_n)
+                ld      c,a
+                ld      b,0
+                ld      hl,obj_sasp
+                add     hl,bc
+                ex      de,hl
+                ld      hl,OBJ_ASP
+                ld      a,(obj_i)
+                ld      c,a
+                add     hl,bc
+                ld      a,(hl)
+                ld      (de),a
+                ld      a,(obj_n)
+                add     a,a
+                ld      c,a                     ; BC = 2n
+                ld      hl,obj_sd
+                ld      de,(obj_vy)
+                call    obj_stage16
+                ld      hl,obj_scx
+                ld      de,(obj_cx)
+                call    obj_stage16
+                ld      hl,obj_syt
+                ld      de,(obj_yt)
+                call    obj_stage16
+                ld      hl,obj_syb
+                ld      de,(obj_yb)
+                call    obj_stage16
+                ld      hl,obj_n
+                inc     (hl)
+                ret
+obj_pj_drop:
+                pop     hl
+                ret
+
+; obj_pj_z : HL = a height plane; DE = the reciprocal -> HL = the row of
+; (plane[obj_i] - vz), DE kept
+obj_pj_z:
+                ld      a,(obj_i)
+                ld      c,a
+                ld      b,0
+                add     hl,bc
+                ld      a,(vs_vz)
+                ld      c,a
+                ld      a,(hl)
+                sub     c                       ; s8, as the 6502's SBC
+                push    de
+                call    project_y
+                pop     de
+                ret
+
+; obj_stage16 : (HL + BC) <- DE
+obj_stage16:
+                add     hl,bc
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                ret
+
+; ---------------------------------------------------------------------------
+; obj_draw_slot : A = the staged slot to draw.
+; ---------------------------------------------------------------------------
+obj_draw_slot:
+                ld      c,a
+                ld      b,0
+                ld      hl,obj_sasp
+                add     hl,bc
+                ld      a,(hl)
+                ld      (obj_asp),a
+                ld      a,c
+                add     a,a
+                ld      c,a
+                ld      hl,obj_scx
+                add     hl,bc
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (obj_cx),de
+                ld      hl,obj_syt
+                add     hl,bc
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (obj_yt),de
+                ld      hl,obj_syb
+                add     hl,bc
+                ld      a,(hl)
+                inc     hl
+                ld      h,(hl)
+                ld      l,a
+                ld      (obj_yb),hl
+                or      a
+                sbc     hl,de                   ; yb - yt
+                ld      a,h
+                or      a
+                jr      z,obj_hok
+                ret     m                       ; upside down: nothing
+                ld      l,255                   ; taller than the screen
+obj_hok:
+                ld      a,l
+                ld      (obj_h),a
+                call    obj_grow
+                ; a = (H * k * 4 + 128) >> 8, the prism's half width
+                ld      a,(obj_asp)
+                ld      c,a
+                ld      b,0
+                ld      hl,obj_ktab
+                add     hl,bc
+                ld      l,(hl)
+                ld      a,(obj_h)
+                ld      h,a
+                call    mul_u8
+                add     hl,hl
+                add     hl,hl
+                ld      a,l
+                add     a,128
+                ld      a,h
+                adc     a,0
+                ld      (obj_a),a
+                call    obj_occluded
+                ret     nc                      ; no gap across its columns
+                ld      a,(obj_h)
+                add     a,8
+                rra                             ; the 9-bit sum, halved
+                srl     a
+                srl     a
+                srl     a
+                ld      (obj_b),a               ; b = (H + 8) / 16
+                add     a,a
+                ld      (obj_t),a
+                ld      c,a
+                ld      a,(obj_h)
+                sub     c
+                ld      (obj_dy),a              ; dy = H - 2b
+                ld      ix,obj_a
+                call    obj_s7
+                ld      ix,obj_b
+                call    obj_s7
+                ; the x ladder about the centre column, the y ladder about
+                ; yt + b
+                ld      hl,(obj_cx)
+                ld      (obj_ctr),hl
+                ld      hl,obj_a
+                ld      de,obj_X
+                call    obj_hex
+                ld      a,(obj_b)
+                ld      c,a
+                ld      b,0
+                ld      hl,(obj_yt)
+                add     hl,bc
+                ld      (obj_ctr),hl
+                ld      hl,obj_b
+                ld      de,obj_Y
+                call    obj_hex
+                ; the base: y6..y10 = y0..y4 + dy (obj_ycp)
+                ld      a,(obj_dy)
+                ld      c,a
+                ld      b,0
+                ld      hl,obj_Y+6
+                ld      de,obj_Y+18
+                call    obj_ycp1
+                call    obj_ycp1
+                call    obj_ycp1
+                ; the template and its tier
+                xor     a
+                ld      (fw_touch),a
+                ld      (obj_fused),a
+                ld      a,(obj_asp)
+                ld      c,a
+                ld      b,0
+                ld      hl,obj_lodh
+                add     hl,bc
+                ld      a,(obj_h)
+                cp      (hl)                    ; no carry: H >= lodh, near
+                ccf
+                ld      a,c
+                rla                             ; kind * 2 + tier
+                ld      c,a
+                and     1
+                ld      (obj_lod),a
+                ld      a,c
+                add     a,a
+                ld      c,a
+                ld      hl,obj_tpl
+                add     hl,bc
+                ld      a,(hl)
+                inc     hl
+                ld      h,(hl)
+                ld      l,a
+                ld      (obj_e),hl
+                ld      a,(obj_asp)
+                cp      OBJ_K_LAMP
+                jr      c,obj_sel_hex
+                jr      z,obj_sel_lamp
+                cp      OBJ_K_HELMET
+                jr      c,obj_sel_potion
+                jr      z,obj_sel_helmet
+                cp      OBJ_K_VEST
+                jr      c,obj_sel_box
+                call    obj_vest_xy
+                jr      obj_art_go
+obj_sel_lamp:
+                call    obj_lamp_xy
+                jr      obj_art_go
+obj_sel_potion:
+                call    obj_potion_xy
+                jr      obj_art_go
+obj_sel_helmet:
+                call    obj_helmet_xy
+                jr      obj_art_go
+obj_sel_box:
+                call    obj_box_y
+                jr      obj_art_go
+obj_sel_hex:
+                ; the lid's near corners at cx -/+ t, t = a/2 + a/16, in
+                ; obj_Y+12 / +14
+                ld      a,(obj_a)
+                srl     a
+                ld      c,a
+                srl     a
+                srl     a
+                srl     a
+                add     a,c
+                ld      c,a
+                ld      b,0
+                ld      hl,(obj_cx)
+                or      a
+                sbc     hl,bc
+                ld      (obj_Y+12),hl
+                ld      hl,(obj_cx)
+                add     hl,bc
+                ld      (obj_Y+14),hl
+obj_art_go:
+                call    obj_probe
+obj_stamp:
+                ld      hl,(obj_e)
+                ld      a,(hl)
+                cp      OBJ_ART_ARM
+                jr      nc,obj_ctl
+                ld      de,lc_x1
+                OBJ_LDX                         ; x1
+                inc     hl
+                ld      a,(hl)
+                add     a,obj_Y-obj_X
+                OBJ_LDX                         ; y1
+                inc     hl
+                ld      a,(hl)
+                OBJ_LDX                         ; x2
+                inc     hl
+                ld      a,(hl)
+                add     a,obj_Y-obj_X
+                OBJ_LDX                         ; y2
+                ld      a,(obj_fused)
+                or      a
+                jr      z,obj_plain
+                ld      a,$80
+                call    fused_line              ; fused_below_raw
+                jr      obj_st_next
+obj_plain:
+                ld      a,(obj_fast)
+                or      a
+                jr      z,obj_slow
+                call    obj_emit_direct
+                jr      obj_st_next
+obj_slow:
+                call    dcl_s16
+obj_st_next:
+                ld      hl,(obj_e)
+                ld      de,4
+                add     hl,de
+                ld      (obj_e),hl
+                jr      obj_stamp
+obj_ctl:
+                cp      OBJ_ART_END
+                jr      z,obj_art_done
+                ld      a,1
+                ld      (obj_fused),a
+                jr      obj_st_next
+obj_art_done:
+                ld      a,(fw_touch)
+                or      a
+                ret     z
+                ; merge across the columns it stood on: [x0, x5 + 1)
+                ; clamped the 6502's way.  BEEB NOTE (for merging back): in
+                ; obj_art_done the INX on obj_X+10 falls into obj_ds_hz when
+                ; x5 = 255, so an object whose right edge sits on the last
+                ; column merges nothing; replicated here for pixel identity.
+                ld      a,(obj_X+1)
+                ld      c,0
+                bit     7,a
+                jr      nz,obj_ds_lo
+                or      a
+                jr      nz,obj_ds_lo255
+                ld      a,(obj_X)
+                ld      c,a
+                jr      obj_ds_lo
+obj_ds_lo255:   ld      c,255
+obj_ds_lo:
+                ld      a,(obj_X+11)
+                bit     7,a
+                jr      nz,obj_ds_hz
+                or      a
+                ld      b,255
+                jr      nz,obj_ds_hi
+                ld      a,(obj_X+10)
+                inc     a
+                ld      b,a
+                jr      nz,obj_ds_hi
+obj_ds_hz:      ld      b,0
+obj_ds_hi:
+                ld      a,b
+                cp      c
+                ret     z
+                ret     c                       ; hi <= lo: nothing
+                ld      l,c
+                ld      h,0
+                ld      e,b
+                ld      d,0
+                jp      fused_merge_range
+
+
+; obj_stxy : C = a byte offset into the vertex block <- HL
+obj_stxy:
+                ld      a,c
+                add     a,OBJ_XY & 255
+                ld      c,a
+                ld      b,OBJ_XY >> 8
+                ld      a,l
+                ld      (bc),a
+                inc     bc
+                ld      a,h
+                ld      (bc),a
+                ret
+
+; obj_ycp1 : (DE) <- (HL) + BC, s16, both advanced
+obj_ycp1:
+                ld      a,(hl)
+                add     a,c
+                ld      (de),a
+                inc     hl
+                inc     de
+                ld      a,(hl)
+                adc     a,b
+                ld      (de),a
+                inc     hl
+                inc     de
+                ret
+
+; obj_s7 : IX -> a magnitude m: m2 = (m * 47 * 4 + 128) >> 8, m3 = m - m2
+obj_s7:
+                ld      h,(ix+0)
+                ld      l,47
+                call    mul_u8
+                add     hl,hl
+                add     hl,hl
+                ld      a,l
+                add     a,128
+                ld      a,h
+                adc     a,0
+                ld      (ix+1),a
+                ld      c,a
+                ld      a,(ix+0)
+                sub     c
+                ld      (ix+2),a
+                ret
+
+; obj_hex : HL -> three magnitudes m0 m1 m2, DE -> six s16 slots:
+;   ctr - m0, ctr - m1, ctr - m2, ctr + m2, ctr + m1, ctr + m0
+obj_hex:
+                ld      b,3
+oh_minus:
+                push    hl
+                push    bc
+                ld      c,(hl)
+                ld      b,0
+                ld      hl,(obj_ctr)
+                or      a
+                sbc     hl,bc
+                ex      de,hl
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                inc     hl
+                ex      de,hl
+                pop     bc
+                pop     hl
+                inc     hl
+                djnz    oh_minus
+                ld      b,3
+oh_plus:
+                dec     hl
+                push    hl
+                push    bc
+                ld      c,(hl)
+                ld      b,0
+                ld      hl,(obj_ctr)
+                add     hl,bc
+                ex      de,hl
+                ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                inc     hl
+                ex      de,hl
+                pop     bc
+                pop     hl
+                djnz    oh_plus
+                ret
+
+; ---------------------------------------------------------------------------
+; obj_occluded : carry when a live span has a gap across the object's
+; columns [cx - a, cx + a + 1), clamped to the screen; an object wholly to
+; the right of it is occluded.
+; ---------------------------------------------------------------------------
+obj_occluded:
+                ld      hl,(obj_cx)
+                ld      a,(obj_a)
+                ld      e,a
+                ld      d,0
+                push    hl
+                add     hl,de
+                inc     hl
+                ld      c,l
+                ld      a,h
+                or      a
+                jr      z,ooc_hs
+                ld      c,255
+ooc_hs:
+                pop     hl
+                or      a
+                sbc     hl,de
+                ld      b,l
+                ld      a,h
+                or      a
+                jr      z,ooc_go
+                ret     p                       ; off the right edge (no carry)
+                ld      b,0
+ooc_go:
+                jp      hg_u8
+
+; ---------------------------------------------------------------------------
+; obj_probe : may this billboard skip the clipper?  obj_fast = 1 iff every
+; art line is provably inside the aperture: the block's x extremes and rows
+; are on-screen bytes, and one chain of spans covers [x0, x5] with the
+; object's rows inside every span's inner extremes.
+; ---------------------------------------------------------------------------
+obj_probe:
+                xor     a
+                ld      (obj_fast),a
+                ld      a,(obj_X+1)
+                ld      hl,obj_X+11
+                or      (hl)
+                ld      hl,obj_yt+1
+                or      (hl)
+                ld      hl,obj_yb+1
+                or      (hl)
+                ret     nz
+                ld      a,(obj_yt)
+                cp      Y_BIAS
+                ret     c
+                ld      a,(obj_yb)
+                cp      VIS_YMAX+1
+                ret     nc
+                ld      a,(obj_X)
+                ld      (obj_cur),a
+                ld      ix,(sp_head)
+                ld      a,ixh
+                or      ixl
+                ret     z
+op_loop:
+                ld      a,(obj_cur)
+                ld      c,a
+                ld      a,(ix+SP_XE)
+                cp      c
+                jr      c,op_next               ; ends before the cursor
+                jr      z,op_next
+                ld      a,(ix+SP_XS)
+                cp      c
+                jr      z,op_in
+                ret     nc                      ; a hole before this span
+op_in:
+                ld      a,(obj_yt)
+                cp      (ix+SP_IT)
+                ret     c                       ; top above the inner top
+                ld      a,(ix+SP_IB)
+                ld      hl,obj_yb
+                cp      (hl)
+                ret     c                       ; floor below the inner bottom
+                ld      a,(ix+SP_XE)
+                ld      (obj_cur),a
+                ld      hl,obj_X+10
+                cp      (hl)
+                jr      z,op_next
+                jr      nc,op_yes
+op_next:
+                SP_NEXT_DE
+                ret     z
+                IX_FROM_DE
+                jr      op_loop
+op_yes:
+                ld      a,1
+                ld      (obj_fast),a
+                ret
+
+; obj_emit_direct : the line's low bytes straight to the display list
+obj_emit_direct:
+                ld      a,(lc_x1)
+                ld      (ss_x),a
+                ld      a,(lc_y1)
+                ld      (ss_y),a
+                ld      a,(lc_x2)
+                ld      (ox1),a
+                ld      a,(lc_y2)
+                ld      (tmp0),a
+                jp      dcl_emit_segment
+
+; ---------------------------------------------------------------------------
+; The per-kind vertex builders.  All work in rounded products of a byte
+; magnitude and the multiplier in obj_mulb (umul8's zp_mul_b).
+; ---------------------------------------------------------------------------
+; obj_rmul : A = round(A * obj_mulb / 256).  Eats BC, DE, HL.
+obj_rmul:
+                ld      h,a
+                ld      a,(obj_mulb)
+                ld      l,a
+                call    mul_u8
+                ld      a,l
+                add     a,a
+                ld      a,h
+                adc     a,0
+                ret
+
+; obj_ends : C = the floor row's slot: y0 = yt, y[C] = yb
+obj_ends:
+                ld      hl,(obj_yt)
+                ld      (obj_Y),hl
+                ld      hl,(obj_yb)
+                ld      a,c
+                add     a,obj_Y-obj_X
+                ld      c,a
+                jp      obj_stxy
+
+; obj_mirror : A = a magnitude, C = the -side x slot, obj_px = the +side:
+; x[C] = cx - round(A * mulb / 256), x[px] = cx + it
+obj_mirror:
+                push    bc
+                call    obj_rmul
+                ld      (obj_pu),a
+                pop     bc
+                ld      e,a
+                ld      d,0
+                ld      hl,(obj_cx)
+                or      a
+                sbc     hl,de
+                call    obj_stxy
+                ld      a,(obj_px)
+                ld      c,a
+                ld      hl,(obj_cx)
+                add     hl,de
+                jp      obj_stxy
+
+; obj_ymirror : as obj_mirror about the s16 base in obj_pb, into y slots
+obj_ymirror:
+                push    bc
+                call    obj_rmul
+                ld      (obj_pu),a
+                pop     bc
+                ld      e,a
+                ld      d,0
+                ld      hl,(obj_pb)
+                or      a
+                sbc     hl,de
+                ld      a,c
+                add     a,obj_Y-obj_X
+                ld      c,a
+                call    obj_stxy
+                ld      a,(obj_px)
+                add     a,obj_Y-obj_X
+                ld      c,a
+                ld      hl,(obj_pb)
+                add     hl,de
+                jp      obj_stxy
+
+; obj_yladder : HL = a table of H fractions, B = its last index:
+;   y[1 + X] = yt + round(H * tab[X] / 256) for X = B..0
+obj_yladder:
+                ld      (obj_tgx),hl
+                ld      a,(obj_h)
+                ld      (obj_mulb),a
+oyl_m:
+                push    bc
+                ld      c,b
+                ld      b,0
+                ld      hl,(obj_tgx)
+                add     hl,bc
+                ld      a,(hl)
+                call    obj_rmul
+                ld      c,a
+                ld      b,0
+                ld      hl,(obj_yt)
+                add     hl,bc
+                pop     bc
+                push    bc
+                ld      a,b
+                add     a,a
+                add     a,2+obj_Y-obj_X
+                ld      c,a
+                call    obj_stxy
+                pop     bc
+                dec     b
+                jp      p,oyl_m
+                ret
+
+; obj_xladder : obj_tgx/tnx/tpx = tables of a fractions, -side slots and
+; +side slots, B = the last index: obj_mirror for X = B..0
+obj_xladder:
+                ld      a,(obj_a)
+                ld      (obj_mulb),a
+oxl_m:
+                push    bc
+                ld      c,b
+                ld      b,0
+                ld      hl,(obj_tpx)
+                add     hl,bc
+                ld      a,(hl)
+                ld      (obj_px),a
+                ld      hl,(obj_tnx)
+                add     hl,bc
+                ld      a,(hl)
+                ld      hl,(obj_tgx)
+                add     hl,bc
+                ld      c,a
+                ld      a,(hl)
+                call    obj_mirror
+                pop     bc
+                dec     b
+                jp      p,oxl_m
+                ret
+
+; --- the floor lamp --------------------------------------------------------
+obj_lamp_xy:
+                ld      a,(obj_a)
+                ld      (obj_pb),a
+                ld      (obj_mulb),a
+                ld      b,3
+olx_m:                                          ; pb[1 + X] = a * lgx[X]
+                push    bc
+                ld      c,b
+                ld      b,0
+                ld      hl,obj_lgx
+                add     hl,bc
+                ld      a,(hl)
+                call    obj_rmul
+                pop     bc
+                push    bc
+                ld      c,b
+                ld      b,0
+                ld      hl,obj_pb+1
+                add     hl,bc
+                ld      (hl),a
+                pop     bc
+                dec     b
+                jp      p,olx_m
+                ld      b,4
+olx_s:                                          ; x[2X] = cx - pb[X],
+                push    bc                      ; x[lpo[X]] = cx + pb[X]
+                ld      c,b
+                ld      b,0
+                ld      hl,obj_pb
+                add     hl,bc
+                ld      e,(hl)
+                ld      d,0
+                push    bc
+                ld      hl,(obj_cx)
+                or      a
+                sbc     hl,de
+                ld      a,c
+                add     a,a
+                ld      c,a
+                call    obj_stxy
+                pop     bc
+                ld      hl,obj_lpo
+                add     hl,bc
+                ld      c,(hl)
+                ld      hl,(obj_cx)
+                add     hl,de
+                call    obj_stxy
+                pop     bc
+                dec     b
+                jp      p,olx_s
+                ld      hl,obj_lgy
+                ld      b,10
+                call    obj_yladder
+                ld      hl,(obj_yt)
+                ld      (obj_Y),hl
+                ld      hl,(obj_yb)
+                ld      (obj_Y+24),hl
+                ret
+
+; --- the stimpack and medikit ----------------------------------------------
+; obj_kmag : HL = a two-entry table -> A = its entry for the box kind
+obj_kmag:
+                ld      a,(obj_asp)
+                sub     OBJ_K_BOXS
+                ld      e,a
+                ld      d,0
+                add     hl,de
+                ld      a,(hl)
+                ret
+
+obj_box_y:
+                ld      a,(obj_h)
+                ld      (obj_mulb),a
+                ld      hl,obj_lidf
+                call    obj_kmag
+                call    obj_rmul
+                ld      (obj_pb+3),a            ; the lid's drop
+                ld      c,a
+                ld      b,0
+                ld      hl,(obj_yt)
+                add     hl,bc
+                ld      (obj_Y+2),hl
+                ld      c,4
+                call    obj_ends
+                ld      a,(obj_lod)
+                or      a
+                ret     z
+                ; the near tier: the trapezoid's rear pair and the cross
+                ld      a,(obj_a)
+                ld      (obj_mulb),a
+                ld      a,40
+                ld      (obj_px),a
+                ld      hl,obj_brf
+                call    obj_kmag
+                ld      c,38
+                call    obj_mirror
+                ld      a,8
+                ld      (obj_px),a
+                ld      hl,obj_bcw
+                call    obj_kmag
+                ld      c,2
+                call    obj_mirror
+                ld      a,6
+                ld      (obj_px),a
+                ld      hl,obj_btx
+                call    obj_kmag
+                ld      c,4
+                call    obj_mirror
+                ld      a,(obj_pb+3)            ; the cross centre: yt +
+                ld      hl,obj_h                ;   (lid drop + H) / 2
+                add     a,(hl)
+                rra
+                ld      c,a
+                ld      b,0
+                ld      hl,(obj_yt)
+                add     hl,bc
+                ld      (obj_pb),hl
+                ld      a,(obj_h)
+                ld      (obj_mulb),a
+                ld      a,12
+                ld      (obj_px),a
+                ld      hl,obj_bch
+                call    obj_kmag
+                ld      c,6
+                call    obj_ymirror
+                ld      a,10
+                ld      (obj_px),a
+                ld      hl,obj_btz
+                call    obj_kmag
+                ld      c,8
+                jp      obj_ymirror
+
+; --- the health potion -----------------------------------------------------
+; obj_ybsub : A = a drop, C = the y slot: y[C] = yb - A
+obj_ybsub:
+                ld      e,a
+                ld      d,0
+                ld      hl,(obj_yb)
+                or      a
+                sbc     hl,de
+                ld      a,c
+                add     a,obj_Y-obj_X
+                ld      c,a
+                jp      obj_stxy
+
+obj_potion_xy:
+                ld      a,(obj_a)
+                ld      (obj_mulb),a
+                ld      a,187
+                call    obj_rmul
+                ld      (obj_pb),a
+                ld      a,69
+                call    obj_rmul
+                ld      (obj_pb+2),a
+                ld      a,8
+                ld      (obj_px),a
+                ld      c,2
+                ld      a,187
+                call    obj_mirror
+                ld      a,6
+                ld      (obj_px),a
+                ld      c,4
+                ld      a,69
+                call    obj_mirror
+                ld      c,12
+                call    obj_ends
+                ld      a,(obj_a)
+                add     a,a
+                ld      c,2
+                call    obj_ybsub
+                ld      a,(obj_a)
+                ld      hl,obj_pb
+                add     a,(hl)
+                ld      c,4
+                call    obj_ybsub
+                ld      a,(obj_a)
+                ld      hl,obj_pb+2
+                add     a,(hl)
+                ld      c,6
+                call    obj_ybsub
+                ld      a,(obj_a)
+                ld      hl,obj_pb+2
+                sub     (hl)
+                ld      c,8
+                call    obj_ybsub
+                ld      a,(obj_a)
+                ld      hl,obj_pb
+                sub     (hl)
+                ld      c,10
+                jp      obj_ybsub
+
+; --- the helmet ------------------------------------------------------------
+obj_helmet_xy:
+                ld      hl,obj_hgx
+                ld      (obj_tgx),hl
+                ld      hl,obj_hnx
+                ld      (obj_tnx),hl
+                ld      hl,obj_hpx
+                ld      (obj_tpx),hl
+                ld      b,5
+                call    obj_xladder
+                ld      hl,obj_hgy
+                ld      b,4
+                call    obj_yladder
+                ld      c,12
+                jp      obj_ends
+
+; --- the armour vest -------------------------------------------------------
+obj_vest_xy:
+                ld      hl,obj_vgx
+                ld      (obj_tgx),hl
+                ld      hl,obj_vnx
+                ld      (obj_tnx),hl
+                ld      hl,obj_vpx
+                ld      (obj_tpx),hl
+                ld      b,6
+                call    obj_xladder
+                ld      hl,(obj_cx)             ; the curved rims ride the
+                ld      c,62                    ;   centre line
+                call    obj_stxy
+                ld      hl,obj_vgy
+                ld      b,12
+                call    obj_yladder
+                ld      c,28
+                jp      obj_ends
+
+; ---------------------------------------------------------------------------
+; obj_grow : the kinds with a growth factor stand taller close up:
+;   H' = H + round(H * g / 256), base anchored (yt = yb - H')
+; ---------------------------------------------------------------------------
+obj_grow:
+                ld      a,(obj_asp)
+                ld      c,a
+                ld      b,0
+                ld      hl,obj_gtab
+                add     hl,bc
+                ld      a,(hl)
+                or      a
+                ret     z
+                ld      l,a
+                ld      a,(obj_h)
+                ld      h,a
+                call    mul_u8
+                ld      a,l
+                add     a,a                     ; carry = the rounding bit
+                ld      a,h
+                ld      hl,obj_h
+                adc     a,(hl)
+                jr      nc,og_st
+                ld      a,255                   ; very near: clamp
+og_st:
+                ld      (hl),a
+                ld      c,a
+                ld      b,0
+                ld      hl,(obj_yb)
+                or      a
+                sbc     hl,bc
+                ld      (obj_yt),hl
+                ret
+
+; ---------------------------------------------------------------------------
+; The kind tables (objects.s / layout.inc)
+; ---------------------------------------------------------------------------
+obj_ktab:       db      23, 15, 25, 34, 30, 47, 58      ; a = H * k / 64
+obj_gtab:       db      0, 0, 38, 38, 38, 38, 38        ; growth / 256
+obj_lodh:       db      33, $FF, $FF, 7, 24, 12, 24     ; H at which the
+                                                        ;   near tier starts
+obj_tpl:        ; (far, near) template entry per kind: window A/B/C + offset
+                dw      OBJ_ART+0,        OBJ_ART+$200+0     ; hex / oct
+                dw      OBJ_ART+52,       OBJ_ART+52         ; lamp
+                dw      OBJ_ART+$200+160, OBJ_ART+$200+160   ; potion L0
+                dw      OBJ_ART+$200+224, OBJ_ART+140        ; helmet L1 / L0
+                dw      OBJ_ART+$100+0,   OBJ_ART+$200+76    ; stimpack
+                dw      OBJ_ART+$100+0,   OBJ_ART+$200+76    ; medikit
+                dw      OBJ_ART+$100+156, OBJ_ART+$100+28    ; vest L1 / L0
+obj_lgx:        db      167, 166, 122, 109              ; lamp x mags / 256 of a
+obj_lpo:        db      10, 44, 42, 40, 38              ; lamp +side slots
+obj_lgy:        db      174, 176, 177, 178, 180         ; lamp y / 256 of H
+                db      218, 221, 224, 226, 229
+                db      252
+obj_lidf:       db      51, 54                          ; box lid drop / 256 of H
+obj_brf:        db      183, 201                        ; box rear x / 256 of a
+obj_bcw:        db      110, 55                         ; cross width
+obj_btx:        db      37, 18                          ; cross arm x
+obj_bch:        db      51, 40                          ; cross half height / H
+obj_btz:        db      17, 13                          ; cross arm y
+obj_hgx:        db      192, 128, 96, 64, 166, 176      ; helmet x mags
+obj_hnx:        db      2, 4, 6, 8, 46, 50              ; helmet -side slots
+obj_hpx:        db      44, 42, 40, 38, 48, 52          ; helmet +side slots
+obj_hgy:        db      34, 85, 162, 196, 205           ; helmet y / 256 of H
+obj_vgx:        db      91, 50, 173, 223, 144, 136, 246 ; vest x mags
+obj_vnx:        db      2, 4, 42, 46, 50, 54, 58        ; vest -side slots
+obj_vpx:        db      8, 6, 44, 48, 52, 56, 60        ; vest +side slots
+obj_vgy:        db      4, 5, 15, 30, 35, 45, 60, 69, 75, 90, 105, 175, 244

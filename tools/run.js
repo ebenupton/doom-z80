@@ -18,8 +18,11 @@ const m = new Spectrum128({ contention: flag("--contention", "1") !== "0" });
 m.ram[0].set(fs.readFileSync(path.join(ROOT, "build/bank0.bin")), 0);
 m.ram[5].set(fs.readFileSync(path.join(ROOT, "build/nodebb.bin")), 0x6580 - 0x4000);
 m.ram[5].set(fs.readFileSync(path.join(ROOT, "build/l8.bin")), 0x6200 - 0x4000);
-const img = fs.readFileSync(path.join(ROOT, "build/doom.bin"));
-m.ram[2].set(img, 0x8400 - 0x8000);
+m.ram[5].set(fs.readFileSync(path.join(ROOT, "build/atan.bin")), 0x5B00 - 0x4000);
+const b4 = fs.readFileSync(path.join(ROOT, "build/bank4.bin")); m.ram[4].set(b4, 0);
+  const img = fs.readFileSync(path.join(ROOT, "build/doom.bin")).subarray(0, -b4.length);   // the raw image carries a copy of bank 4 on its tail
+m.ram[2].set(img.subarray(0, Math.min(img.length, 0xc000 - 0x8400)), 0x8400 - 0x8000);
+if (img.length > 0xc000 - 0x8400) { m.ram[6].set(img.subarray(0xc000 - 0x8400), 0); m.ram[7].set(img.subarray(0xc000 - 0x8400), 0); }
 
 const st = m.cpu.getState();
 st.pc = sym.get("START");
@@ -61,9 +64,9 @@ console.log(`rendered ${rendered} frames; ${(avg / 1000).toFixed(0)}k T/frame ` 
             `= ${(3546900 / avg).toFixed(2)} fps  (${(avg / TSTATES_PER_FRAME).toFixed(1)} PAL fields)`);
 const png = flag("--png", null);
 if (png) { m.savePNG(png, { border: 24, scale: Number(flag("--scale", 2)) }); console.log("png -> " + png); }
-const V = 0xBC00;
+const V = sym.get("VARS_BASE");
 const s16 = (v) => (v & 0x8000 ? v - 65536 : v);
-console.log(`player prescaled (${s16(m.ram[2][0xBC1C - 0x8000] | (m.ram[2][0xBC1D - 0x8000] << 8))}.` +
-            `${m.ram[2][0xBC1E - 0x8000]}, ` +
-            `${s16(m.ram[2][0xBC1F - 0x8000] | (m.ram[2][0xBC20 - 0x8000] << 8))}.` +
-            `${m.ram[2][0xBC21 - 0x8000]})  angle ${m.ram[2][0xBC22 - 0x8000]}`);
+console.log(`player prescaled (${s16(m.ram[2][V + 28 - 0x8000] | (m.ram[2][V + 29 - 0x8000] << 8))}.` +
+            `${m.ram[2][V + 30 - 0x8000]}, ` +
+            `${s16(m.ram[2][V + 31 - 0x8000] | (m.ram[2][V + 32 - 0x8000] << 8))}.` +
+            `${m.ram[2][V + 33 - 0x8000]})  angle ${m.ram[2][V + 34 - 0x8000]}`);

@@ -51,10 +51,13 @@ function basicLoader() {
 const eng = assemble(path.join(ROOT, "src/main.z80"), path.join(ROOT, "build/doom.bin"));
 if (!eng.ok) { console.error(eng.out); process.exit(1); }
 const engSym = readSymbols(eng.sym);
-const image = fs.readFileSync(path.join(ROOT, "build/doom.bin"));
+const bank4 = fs.readFileSync(path.join(ROOT, "build/bank4.bin"));
+const image = fs.readFileSync(path.join(ROOT, "build/doom.bin")).subarray(0, -bank4.length);   // the raw image carries a copy of bank 4 on its tail
 
 // The stub needs the image length and entry point baked in.
-const defs = [`IMAGE_LEN=${image.length}`, `CODE_IMAGE=0x8800`,
+const l8 = fs.readFileSync(path.join(ROOT, "build/l8.bin"));
+const atan = fs.readFileSync(path.join(ROOT, "build/atan.bin"));
+const defs = [`IMAGE_LEN=${image.length}`, `BANK4_LEN=${bank4.length}`, `L8_LEN=${l8.length}`, `ATAN_LEN=${atan.length}`, `CODE_IMAGE=0x8800`,
               `ENGINE_START=0x${engSym.get("START").toString(16)}`];
 const boot = assemble(path.join(ROOT, "src/tapeboot.z80"),
                       path.join(ROOT, "build/tapeboot.bin"), { define: defs });
@@ -68,7 +71,10 @@ const tap = Buffer.concat([
   basicLoader(),
   codeFile("boot", 0x8000, stub),
   codeFile("geom", 0xc000, geom),
+  codeFile("objs", 0xc000, bank4),
   codeFile("bbox", 0x6580, nodebb),
+  codeFile("l8", 0x6200, l8),
+  codeFile("atan", 0x5b00, atan),
   codeFile("engine", 0x8800, image),
 ]);
 const out = path.join(ROOT, "build/doom.tap");

@@ -7,3 +7,6 @@ build/screenshot.png
 data/DOOM1.WAD
 node_modules/
 tools/__pycache__/
+build/frames_obj.json
+build/frames_parity.json
+build/vspan.inc

@@ -1,1 +1,18 @@
-; --- spilled into the row-plane tail (spare) --------------------------------
+; --- spilled into the row-plane tail: two small tables of the bbox test ---
+; DOOM's R_CheckBBox corner table, each corner named by the low address
+; bytes of its x delta and its y delta (top, bottom, left, right lie in one
+; page).  Entry 5 is "viewpoint inside".
+CHECKCOORD:
+                DB      (bb_top+6)&255,(bb_top+0)&255,(bb_top+4)&255,(bb_top+2)&255
+                DB      (bb_top+6)&255,(bb_top+0)&255,(bb_top+4)&255,(bb_top+0)&255
+                DB      (bb_top+6)&255,(bb_top+2)&255,(bb_top+4)&255,(bb_top+0)&255
+                DB      (bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255
+                DB      (bb_top+4)&255,(bb_top+0)&255,(bb_top+4)&255,(bb_top+2)&255
+                DB      (bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255
+                DB      (bb_top+6)&255,(bb_top+2)&255,(bb_top+6)&255,(bb_top+0)&255
+                DB      (bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255
+                DB      (bb_top+4)&255,(bb_top+0)&255,(bb_top+6)&255,(bb_top+2)&255
+                DB      (bb_top+4)&255,(bb_top+2)&255,(bb_top+6)&255,(bb_top+2)&255
+                DB      (bb_top+4)&255,(bb_top+2)&255,(bb_top+6)&255,(bb_top+0)&255
+
+

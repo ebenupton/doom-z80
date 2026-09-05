@@ -1,4 +1,5 @@
                 DEVICE  ZXSPECTRUM128
+                DEFINE  BANK4_FILE "build/t_view_b4.bin"
                 include "spec.inc"
                 ORG     ROWLO_A
                 DS      160, 0
@@ -13,9 +14,13 @@
                 DS      160, 0
                 include "spill4.z80"
                 DS      ORG_ADDR-$, 0
+                include "chains.z80"
                 include "cold.z80"
                 include "math.z80"
-                include "raster.z80"
                 include "view.z80"
-                include "spans.z80"
+                include "clip.z80"
                 include "bsp.z80"
+                ; the rasteriser, in bank 7 as in the engine
+                DS      RASTER_BASE-$,0
+                include "raster.z80"
+                include "bank4.inc"

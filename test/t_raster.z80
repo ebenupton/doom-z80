@@ -4,6 +4,7 @@
                 ; loader expects it; the spilled routines are not theirs
                 ORG     ROWLO_A
                 DS      ORG_ADDR-$, 0
+                include "chains.z80"
                 include "cold.z80"
                 include "math.z80"
                 include "raster.z80"

@@ -23,7 +23,11 @@ const mm = new Spectrum128();
 mm.ram[0].set(fs.readFileSync(path.join(ROOT, "build/bank0.bin")), 0);
 mm.ram[5].set(fs.readFileSync(path.join(ROOT, "build/nodebb.bin")), 0x6580 - 0x4000);
 mm.ram[5].set(fs.readFileSync(path.join(ROOT, "build/l8.bin")), 0x6200 - 0x4000);
-mm.ram[2].set(fs.readFileSync(path.join(ROOT, "build/doom.bin")), 0x8400 - 0x8000);
+mm.ram[5].set(fs.readFileSync(path.join(ROOT, "build/atan.bin")), 0x5B00 - 0x4000);
+{ const b4 = fs.readFileSync(path.join(ROOT, "build/bank4.bin")); mm.ram[4].set(b4, 0);
+  const img = fs.readFileSync(path.join(ROOT, "build/doom.bin")).subarray(0, -b4.length);   // the raw image carries a copy of bank 4 on its tail
+  mm.ram[2].set(img.subarray(0, Math.min(img.length, 0xc000 - 0x8400)), 0x8400 - 0x8000);
+  if (img.length > 0xc000 - 0x8400) { mm.ram[6].set(img.subarray(0xc000 - 0x8400), 0); mm.ram[7].set(img.subarray(0xc000 - 0x8400), 0); } }
 const st = mm.cpu.getState(); st.pc = S.get("START"); st.sp = 0xbff0; st.imode = 1;
 mm.cpu.setState(st);
 

@@ -1,22 +1,51 @@
-const { ZHarness } = require('/Users/ebenupton/doom_z80/tools/zcall.js');
-const z = new ZHarness('/Users/ebenupton/doom_z80/test/t_raster.z80');
+const { ZHarness } = require('../tools/zcall.js');
+const ROOT = require('path').resolve(__dirname, '..') + '/';
+const z = new ZHarness(ROOT + 'test/t_raster.z80');
 const RW = 256, RH = 160, Y0 = 16;
 
-// Reference model, matching the Z80 loops exactly.
-function refLine(set, x1, y1, x2, y2) {
+// Reference model: the BBC port's NJ rasteriser (nj_raster.py), which the
+// Z80 plot loops reproduce pixel for pixel.
+function refLine(set, x0, y0, x1, y1) {
   const P = (x, y) => set.add(y * 256 + x);
-  if (x1 === x2) { const a = Math.min(y1,y2), b = Math.max(y1,y2); for (let y=a;y<=b;y++) P(x1,y); return; }
-  if (x1 > x2) { [x1,x2]=[x2,x1]; [y1,y2]=[y2,y1]; }
-  const dx = x2 - x1, dyr = y2 - y1;
-  if (dyr === 0) { for (let x=x1;x<=x2;x++) P(x,y1); return; }
-  const dy = Math.abs(dyr), sy = dyr < 0 ? -1 : 1;
-  let x = x1, y = y1;
-  if (dy < dx) {
-    let err = dx >> 1;
-    for (let i = 0; i <= dx; i++) { P(x,y); if (i===dx) break; x++; err -= dy; if (err < 0) { err += dx; y += sy; } }
+  const run = (xb, row, blo, bhi) => { for (let b = blo; b <= bhi; b++) P(xb + b, row); };
+  let dy;
+  if (y0 < y1) { dy = y1 - y0; [x0, x1] = [x1, x0]; y0 = y1; } else dy = y0 - y1;
+  const left = x0 >= x1;
+  const dx = left ? x0 - x1 : x1 - x0;
+  if (dx >= dy) {
+    let err, errs, cnt, ls, dyy = dy;
+    if (dy === 0) { err = dx; errs = 0; cnt = 1; ls = 1; dyy = 1; }
+    else { err = errs = dx >> 1; cnt = dy; ls = 2; }
+    let row = y0, xbyte = x0 & 0xf8, bit = x0 & 7, acc = bit;
+    for (;;) {
+      err -= dyy;
+      if (err >= 0) {
+        if (left) { if (bit === 0) { run(xbyte, row, 0, acc); xbyte -= 8; bit = acc = 7; } else bit--; }
+        else { if (bit === 7) { run(xbyte, row, acc, 7); xbyte += 8; bit = acc = 0; } else bit++; }
+        continue;
+      }
+      err += dx;
+      if (left) run(xbyte, row, bit, acc); else run(xbyte, row, acc, bit);
+      if (--cnt === 0) { if (--ls === 0) return; err -= errs; if (err < 0) return; cnt = 1; }
+      row--;
+      if (left) { if (bit === 0) { xbyte -= 8; bit = 7; } else bit--; }
+      else { if (bit === 7) { xbyte += 8; bit = 0; } else bit++; }
+      acc = bit;
+    }
   } else {
-    let err = dy >> 1;
-    for (let i = 0; i <= dy; i++) { P(x,y); if (i===dy) break; err -= dx; if (err < 0) { err += dy; x++; } y += sy; }
+    let cnt, ls, errs, step;
+    if (dx === 0) { cnt = 1; ls = 1; errs = dy; step = 1; } else { cnt = dx; ls = 2; errs = dy >> 1; step = dx; }
+    let r = errs, row = y0, xbyte = x0 & 0xf8, bit = x0 & 7;
+    for (;;) {
+      P(xbyte + bit, row);
+      r -= step;
+      if (r >= 0) { row--; continue; }
+      r += dy;
+      if (--cnt === 0) { if (--ls === 0) return; r -= errs; if (r < 0) return; cnt = 1; }
+      if (left) { if (bit === 0) { xbyte -= 8; bit = 7; } else bit--; }
+      else { if (bit === 7) { xbyte += 8; bit = 0; } else bit++; }
+      row--;
+    }
   }
 }
 

@@ -1,9 +1,10 @@
-const { ZHarness, s8, s16 } = require('/Users/ebenupton/doom_z80/tools/zcall.js');
+const { ZHarness, s8, s16 } = require('../tools/zcall.js');
+const ROOT = require('path').resolve(__dirname, '..') + '/';
 const fs = require('fs');
-const V = JSON.parse(fs.readFileSync('/Users/ebenupton/doom_z80/build/vec.json','utf8'));
-const z = new ZHarness('/Users/ebenupton/doom_z80/test/t_view.z80');
+const V = JSON.parse(fs.readFileSync(ROOT + 'build/vec.json','utf8'));
+const z = new ZHarness(ROOT + 'test/t_view.z80');
 // load the packed tables at $8800
-z.pokeBytes(0x8800, fs.readFileSync('/Users/ebenupton/doom_z80/build/tables.bin'));
+z.pokeBytes(0x8800, fs.readFileSync(ROOT + 'build/tables.bin'));
 z.call('sq_init');
 
 let fail = 0, shown = 0, tested = 0;
@@ -19,10 +20,11 @@ for (let a = 0; a < 256; a++) {
 console.log('sincos_lookup:', fail===f0 ? 'ok' : 'FAIL');
 
 // --- view_setup + to_view -------------------------------------------------
+const VB = z.sym_('VARS_BASE');
 const A = {
-  pl_x: 0xBC00+28, pl_xf: 0xBC00+30, pl_y: 0xBC00+31, pl_yf: 0xBC00+33,
-  pl_ang: 0xBC00+34, vs_rx: 0xBC00+22, vs_ry: 0xBC00+24,
-  tv_wx: 0xBC00+48, tv_wy: 0xBC00+50, tv_tvx: 0xBC00+52, tv_tvy: 0xBC00+54,
+  pl_x: VB+28, pl_xf: VB+30, pl_y: VB+31, pl_yf: VB+33,
+  pl_ang: VB+34, vs_rx: VB+22, vs_ry: VB+24,
+  tv_wx: VB+48, tv_wy: VB+50, tv_tvx: VB+52, tv_tvy: VB+54,
 };
 f0 = fail;
 let tsetup = 0, tview = 0, nview = 0;

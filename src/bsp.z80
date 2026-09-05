@@ -17,89 +17,58 @@
 render_frame:
                 call    view_setup
                 call    sp_reset
-                ld      hl,DLIST_BASE
-                ld      (dlist_ptr),hl
+                ; the vertices' spans go out once a frame: a stamp per vertex,
+                ; wiped only when the frame counter comes round
+                ld      hl,vd_stamp
+                inc     (hl)
+                jr      nz,rf_stamped
+                ld      hl,VDONE
+                ld      de,VDONE+1
+                ld      bc,NVERTS-1
+                ld      (hl),0
+                ldir
+                ld      a,1
+                ld      (vd_stamp),a
+rf_stamped:
+                ; lines are plotted as they are emitted (dl_emit): the
+                ; rasteriser is mirrored in banks 6 and 7, and the back
+                ; buffer's own bank serves it (B lives in 7; A's rows are
+                ; always mapped, so its plots run from 6)
+                ld      a,(back_buf)
+                ld      e,a
+                add     a,BANK_RASTER_A
+                ld      d,a
+                ld      a,e
+                xor     1
+                rlca
+                rlca
+                rlca
+                or      d
+                or      P7_ROM48
+                ld      (rast_port),a
                 xor     a
                 ld      (frame_nodes),a
                 ld      (frame_ss),a
                 ld      (frame_segs),a
-                ld      hl,(bsp_root)
-                jp      walk
+                ; the walk runs from bank 4 (walk4.z80) with its node records
+                ; and the box check's tables; it pages the geometry in for
+                ; each subsector's segs
+                ld      a,BANK_OBJ
+                call    set_page
+                call    walk_frame
+                ld      a,BANK_GEOM
+                jp      set_page
 
 ; ---------------------------------------------------------------------------
-; walk : HL = child id.  Bit 15 marks a subsector.
+; walk_ss_segs : HL = subsector id, the geometry paged in.  Its segs, front
+; to back (the walk and the objects that precede them run from bank 4:
+; walk4.z80), then the walk bank back before the return there.
 ; ---------------------------------------------------------------------------
-walk:
-                ld      a,(sp_count)
-                or      a
-                ret     z                       ; screen fully occluded
-                bit     7,h
-                jp      nz,walk_ss
-
-                ld      a,(frame_nodes)
-                inc     a
-                ld      (frame_nodes),a
-                add     hl,hl
-                add     hl,hl
-                add     hl,hl
-                add     hl,hl
-                ld      de,NODES
-                add     hl,de
-                ld      (bsp_node),hl
-                call    point_on_side           ; A = the side, IX = the node
-                push    ix
-                push    af
-                or      a
-                jr      nz,wk_n1
-                ld      l,(ix+ND_CHILD0)
-                ld      h,(ix+ND_CHILD0+1)
-                jr      wk_go
-wk_n1:          ld      l,(ix+ND_CHILD1)
-                ld      h,(ix+ND_CHILD1+1)
-wk_go:          call    walk
-                ld      a,(sp_count)
-                or      a
-                jr      z,walk_pop
-                pop     af
-                pop     ix
-                ld      (bsp_node),ix
-                xor     1
-                jr      walk_child              ; the far child, if its box shows
-walk_pop:
-                pop     af
-                pop     ix
-                ret
-
-walk_child:     ; A = the side, IX = bsp_node
-                ld      (bsp_side),a
-                push    ix
-                call    bbox_range              ; carry set when visible
-                pop     ix
-                ret     nc
-                ld      a,(bb_lo)
-                ld      b,a
-                ld      a,(bb_hi)
-                ld      c,a
-                push    ix
-                call    sp_hasgap
-                pop     ix
-                ret     nc
-                ld      a,(bsp_side)
-                or      a
-                jr      nz,wc_c1
-                ld      l,(ix+ND_CHILD0)
-                ld      h,(ix+ND_CHILD0+1)
-                jp      walk
-wc_c1:          ld      l,(ix+ND_CHILD1)
-                ld      h,(ix+ND_CHILD1+1)
-                jp      walk
-
-
-; ---------------------------------------------------------------------------
-; walk_ss : HL = subsector id with bit 15 set.
-; ---------------------------------------------------------------------------
-walk_ss:
-                res     7,h
+walk_ss_segs:
+                push    hl
+                ld      a,BANK_GEOM
+                call    set_page
+                pop     hl
                 ld      a,(frame_ss)
                 inc     a
                 ld      (frame_ss),a
@@ -112,7 +81,7 @@ walk_ss:
                 add     hl,de
                 ld      a,(hl)
                 or      a
-                ret     z
+                jr      z,wss_done
                 ld      b,a                     ; B = segs left
                 inc     hl
                 ld      e,(hl)
@@ -138,95 +107,46 @@ ss_loop:
                 ld      de,SEG_SIZE
                 add     ix,de
                 djnz    ss_loop
-                ret
+wss_done:       ld      a,BANK_OBJ              ; the walk continues in bank 4
+                jp      set_page
 
 ; ---------------------------------------------------------------------------
-; point_on_side : DOOM's R_PointOnSide against the node at bsp_node.
-; Returns A = 0 (front) or 1 (back).
+; set_page : A = bank to map at $C000.  The displayed screen follows back_buf:
+; whichever buffer is not being drawn into is the one on show.
 ; ---------------------------------------------------------------------------
-point_on_side:
-                ; DOOM's R_PointOnSide on the gcd-reduced partition
-                ; direction; IX = the node, dx and dy in registers
-                ld      ix,(bsp_node)
-                ld      e,(ix+0)
-                ld      d,(ix+1)
-                ld      hl,(pl_wx)
-                or      a
-                sbc     hl,de                   ; dx
-                push    hl
-                ld      e,(ix+2)
-                ld      d,(ix+3)
-                ld      hl,(pl_wy)
-                or      a
-                sbc     hl,de                   ; dy
-                ld      b,(ix+4)                ; rdx
-                ld      c,(ix+5)                ; rdy
-                pop     de                      ; DE = dx, HL = dy
-                ld      a,b
-                or      a
-                jr      nz,pos_notx0
-                ; a north-south partition: the side is dx's, by rdy's sign
-                ld      a,d
-                or      a
-                jp      m,pos_dxle
+set_page:
+                ld      e,a
+                ld      a,(back_buf)
+                xor     1                       ; 1 when buffer B is displayed
+                rlca
+                rlca
+                rlca                            ; -> bit 3 of $7FFD
                 or      e
-                jr      z,pos_dxle
-                ld      a,c                     ; dx > 0: side = rdy < 0
-                rla
-                sbc     a,a
-                and     1
-                ret
-pos_dxle:
-                ld      a,c                     ; dx <= 0: side = rdy != 0 (rdy is
-                or      a                       ; never negative with rdx zero)
-                ret     z
-                ld      a,1
-                ret
-pos_notx0:
-                ld      a,c
-                or      a
-                jr      nz,pos_general
-                ; an east-west partition
-                ld      a,h
-                or      a
-                jp      m,pos_dyle
-                or      l
-                jr      z,pos_dyle
-                ld      a,b                     ; dy > 0: side = rdx > 0
-                rla
-                sbc     a,a
-                and     1
-                xor     1
-                ret
-pos_dyle:
-                ld      a,b                     ; dy <= 0: side = rdx < 0
-                rla
-                sbc     a,a
-                and     1
-                ret
-pos_general:
-                push    hl                      ; dy
-                push    bc
-                ld      a,c
-                call    mul_s16_u8_signed       ; A:HL = rdy * dx
-                ld      (pos_l),hl
-                ld      (pos_l+2),a
-                pop     bc
-                pop     de
-                ld      a,b
-                call    mul_s16_u8_signed       ; A:HL = rdx * dy
-                ld      c,a
-                ld      de,(pos_l)
-                ex      de,hl
-                or      a
-                sbc     hl,de
-                ld      a,(pos_l+2)
-                sbc     a,c
-                rla                             ; rdy*dx - rdx*dy < 0: side 1
-                sbc     a,a
-                and     1
+                or      P7_ROM48
+                ld      (cur_port),a            ; dl_emit restores it after a plot
+                ld      bc,PORT_7FFD
+                out     (c),a
                 ret
 
+; ---------------------------------------------------------------------------
+; cpm_init : once-only state.  The corner memo is gone (ptoa is cheaper than
+; its probe was); what remains is obj_anyb_fill (objects.s): the per-subsector
+; has-objects bitmap copied out of bank 4 so the walk can probe it without a
+; page flip.
+cpm_init:
+                ld      hl,VYC_S                ; project_y's memo: the S plane
+                ld      de,VYC_S+1              ; is its valid flag
+                ld      bc,255
+                ld      (hl),0
+                ldir
+                ld      a,BANK_OBJ
+                call    set_page
+                ld      hl,OBJ_BITS
+                ld      de,OBJ_ANYB
+                ld      bc,OBJ_BITS_LEN
+                ldir
+                ld      a,BANK_GEOM
+                jp      set_page
 
 ; mul_s16_u8_signed : A:HL = DE (s16) * A (s8, sign honoured)
 mul_s16_u8_signed:
@@ -237,411 +157,6 @@ msg_neg:
                 neg
                 call    mul_s16_u8
                 jp      neg_ahl
-
-; ---------------------------------------------------------------------------
-; bbox_range : screen column range of one child's bounding box.
-; in : A = 0 or 1, bsp_node set.  out: carry set and bb_lo/bb_hi valid.
-;
-; The four corners go through the full transform. Corners behind the near
-; plane are replaced by the crossing point of the bbox edge they lie on, so a
-; box straddling the camera still yields a tight range instead of the whole
-; screen.
-; ---------------------------------------------------------------------------
-bbox_range:
-                ; NODEBB + nid*8 + side*4; recover nid from the node pointer
-                ld      hl,(bsp_node)
-                ld      de,NODES
-                or      a
-                sbc     hl,de                   ; nid * 16
-                srl     h
-                rr      l                       ; nid * 8
-                ld      a,(bsp_side)
-                or      a
-                jr      z,bb_s0
-                ld      de,NODEBB+4
-                jr      bb_s1
-bb_s0:          ld      de,NODEBB
-bb_s1:          add     hl,de
-                push    hl
-                pop     ix                      ; IX -> top, bottom, left, right
-
-                ; --- the bounds go straight to viewer-relative deltas: the
-                ; position test wants their signs, and the corner angles
-                ; want the deltas themselves.  Each pair is taken with the
-                ; deciding bound last, so its flags are the ones still live.
-                ld      bc,(pl_y)
-                ld      a,(ix+1)
-                BB_DELTA
-                ld      (bb_bot),hl
-                ld      e,2                     ; py <= bottom
-                jp      p,bb_by1
-                ld      e,1                     ; between the two
-bb_by1:         ld      a,(ix+0)
-                BB_DELTA
-                ld      (bb_top),hl
-                jr      z,bb_by0
-                jp      m,bb_by0
-                jr      bb_byd
-bb_by0:         ld      e,0                     ; py >= top
-bb_byd:
-                ld      bc,(pl_x)
-                ld      a,(ix+3)
-                BB_DELTA
-                ld      (bb_right),hl
-                ld      d,2                     ; px >= right
-                jr      z,bb_bx1
-                jp      m,bb_bx1
-                ld      d,1
-bb_bx1:         ld      a,(ix+2)
-                BB_DELTA
-                ld      (bb_left),hl
-                jp      m,bb_bxd
-                ld      d,0                     ; px <= left
-bb_bxd:
-                ld      a,e
-                add     a,a
-                add     a,a
-                add     a,d                     ; boxpos = by*4 + bx
-                cp      5
-                jp      z,bb_full               ; the viewer is inside the box
-                add     a,a
-                add     a,a                     ; * 4 bytes per entry
-                ld      e,a
-                ld      d,0
-                ld      hl,CHECKCOORD
-                add     hl,de
-
-                ; --- angles of the two extremes, widened by the atanexp
-                ; bucket error so the verdict is a superset of the exact one
-                push    hl
-                call    bb_corner_angle
-                ld      de,ANGEPS
-                add     hl,de
-                ex      (sp),hl                 ; a1 down, the table pointer up
-                inc     hl
-                inc     hl
-                call    bb_corner_angle
-                ld      de,-ANGEPS
-                add     hl,de
-                ex      de,hl                   ; DE = a2
-                pop     hl                      ; HL = a1
-                push    de
-                push    hl
-                or      a
-                sbc     hl,de                   ; the span
-                jp      m,bb_full2              ; more than 180 degrees across
-                ld      b,h
-                ld      c,l                     ; BC = span
-
-                ; clip the left edge to the field of view; u = angle + CLIP
-                ; is the form the column lookup wants anyway
-                pop     hl
-                ld      de,CLIPANGLE
-                add     hl,de
-                ex      de,hl                   ; DE = u1
-                ld      hl,-2*CLIPANGLE
-                add     hl,de
-                jr      nc,bb_c1ok              ; u1 < 2*CLIP: inside
-                ld      a,h
-                or      l
-                jr      z,bb_c1ok
-                or      a
-                sbc     hl,bc
-                jr      nc,bb_invisible1
-                ld      de,2*CLIPANGLE
-bb_c1ok:
-                ; and the right edge
-                pop     hl                      ; a2
-                push    de                      ; u1
-                ld      de,CLIPANGLE
-                add     hl,de
-                ex      de,hl                   ; DE = u2
-                ld      hl,2*CLIPANGLE
-                or      a
-                sbc     hl,de                   ; CLIP - a2
-                push    de
-                ld      de,2*CLIPANGLE
-                or      a
-                sbc     hl,de
-                pop     de
-                jr      c,bb_c2ok
-                jr      z,bb_c2ok
-                or      a
-                sbc     hl,bc
-                jr      nc,bb_invisible1
-                ld      de,0
-bb_c2ok:
-                call    bb_angtox
-                ld      c,a
-                pop     de
-                call    bb_angtox
-                ld      b,a
-                ; order, then widen a column each side to absorb the table's
-                ; quantisation - the range may only ever be too wide
-                cp      c
-                jr      c,bb_ord
-                ld      a,c
-                ld      c,b
-                ld      b,a
-bb_ord:
-                ld      a,b
-                or      a
-                jr      z,bb_lo0
-                dec     a
-bb_lo0:         ld      (bb_lo),a
-                ld      a,c
-                cp      RENDER_W-1
-                jr      nc,bb_hi0
-                inc     a
-bb_hi0:         ld      (bb_hi),a
-                scf
-                ret
-bb_full2:
-                pop     hl
-                pop     hl
-bb_full:
-                xor     a
-                ld      (bb_lo),a
-                ld      a,RENDER_W-1
-                ld      (bb_hi),a
-                scf
-                ret
-bb_invisible1:
-                pop     hl
-                or      a
-                ret
-
-; bb_angtox : DE = view-relative angle + CLIPANGLE, 0..2*CLIPANGLE -> A =
-; the screen column.  The shift by six is a shift up by two read a byte
-; high, with the carry catching the 257th entry.
-bb_angtox:
-                ex      de,hl
-                add     hl,hl
-                add     hl,hl
-                ld      l,h
-                ld      h,0
-                jr      nc,ba_lo
-                inc     h
-ba_lo:          ld      de,ANGTOX
-                add     hl,de
-                ld      a,(hl)
-                ret
-
-; bb_corner_angle : HL -> a CHECKCOORD pair, the low bytes of the corner's
-; two deltas; returns the corner's angle relative to the view direction.
-bb_corner_angle:
-                ld      a,(hl)
-                inc     hl
-                ld      l,(hl)
-                ld      h,bb_top>>8
-                ld      e,(hl)
-                inc     l
-                ld      d,(hl)                  ; DE = dy
-                ld      l,a
-                ld      a,(hl)
-                inc     l
-                ld      h,(hl)
-                ld      l,a                     ; HL = dx
-                call    ptoa_memo
-                ld      a,(pl_ang)
-                ld      d,a
-                ld      a,h
-                sub     d
-                ld      h,a                     ; the view angle is a whole byte
-                ret
-
-; ---------------------------------------------------------------------------
-; ptoa_memo : HL = dx, DE = dy -> HL = the corner's angle, from the memo when
-; this delta pair has been through before.  R_PointToAngle is a pure
-; function of the pair, so an entry can never go stale - and sibling boxes,
-; and a box and its parent, keep handing the same corners back.
-; ---------------------------------------------------------------------------
-ptoa_memo:
-                ld      a,l
-                xor     e
-                and     31
-                add     a,a
-                add     a,a
-                add     a,a
-                ld      c,a                     ; a page-aligned table, so the
-                ld      b,CPM_BASE>>8           ; slot is one shift chain
-                ld      a,(bc)
-                cp      l
-                jr      nz,cpm_miss
-                inc     c
-                ld      a,(bc)
-                cp      h
-                jr      nz,cpm_miss
-                inc     c
-                ld      a,(bc)
-                cp      e
-                jr      nz,cpm_miss
-                inc     c
-                ld      a,(bc)
-                cp      d
-                jr      nz,cpm_miss
-                ld      a,c
-                add     a,CPM_VALID-3
-                ld      c,a
-                ld      a,(bc)
-                or      a
-                jr      z,cpm_miss
-                dec     c
-                ld      a,(bc)
-                ld      h,a
-                dec     c
-                ld      a,(bc)
-                ld      l,a
-                ret
-cpm_miss:
-                ld      a,c
-                and     $f8
-                ld      c,a                     ; back to the slot's start
-                ld      a,l
-                ld      (bc),a
-                inc     c
-                ld      a,h
-                ld      (bc),a
-                inc     c
-                ld      a,e
-                ld      (bc),a
-                inc     c
-                ld      a,d
-                ld      (bc),a
-                inc     c
-                push    bc
-                call    ptoa
-                pop     bc
-                ld      a,l
-                ld      (bc),a
-                inc     c
-                ld      a,h
-                ld      (bc),a
-                inc     c
-                ld      a,1
-                ld      (bc),a
-                ret
-
-; ---------------------------------------------------------------------------
-; ptoa : HL = dx, DE = dy -> HL = 16-bit angle, atan2 folded through the
-; first octant.  No multiplies and no divide: the angle inside the octant is
-; a log2 subtraction and one lookup, ta = ATANEXP[L(den) - L(num)].  The
-; bucket error is bounded, and bbox_range widens by it, so a verdict can
-; only ever be a superset of the exact one.
-; ---------------------------------------------------------------------------
-ptoa:
-                ld      c,0                     ; the octant
-                bit     7,h
-                jr      z,pa_xp
-                xor     a
-                sub     l
-                ld      l,a
-                sbc     a,a
-                sub     h
-                ld      h,a
-                ld      c,4
-pa_xp:          bit     7,d
-                jr      z,pa_yp
-                xor     a
-                sub     e
-                ld      e,a
-                sbc     a,a
-                sub     d
-                ld      d,a
-                set     1,c
-pa_yp:          ; HL = |dx|, DE = |dy|
-                ld      a,h
-                or      l
-                jr      nz,pa_go
-                ld      a,d
-                or      e
-                ret     z                       ; the corner is on the viewer
-pa_go:
-                push    hl
-                or      a
-                sbc     hl,de
-                pop     hl
-                jr      z,pa_dyge
-                jr      nc,pa_dxgt
-pa_dyge:
-                inc     c                       ; the octant is even here
-                jr      pa_norm                 ; num = dx, den = dy
-pa_dxgt:
-                ex      de,hl                   ; num = dy, den = dx
-pa_norm:
-                ld      a,h
-                or      l
-                jr      z,pa_zero
-                push    de
-                call    lf_log
-                pop     de
-                push    hl
-                ex      de,hl
-                call    lf_log
-                pop     de
-                or      a
-                sbc     hl,de                   ; L(den) - L(num)
-                bit     7,h
-                jr      z,pa_kpos
-                ld      hl,0                    ; rounding jitter near num=den
-pa_kpos:
-                ld      a,h
-                or      a
-                jr      z,pa_kok
-                ld      l,255                   ; far-ratio tail
-pa_kok:
-                ld      h,0
-                add     hl,hl
-                ld      de,ATANEXP
-                add     hl,de
-                ld      a,(hl)
-                inc     hl
-                ld      h,(hl)
-                ld      l,a
-                jr      pa_comb
-pa_zero:
-                ld      hl,0
-pa_comb:
-                ex      de,hl                   ; DE = the first-octant angle
-                ld      l,c
-                ld      h,0
-                add     hl,hl
-                add     hl,hl                   ; octant * 4
-                ld      bc,OCTTAB
-                add     hl,bc
-                ld      c,(hl)
-                inc     hl
-                ld      b,(hl)
-                inc     hl
-                ld      a,(hl)
-                ld      h,b
-                ld      l,c
-                or      a
-                jr      nz,pa_neg
-                add     hl,de
-                ret
-pa_neg:
-                sbc     hl,de
-                ret
-
-OCTTAB:
-                DW      0
-                DB      0,0
-                DW      16384
-                DB      1,0
-                DW      0
-                DB      1,0
-                DW      49152
-                DB      0,0
-                DW      32768
-                DB      1,0
-                DW      16384
-                DB      0,0
-                DW      32768
-                DB      0,0
-                DW      49152
-                DB      1,0
-
 
 near_cross:
                 ld      hl,(cr_vy2)
@@ -756,110 +271,175 @@ d168_n:
 ; holds the view-space position and, when in front of the near plane, the
 ; projected column.
 ; ---------------------------------------------------------------------------
+; vertex_get : HL = a vertex index -> HL = its VCACHE entry (IX too), filled
+; this frame if it was not: the epoch's rotation L(w) from VXCACHE, or a
+; cold transform, plus the frame's ref term, then the reciprocal and the
+; column (vg_project).  The cold transform is the same integer arithmetic
+; as the rotation helpers - four s16 x u8 products of the magnitudes, the
+; signed combination, RNS3 - with the frame's magnitudes, unity cases and
+; signs patched into it by vs_rebuild, so it runs straight through
+; registers.  Eats everything.
+; ---------------------------------------------------------------------------
+; vertex_get : HL = a vertex index -> HL = its VCACHE entry (IX too), filled
+; this frame if it was not.  The transform is the BBC port's: the vertex is
+; a low byte per axis and a page nibble; each axis is
+;       floor((4 [+|-] ox*|s| [-|+] oy*|c|) / 8) + PB[pg] + ref
+; with the products read from the angle's tables (TS_TAB, TC_TAB), the four
+; sign sites patched by vs_rebuild_b4 and the page term PBX/PBY exact - so
+; the result is the rns3 of the full rotation, the integers unchanged.  Then
+; the reciprocal and the column (vg_project).  Eats everything.
+; ---------------------------------------------------------------------------
+; vg_build_tabs : page bank 4, build the product tables, page the geometry
+; back.  HL (the entry) and DE (the index) ride through.  Once a frame.
+vg_build_tabs:
+                push    hl
+                push    de
+                ld      a,BANK_OBJ
+                call    set_page
+                call    vs_build_tables
+                ld      a,BANK_GEOM
+                call    set_page
+                pop     de
+                pop     hl
+                ret
+
 vertex_get:
-                ld      (vg_idx),hl
                 ld      d,h
-                ld      e,l
+                ld      e,l                     ; DE = idx
                 add     hl,hl
                 add     hl,hl
                 add     hl,hl
-                or      a
-                sbc     hl,de                   ; seven bytes an entry
-                ld      de,VCACHE_BASE
-                add     hl,de
+                add     hl,de                   ; nine bytes an entry
+                ld      a,l
+                add     a,VCACHE_BASE & 255
+                ld      l,a
+                ld      a,h
+                adc     a,VCACHE_BASE >> 8
+                ld      h,a
                 ld      a,(vc_stamp)
                 cp      (hl)
                 ret     z                       ; HL = the entry
                 ld      (hl),a
-                push    hl
-                pop     ix                      ; IX = the entry
-                ; Miss this frame - but the rotation of this vertex is the
-                ; same for as long as the angle is, and the frame's whole
-                ; contribution is the ref term the transform adds last.  So a
-                ; vertex seen at this angle before comes back in two adds.
-                call    vx_slot
-                and     c
-                jr      z,vg_cold
-                ld      hl,(vg_idx)
-                add     hl,hl
-                add     hl,hl
-                ld      de,VXCACHE_BASE
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                inc     hl
-                push    hl
-                ld      hl,(vs_rx)
-                add     hl,de
-                ex      (sp),hl                 ; tvx down, the pointer up
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      hl,(vs_ry)
-                add     hl,de
-                ld      (ix+VC_TVY),l
-                ld      (ix+VC_TVY+1),h
-                jp      vg_project
-vg_cold:
-                or      c
-                ld      (hl),a                  ; the epoch's valid bit
-                ld      hl,(vg_idx)
-                add     hl,hl
-                add     hl,hl
-                ld      de,VXCACHE_BASE
-                add     hl,de
-                push    hl
-                pop     iy                      ; IY -> the banked L(w)
-                ld      de,VERTS-VXCACHE_BASE
-                add     hl,de                   ; HL -> the vertex
-                ld      c,(hl)
-                inc     hl
-                ld      b,(hl)
-                inc     hl
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)                  ; BC = wx, DE = wy
-                push    bc
-                push    de
-                ; the two wy products first, so wx's each land on a whole
-                ; s24 accumulator
-                call    rot_cos                 ; A:HL = wy * cos
-                ld      (vs_acc),hl
-                ld      (vs_acc+2),a
-                pop     de
-                call    rot_sin                 ; A:HL = wy * sin
-                ld      (vs_acc2),hl
-                ld      (vs_acc2+2),a
-                pop     de                      ; wx
-                push    de
-                call    rot_sin                 ; A:HL = wx * sin
-                ld      de,(vs_acc)
+                ld      a,(vs_tab_valid)
                 or      a
-                sbc     hl,de
-                ld      c,a
-                ld      a,(vs_acc+2)
-                ld      d,a
+                call    z,vg_build_tabs         ; build the angle's product
+                push    hl                      ; tables on the first cold vertex
+                pop     ix                      ; IX = the entry
+                ld      hl,VP_OX
+                add     hl,de
+                ld      c,(hl)                  ; ox
+                inc     h
+                inc     h
+                ld      b,(hl)                  ; oy
+                inc     h
+                inc     h
+                ld      a,(hl)                  ; the page nibble
+                add     a,a
+                ld      iyl,a                   ; * 2: PB's index
+                push    bc                      ; (oy, ox) for the y axis
+                ; --- x ---
+                ld      a,b
+                add     a,a
+                ld      l,a
+                ld      a,TC_TAB>>8
+                adc     a,0
+                ld      h,a
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)                  ; DE = oy * |cos|
                 ld      a,c
-                sbc     a,d                     ; wx*sin - wy*cos
-                RNS3                            ; HL = L(w)x
-                ld      (iy+0),l
-                ld      (iy+1),h
+                add     a,a
+                ld      l,a
+                ld      a,TS_TAB>>8
+                adc     a,0
+                ld      h,a
+                ld      c,(hl)
+                inc     l
+                ld      b,(hl)                  ; BC = ox * |sin|
+                ld      hl,4
+                xor     a
+vgx1:           add     hl,bc                   ; [+|-] ox*|s|   (patched, 5 bytes)
+                adc     a,0
+                nop
+                nop
+vgx2:           or      a                       ; [-|+] oy*|c|
+                sbc     hl,de
+                sbc     a,0
+                sra     a
+                rr      h
+                rr      l
+                sra     a
+                rr      h
+                rr      l
+                sra     a
+                rr      h
+                rr      l                       ; floor(S / 8)
+                ld      a,iyl
+                add     a,PBX & 255
+                ld      e,a
+                ld      d,PBX >> 8
+                ld      a,(de)
+                inc     e
+                ld      c,a
+                ld      a,(de)
+                ld      b,a
+                add     hl,bc                   ; + the page term
                 ld      de,(vs_rx)
                 add     hl,de                   ; HL = tvx
-                ex      (sp),hl                 ; tvx down, wx up
-                ex      de,hl
-                call    rot_cos                 ; A:HL = wx * cos
-                ld      de,(vs_acc2)
-                add     hl,de
-                ld      d,a
-                ld      a,(vs_acc2+2)
-                adc     a,d                     ; wx*cos + wy*sin
-                RNS3                            ; HL = L(w)y
-                ld      (iy+2),l
-                ld      (iy+3),h
+                ld      (ix+VC_TVX),l
+                ld      (ix+VC_TVX+1),h
+                ex      (sp),hl                 ; tvx down, (oy, ox) up
+                ; --- y ---
+                ld      c,l                     ; ox
+                ld      a,h                     ; oy
+                add     a,a
+                ld      l,a
+                ld      a,TS_TAB>>8
+                adc     a,0
+                ld      h,a
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)                  ; DE = oy * |sin|
+                ld      a,c
+                add     a,a
+                ld      l,a
+                ld      a,TC_TAB>>8
+                adc     a,0
+                ld      h,a
+                ld      c,(hl)
+                inc     l
+                ld      b,(hl)                  ; BC = ox * |cos|
+                ld      hl,4
+                xor     a
+vgy1:           add     hl,bc                   ; [+|-] ox*|c|
+                adc     a,0
+                nop
+                nop
+vgy2:           add     hl,de                   ; [+|-] oy*|s|
+                adc     a,0
+                nop
+                nop
+                sra     a
+                rr      h
+                rr      l
+                sra     a
+                rr      h
+                rr      l
+                sra     a
+                rr      h
+                rr      l
+                ld      a,iyl
+                add     a,PBY & 255
+                ld      e,a
+                ld      d,PBY >> 8
+                ld      a,(de)
+                inc     e
+                ld      c,a
+                ld      a,(de)
+                ld      b,a
+                add     hl,bc
                 ld      de,(vs_ry)
-                add     hl,de
+                add     hl,de                   ; HL = tvy
                 ld      (ix+VC_TVY),l
                 ld      (ix+VC_TVY+1),h
 vg_project:
@@ -901,15 +481,20 @@ render_seg:     ; IX -> the seg record
                 ld      (sg_flags),a
 
                 ; --- back face -----------------------------------------
-                ; dot = ldy*(px - lx) - ldx*(py - ly) must be strictly
-                ; positive.  Three quarters of DOOM's linedefs are axis
-                ; aligned, and for those one term vanishes and the test
-                ; collapses to a sign comparison with one delta.
+                ; The reference's verdict is the sign of
+                ;   dot = ldy * (px88 - lx88) - ldx * (py88 - ly88)
+                ; in prescaled 8.8, with a tie (dot == 0) culled when
+                ; ldy < 0 or (ldy == 0 and ldx > 0).  Three quarters of
+                ; DOOM's linedefs are axis aligned, and for those one term
+                ; vanishes and the test is a comparison of one coordinate.
+                ; For the rest the integer-part dot D decides on its own
+                ; unless |D| < |ldx| + |ldy|, the band inside which the
+                ; fractions can still turn it (the BBC port's DBOUND gate).
                 and     SF_LDX0
-                jr      nz,rs_bf_x0
+                jp      nz,rs_bf_x0
                 ld      a,(sg_flags)
                 and     SF_LDY0
-                jr      nz,rs_bf_y0
+                jp      nz,rs_bf_y0
                 ld      e,(ix+SG_LX)
                 ld      d,(ix+SG_LX+1)
                 ld      hl,(pl_x)
@@ -936,14 +521,88 @@ render_seg:     ; IX -> the seg record
                 ld      a,(pos_l+2)
                 ld      e,a
                 ld      a,d
-                sbc     a,e                     ; A:HL = ldy*dx - ldx*dy
-                ret     m
+                sbc     a,e                     ; A:HL = D = ldy*dx - ldx*dy
+                ; the band: |D| < |ldx| + |ldy|
+                ld      (bf_d),hl
+                ld      (bf_d+2),a
+                ld      b,a
+                ld      a,(ix+SG_LDX)
+                bit     7,a
+                jr      z,bf_b1
+                neg
+bf_b1:          ld      c,a
+                ld      a,(ix+SG_LDY)
+                bit     7,a
+                jr      z,bf_b2
+                neg
+bf_b2:          add     a,c
+                ld      c,a                     ; C = the bound
+                ld      a,b
+                or      a
+                jr      nz,bf_dneg
+                ld      a,h
+                or      a
+                jp      nz,rs_visible           ; D >= 256
+                ld      a,l
+                cp      c
+                jp      nc,rs_visible           ; D >= bound
+                jr      bf_exact
+bf_dneg:        inc     a
+                ret     nz                      ; D <= -65536
+                ld      a,h
+                inc     a
+                ret     nz                      ; D <= -256
+                ld      a,l
+                add     a,c                     ; D = L - 256 > -bound iff L + bound > 256
+                ret     nc
+                ret     z
+bf_exact:
+                ; dot88 = 256 * D + ldy * (pxf - lxf) - ldx * (pyf - lyf)
+                ld      a,(pl_xf)
+                sub     (ix+SG_LXF)
+                ld      e,a
+                sbc     a,a
+                ld      d,a                     ; DE = pxf - lxf, s16
+                ld      a,(ix+SG_LDY)
+                call    mul_s16_u8_signed
+                ld      (bf_t),hl
+                ld      (bf_t+2),a
+                ld      a,(pl_yf)
+                sub     (ix+SG_LYF)
+                ld      e,a
+                sbc     a,a
+                ld      d,a
+                ld      a,(ix+SG_LDX)
+                call    mul_s16_u8_signed       ; A:HL = ldx * fy
+                ld      d,a
+                ld      a,(bf_t+2)
+                ld      e,a
+                ld      a,(bf_t)
+                sub     l
+                ld      l,a
+                ld      a,(bf_t+1)
+                sbc     a,h
+                ld      h,a
+                ld      a,e
+                sbc     a,d                     ; A:HL = ldy*fx - ldx*fy
+                ld      b,a                     ; B = its high byte
+                ld      a,(bf_d)                ; + 256 * D: D's low byte
+                ld      d,a                     ; into the middle
+                ld      e,0
+                add     hl,de
+                ld      a,(bf_d+1)              ; D's sign byte (D fits s9)
+                adc     a,b
+                ret     m                       ; behind
                 or      h
                 or      l
-                ret     z
+                jr      nz,rs_visible
+                ; a tie: culled when ldy < 0 (ldx, ldy both nonzero here)
+                bit     7,(ix+SG_LDY)
+                ret     nz
                 jr      rs_visible
 rs_bf_x0:
-                ; dot = ldy * (px - lx)
+                ; dot = ldy * (px88 - lx88): the integer difference decides
+                ; unless it is zero, then the fractions, then the tie rule
                 ld      e,(ix+SG_LX)
                 ld      d,(ix+SG_LX+1)
                 ld      hl,(pl_x)
@@ -951,13 +610,23 @@ rs_bf_x0:
                 sbc     hl,de
                 ld      a,h
                 or      l
-                ret     z
+                jr      z,bx_frac
                 ld      a,h
                 xor     (ix+SG_LDY)             ; sign of the product
                 ret     m
                 jr      rs_visible
+bx_frac:        ld      a,(pl_xf)
+                sub     (ix+SG_LXF)
+                jr      z,bx_tie
+                sbc     a,a                     ; the sign of the difference
+                xor     (ix+SG_LDY)
+                ret     m
+                jr      rs_visible
+bx_tie:         bit     7,(ix+SG_LDY)           ; culled when ldy < 0
+                ret     nz
+                jr      rs_visible
 rs_bf_y0:
-                ; dot = -ldx * (py - ly)
+                ; dot = -ldx * (py88 - ly88)
                 ld      e,(ix+SG_LY)
                 ld      d,(ix+SG_LY+1)
                 ld      hl,(pl_y)
@@ -965,10 +634,21 @@ rs_bf_y0:
                 sbc     hl,de
                 ld      a,h
                 or      l
-                ret     z
+                jr      z,by_frac
                 ld      a,h
                 xor     (ix+SG_LDX)
                 ret     p                       ; product positive -> dot < 0
+                jr      rs_visible
+by_frac:        ld      a,(pl_yf)
+                sub     (ix+SG_LYF)
+                jr      z,by_tie
+                sbc     a,a
+                xor     (ix+SG_LDX)
+                ret     p
+                jr      rs_visible
+by_tie:         bit     7,(ix+SG_LDX)           ; culled when ldx > 0
+                jr      nz,rs_visible
+                ret
 rs_visible:
                 ld      hl,frame_segs
                 inc     (hl)
@@ -1047,38 +727,19 @@ rs_front:
                 ld      (sg_sx1),hl
                 jr      rs_do2
 rs_clipx:
-                ; the view x's come back from the epoch's banked rotation
-                ; plus this frame's ref term
-                push    bc
-                ld      hl,(sg_v1)
-                add     hl,hl
-                add     hl,hl
-                ld      de,VXCACHE_BASE
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      hl,(vs_rx)
-                add     hl,de
+                ; the view coordinates, from the entries
+                ld      l,(ix+VC_TVX)
+                ld      h,(ix+VC_TVX+1)
                 ld      (cr_vx1),hl
                 ld      l,(ix+VC_TVY)
                 ld      h,(ix+VC_TVY+1)
                 ld      (cr_vy1),hl
-                ld      hl,(sg_v2)
-                add     hl,hl
-                add     hl,hl
-                ld      de,VXCACHE_BASE
-                add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      hl,(vs_rx)
-                add     hl,de
+                ld      l,(iy+VC_TVX)
+                ld      h,(iy+VC_TVX+1)
                 ld      (cr_vx2),hl
                 ld      l,(iy+VC_TVY)
                 ld      h,(iy+VC_TVY+1)
                 ld      (cr_vy2),hl
-                pop     bc
                 jr      rs_front
 rs_clip1:
                 ; v1 is behind: cross toward v2
@@ -1115,44 +776,14 @@ rs_clip2:
                 call    project_x
                 ld      (sg_sx2),hl
 rs_havex:
-                ; order the two columns; a zero-width seg spans none
+                ; a reversed or tied projection covers no columns: dropped
+                ld      hl,(sg_sx2)
+                ld      de,(sg_sx1)
+                CMP16F
+                ret     c
+                ret     z
                 ld      hl,(sg_sx1)
                 ld      de,(sg_sx2)
-                or      a
-                sbc     hl,de
-                ret     z
-                jp      pe,rs_ovf
-                jp      m,rs_lt
-rs_ge:          ld      hl,(sg_sx2)             ; sx1 > sx2
-                ld      de,(sg_sx1)
-                jr      rs_range
-rs_ovf:         jp      m,rs_ge
-rs_lt:          ld      hl,(sg_sx1)             ; sx1 < sx2
-                ld      de,(sg_sx2)
-rs_range:
-                ; HL = xlo, DE = xhi
-                bit     7,d
-                ret     nz                      ; entirely left of the screen
-                bit     7,h
-                jr      nz,rs_lo0
-                ld      a,h
-                or      a
-                ret     nz                      ; entirely right of it
-                ld      a,l
-                jr      rs_lo1
-rs_lo0:         xor     a
-rs_lo1:         ld      (cl_lo),a
-                ld      b,a
-                ld      a,d
-                or      a
-                ld      a,e
-                jr      z,rs_hi1
-                ld      a,RENDER_W-1
-rs_hi1:         ld      (cl_hi),a
-                ld      c,a
-                xor     a
-                ld      (cl_lo+1),a
-                ld      (cl_hi+1),a
                 call    sp_hasgap
                 ret     nc
                 jp      render_seg_body
@@ -1205,8 +836,6 @@ near_cross_seg2:
 ; apply the occlusion update it implies.
 ; ---------------------------------------------------------------------------
 render_seg_body:
-                xor     a
-                ld      (sq_n),a
                 ; Four segs in five share v1 with the previous seg's v2, and
                 ; the front sector is the same right across a subsector, so
                 ; that seg's projected pair is this one's - no reciprocal, no
@@ -1262,35 +891,37 @@ rsb_p2:
                 ld      hl,(sg_fb2)
                 ld      (ch_fb),hl
 rsb_p3:
-
+                ; the heights the vertex-span descriptors read: the back
+                ; pair of a solid seg is aliased to the front by the pack
+                ld      hl,(sg_fh)              ; fh, ch
+                ld      (vs_h),hl
+                ld      hl,(sg_bfh)             ; bfh, bch
+                ld      (vs_h+2),hl
+                ; --- the eyeline rule: a ceiling at or below the eye kills
+                ; the top edges ($80), a floor at or above it the bottom
+                ; edges ($40); the top kill wins.  Byte subtractions, as
+                ; the BBC port's ---
+                ld      a,(sg_ch)
+                ld      hl,vs_vz
+                sub     (hl)
+                ld      a,$80
+                jp      m,rsb_esk
+                ld      a,(sg_fh)
+                sub     (hl)
+                ld      a,$40
+                jp      p,rsb_esk
+                xor     a
+rsb_esk:        ld      (sg_eskip),a
                 ld      a,(sg_flags)
                 and     SF_SOLID
                 jp      nz,rsb_solid
 
-                ; --- portal --------------------------------------------
-                ld      a,(sg_ch)
-                ld      b,a
-                ld      a,(sg_bch)
-                sub     b                       ; bch - ch
-                ld      a,0
-                jp      p,rsb_nbt0              ; bch >= ch: no upper step
-                inc     a
-rsb_nbt0:
-                ld      (sg_needbt),a
-                ld      a,(sg_fh)
-                ld      b,a
-                ld      a,(sg_bfh)
-                sub     b
-                ld      a,0
-                jp      m,rsb_nbb0
-                jr      z,rsb_nbb0
-                inc     a
-rsb_nbb0:
-                ld      (sg_needbb),a
-
-                ld      a,(sg_needbt)
-                or      a
-                jr      z,rsb_nobt
+                ; --- a portal: the BBC port's seg_emit cascade ------------
+                xor     a
+                ld      (fw_touch),a
+                ld      a,(sg_flags)
+                and     SF_NEEDBT
+                jr      z,rsb_nbt
                 ld      de,(sg_m1)
                 ld      a,(sg_bch)
                 ld      hl,vs_vz
@@ -1303,32 +934,9 @@ rsb_nbb0:
                 sub     (hl)
                 call    project_y
                 ld      (sg_bt2),hl
-                ld      a,1
-                ld      (sg_emitt),a
-                ld      a,(sg_ch)
-                ld      hl,vs_vz
-                sub     (hl)
-                jp      m,rsb_botpart
-                jr      z,rsb_botpart
-                ld      hl,(sg_ft1)
-                ld      de,(sg_ft2)
-                call    emit_edge
-                jr      rsb_botpart
-rsb_nobt:
-                xor     a
-                ld      (sg_emitt),a
-                ld      a,(sg_ch)
-                ld      b,a
-                ld      a,(sg_bch)
-                sub     b
-                jp      m,rsb_botpart
-                jr      z,rsb_botpart
-                ld      a,1
-                ld      (sg_emitt),a
-rsb_botpart:
-                ld      a,(sg_needbb)
-                or      a
-                jr      z,rsb_nobb
+rsb_nbt:        ld      a,(sg_flags)
+                and     SF_NEEDBB
+                jr      z,rsb_nbb
                 ld      de,(sg_m1)
                 ld      a,(sg_bfh)
                 ld      hl,vs_vz
@@ -1341,258 +949,291 @@ rsb_botpart:
                 sub     (hl)
                 call    project_y
                 ld      (sg_bb2),hl
-                ld      a,1
-                ld      (sg_emitb),a
-                ld      a,(sg_fh)
-                ld      hl,vs_vz
-                sub     (hl)
-                jp      p,rsb_verts
-                ld      hl,(sg_fb1)
-                ld      de,(sg_fb2)
-                call    emit_edge
-                jr      rsb_verts
-rsb_nobb:
+rsb_nbb:
+                ; the companions: the front edges beside a step, plain draws
+                ld      a,(sg_flags)
+                and     SF_NEEDBT|SF_NEEDBB
+                cp      SF_NEEDBT|SF_NEEDBB
+                jr      nz,pc_singles
+                ld      a,(sg_eskip)
+                or      a
+                jr      nz,pc_singles
+                ld      hl,sg_ft1
+                call    rsb_line
+                ld      hl,sg_fb1
+                call    rsb_line
+                jr      pc_verts
+pc_singles:     ld      a,(sg_flags)
+                and     SF_NEEDBT
+                jr      z,pc_fb
+                ld      a,(sg_eskip)
+                bit     7,a
+                jr      nz,pc_fb
+                ld      hl,sg_ft1
+                call    rsb_line
+pc_fb:          ld      a,(sg_flags)
+                and     SF_NEEDBB
+                jr      z,pc_verts
+                ld      a,(sg_eskip)
+                bit     6,a
+                jr      nz,pc_verts
+                ld      hl,sg_fb1
+                call    rsb_line
+pc_verts:       call    rsb_vspans
+                ; the armed aperture edges, applied as they are drawn
+                ld      a,(sg_flags)
+                and     SF_NEEDBT
+                jr      z,pc_top_up
+                ld      hl,sg_bt1
                 xor     a
-                ld      (sg_emitb),a
-                ld      a,(sg_bfh)
-                ld      b,a
-                ld      a,(sg_fh)
-                sub     b
-                jp      m,rsb_verts
-                jr      z,rsb_verts
-                ld      a,1
-                ld      (sg_emitb),a
-rsb_verts:
-                call    fe_prepare
-                ; step-face verticals at each endpoint
-                ld      a,(sg_flags)
-                and     SF_NOVT1
-                jr      nz,rsb_v2
-                ld      a,(sg_needbt)
+                call    rsb_fused
+                jr      pc_bot
+pc_top_up:      ld      a,(sg_flags)
+                and     SF_STEPUP_T
+                jr      z,pc_bot
+                ld      hl,sg_ft1
+                xor     a
+                call    rsb_fused
+pc_bot:         ld      a,(sg_flags)
+                and     SF_NEEDBB
+                jr      z,pc_bot_up
+                ld      hl,sg_bb1
+                ld      a,$80
+                call    rsb_fused
+                jr      pc_walk
+pc_bot_up:      ld      a,(sg_flags)
+                and     SF_STEPUP_B
+                jr      z,pc_walk
+                ld      hl,sg_fb1
+                ld      a,$80
+                call    rsb_fused
+pc_walk:        ld      a,(fw_touch)
                 or      a
-                jr      z,rsb_v1b
-                ld      hl,(sg_sx1)
-                ld      (dl_x1),hl
-                ld      hl,(sg_ft1)
-                ld      (dl_y1),hl
-                ld      hl,(sg_bt1)
-                ld      (dl_y2),hl
-                call    sp_drawv
-rsb_v1b:
-                ld      a,(sg_needbb)
-                or      a
-                jr      z,rsb_v2
-                ld      hl,(sg_sx1)
-                ld      (dl_x1),hl
-                ld      hl,(sg_bb1)
-                ld      (dl_y1),hl
-                ld      hl,(sg_fb1)
-                ld      (dl_y2),hl
-                call    sp_drawv
-rsb_v2:
-                ld      a,(sg_flags)
-                and     SF_NOVT2
-                jr      nz,rsb_tighten
-                ld      a,(sg_needbt)
-                or      a
-                jr      z,rsb_v2b
-                ld      hl,(sg_sx2)
-                ld      (dl_x1),hl
-                ld      hl,(sg_ft2)
-                ld      (dl_y1),hl
-                ld      hl,(sg_bt2)
-                ld      (dl_y2),hl
-                call    sp_drawv
-rsb_v2b:
-                ld      a,(sg_needbb)
-                or      a
-                jr      z,rsb_tighten
-                ld      hl,(sg_sx2)
-                ld      (dl_x1),hl
-                ld      hl,(sg_bb2)
-                ld      (dl_y1),hl
-                ld      hl,(sg_fb2)
-                ld      (dl_y2),hl
-                call    sp_drawv
-rsb_tighten:
-                ; new top = max(ft, bt), new bottom = min(fb, bb)
-                ld      a,(sg_needbt)
-                or      a
-                jr      z,rsb_tt_f
-                ld      hl,(sg_ft1)
-                ld      de,(sg_bt1)
-                MAX16
-                ld      (cl_yt1),hl
-                ld      hl,(sg_ft2)
-                ld      de,(sg_bt2)
-                MAX16
-                ld      (cl_yt2),hl
-                jr      rsb_tb
-rsb_tt_f:
-                ld      hl,(sg_ft1)
-                ld      (cl_yt1),hl
-                ld      hl,(sg_ft2)
-                ld      (cl_yt2),hl
-rsb_tb:
-                ld      a,(sg_needbb)
-                or      a
-                jr      z,rsb_tb_f
-                ld      hl,(sg_fb1)
-                ld      de,(sg_bb1)
-                MIN16
-                ld      (cl_yb1),hl
-                ld      hl,(sg_fb2)
-                ld      de,(sg_bb2)
-                MIN16
-                ld      (cl_yb2),hl
-                jr      rsb_tgo
-rsb_tb_f:
-                ld      hl,(sg_fb1)
-                ld      (cl_yb1),hl
-                ld      hl,(sg_fb2)
-                ld      (cl_yb2),hl
-rsb_tgo:
-                call    set_op_range
+                jr      z,pc_zero
                 ld      hl,(sg_sx1)
                 ld      de,(sg_sx2)
-                CMP16F
-                ld      a,0
-                jr      c,rsb_sw0
-                inc     a
-rsb_sw0:        ld      (sg_swap),a
-                ; the two armed lines are drawn by the fuse itself, after
-                ; every unarmed line has met the aperture they narrow
-                ld      hl,cl_yt1
-                ld      de,fu_tfn
-                ld      bc,fu_tend
-                call    rsb_armfn
-                ld      hl,cl_yb1
-                ld      de,fu_bfn
-                ld      bc,fu_bend
-                call    rsb_armfn
-                jp      sp_fuse
-
-; rsb_armfn : HL -> the pair (y at sx1, y at sx2), DE -> the fn buffer,
-; BC -> where its ordered (y1, y2) is kept.
-rsb_armfn:
-                push    de
-                ld      a,(sg_swap)
-                or      a
-                jr      nz,rsb_af_s
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                inc     hl
-                ld      (cl_ly1),de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (cl_ly2),de
+                jp      fused_merge_range
+pc_zero:        call    seg_zero_rec_solid
+                ret     nc
                 ld      hl,(sg_sx1)
-                ld      (cl_lx1),hl
-                ld      hl,(sg_sx2)
-                ld      (cl_lx2),hl
-                jr      rsb_af_go
-rsb_af_s:
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                inc     hl
-                ld      (cl_ly2),de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ld      (cl_ly1),de
-                ld      hl,(sg_sx2)
-                ld      (cl_lx1),hl
-                ld      hl,(sg_sx1)
-                ld      (cl_lx2),hl
-rsb_af_go:
-                ld      hl,cl_ly1               ; the ordered pair, kept for evl
-                ld      d,b
-                ld      e,c
-                ld      bc,4
-                ldir
-                pop     hl
-                jp      linfn
+                ld      de,(sg_sx2)
+                jp      sp_marksolid
 
 ; --- one-sided wall --------------------------------------------------------
 rsb_solid:
-                ld      a,(sg_ch)
-                ld      hl,vs_vz
-                sub     (hl)
-                jp      m,rsb_s_bot
-                jr      z,rsb_s_bot
-                ld      hl,(sg_ft1)
-                ld      de,(sg_ft2)
-                call    emit_edge
-rsb_s_bot:
-                ld      a,(sg_fh)
-                ld      hl,vs_vz
-                sub     (hl)
-                jp      p,rsb_s_v1
-                ld      hl,(sg_fb1)
-                ld      de,(sg_fb2)
-                call    emit_edge
-rsb_s_v1:
-                call    fe_prepare
-                ld      a,(sg_flags)
-                and     SF_NOVT1
-                jr      nz,rsb_s_v2
+                ld      a,(sg_eskip)
+                or      a
+                jr      nz,sc_esk
+                ld      hl,sg_ft1
+                call    rsb_line
+sc_fb:          ld      hl,sg_fb1
+                call    rsb_line
+sc_no_fb:       call    rsb_vspans
                 ld      hl,(sg_sx1)
-                ld      (dl_x1),hl
-                ld      hl,(sg_ft1)
-                ld      (dl_y1),hl
-                ld      hl,(sg_fb1)
-                ld      (dl_y2),hl
-                call    sp_drawv
-rsb_s_v2:
-                ld      a,(sg_flags)
-                and     SF_NOVT2
-                jr      nz,rsb_s_op
-                ld      hl,(sg_sx2)
-                ld      (dl_x1),hl
-                ld      hl,(sg_ft2)
-                ld      (dl_y1),hl
-                ld      hl,(sg_fb2)
-                ld      (dl_y2),hl
-                call    sp_drawv
-rsb_s_op:
-                call    set_op_range
+                ld      de,(sg_sx2)
                 jp      sp_marksolid
+sc_esk:         bit     7,a
+                jr      nz,sc_fb                ; no top edge: the bottom alone
+                ld      hl,sg_ft1
+                call    rsb_line
+                jr      sc_no_fb
 
-; --- helpers ---------------------------------------------------------------
-; set_op_range : cl_lo / cl_hi as the half-open column range of the seg.
-set_op_range:
-                ld      a,(cl_lo)
-                ld      l,a
-                ld      h,0
-                ld      (cl_lo),hl
-                ld      a,(cl_hi)
-                ld      l,a
-                ld      h,0
-                inc     hl
-                ld      (cl_hi),hl
+; cmp_s8 : A vs (HL), signed bytes: carry when A < (HL), zero when equal
+cmp_s8:
+                sub     (hl)
+                ret     z
+                jp      pe,cs8_ovf
+                jp      m,cs8_lt
+                or      a                       ; carry clear, NZ
+                ret
+cs8_ovf:        jp      m,cs8_ge                ; overflowed: the true sign is the other
+cs8_lt:         scf
+                ret
+cs8_ge:         or      a
                 ret
 
-; emit_edge : HL = y at sx1, DE = y at sx2; clip and emit the sloped edge.
-emit_edge:
-                jp      queue_edge
+; rsb_line : HL -> a row pair (y at sx1; y at sx2 four bytes on), drawn from
+; sx1 to sx2 through the clipper
+rsb_line:
+                call    rsb_stage
+                jp      dcl_s16
+; rsb_fused : the same line as an aperture edge, A = the side
+rsb_fused:
+                push    af
+                call    rsb_stage
+                pop     af
+                jp      fused_line
+rsb_stage:                                      ; (the rows are biased already)
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (lc_y1),de
+                inc     hl
+                inc     hl
+                inc     hl
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)
+                ld      (lc_y2),de
+                ld      hl,(sg_sx1)
+                ld      (lc_x1),hl
+                ld      hl,(sg_sx2)
+                ld      (lc_x2),hl
+                ret
+
+
+; ---------------------------------------------------------------------------
+; The vertex-span descriptors (emit_vertex_spans): each endpoint's
+; verticals come from a per-vertex descriptor, once per frame at the first
+; seg that touches it - and a first touch that is near-clipped or off the
+; screen still uses it up.
+; ---------------------------------------------------------------------------
+rsb_vspans:
+                ld      hl,(sg_v1)
+                ld      de,(sg_sx1)
+                ld      bc,(sg_m1)
+                ld      a,(sg_n1)
+                call    vspan_emit
+                ld      hl,(sg_v2)
+                ld      de,(sg_sx2)
+                ld      bc,(sg_m2)
+                ld      a,(sg_n2)
+                jp      vspan_emit
+
+; vspan_emit : HL = the vertex, DE = its column (s16), BC = (S, M8), A = 1
+; when near-clipped
+vspan_emit:
+                ld      (vs_sx),de
+                ld      (vs_ms),bc
+                ld      c,a
+                ; done this frame?
+                ld      de,VDONE
+                add     hl,de
+                ld      a,(vd_stamp)
+                cp      (hl)
+                ret     z                       ; already
+                ld      (hl),a
+                ld      de,VSDESC-VDONE
+                add     hl,de
+                ld      a,(hl)                  ; the descriptor
+                or      a
+                ret     z
+                ld      b,a
+                ld      a,c
+                or      a
+                ret     nz                      ; near-clipped
+                ld      a,(vs_sx+1)
+                or      a
+                ret     nz                      ; off the screen either side
+                ld      a,b
+                bit     7,a
+                jr      nz,ve_explicit
+                ; a code: 1 (fh, ch)  2 (fh, bfh)  3 (bch, ch)  4 both of 2 and 3
+                cp      4
+                jr      z,ve_c4
+                cp      3
+                jr      z,ve_c3
+                cp      2
+                jr      z,ve_c2
+                ld      a,(vs_h)                ; fh
+                ld      (vs_lo),a
+                ld      a,(vs_h+1)              ; ch
+                ld      (vs_hi),a
+                jp      ve_pair
+ve_c2:          ld      a,(vs_h)
+                ld      (vs_lo),a
+                ld      a,(vs_h+2)              ; bfh
+                ld      (vs_hi),a
+                jp      ve_pair
+ve_c3:          ld      a,(vs_h+3)              ; bch
+                ld      (vs_lo),a
+                ld      a,(vs_h+1)
+                ld      (vs_hi),a
+                jp      ve_pair
+ve_c4:          ld      a,(vs_h+3)
+                ld      (vs_lo),a
+                ld      a,(vs_h+1)
+                ld      (vs_hi),a
+                call    ve_pair
+                jr      ve_c2
+ve_done:        pop     hl
+                ret
+ve_explicit:
+                and     $7f
+                ld      (vs_i),a
+ve_el:
+                ld      a,(vs_i)
+                ld      l,a
+                ld      h,0
+                ld      e,a
+                ld      d,0
+                add     hl,hl
+                add     hl,de                   ; * 3
+                ld      de,VSEXPL
+                add     hl,de
+                ; c_lo = max(h_lo, fh), c_hi = min(h_hi, ch)
+                ld      a,(vs_h)
+                ld      e,a                     ; E = fh
+                ld      a,(hl)                  ; h_lo
+                ld      c,a
+                push    hl
+                ld      hl,vs_h
+                call    cmp_s8                  ; carry: h_lo < fh (A = the difference)
+                pop     hl
+                ld      a,c
+                jr      nc,ve_lo1
+                ld      a,e
+ve_lo1:         ld      (vs_lo),a
+                inc     hl
+                ld      a,(vs_h+1)
+                ld      e,a                     ; E = ch
+                ld      a,(hl)                  ; h_hi
+                ld      c,a
+                push    hl
+                ld      hl,vs_h+1
+                call    cmp_s8                  ; carry: h_hi < ch
+                pop     hl
+                ld      a,c
+                jr      c,ve_hi1
+                ld      a,e
+ve_hi1:         ld      (vs_hi),a
+                inc     hl
+                ld      a,(hl)                  ; cont
+                push    af
+                call    ve_pair
+                pop     af
+                or      a
+                ret     z
+                ld      hl,vs_i
+                inc     (hl)
+                jr      ve_el
+
+; ve_pair : the vertical from height vs_hi down to vs_lo at vs_sx, when
+; hi > lo
+ve_pair:
+                ld      a,(vs_hi)
+                ld      hl,vs_lo
+                call    cmp_s8
+                ret     c
+                ret     z
+                ld      de,(vs_ms)
+                ld      a,(vs_hi)
+                ld      hl,vs_vz
+                sub     (hl)
+                call    project_y
+                ld      (lc_y1),hl
+                ld      de,(vs_ms)
+                ld      a,(vs_lo)
+                ld      hl,vs_vz
+                sub     (hl)
+                call    project_y
+                ld      (lc_y2),hl
+                ld      a,(vs_sx)               ; the column (on the screen)
+                jp      dcl_vert_on
+
 
 ; ---------------------------------------------------------------------------
 ; DOOM's R_CheckBBox corner table, each corner named by the low address
 ; bytes of its x delta and its y delta (top, bottom, left, right lie in one
 ; page).  Entry 5 is "viewpoint inside".
 ; ---------------------------------------------------------------------------
-CHECKCOORD:
-                DB      (bb_top+6)&255,(bb_top+0)&255,(bb_top+4)&255,(bb_top+2)&255
-                DB      (bb_top+6)&255,(bb_top+0)&255,(bb_top+4)&255,(bb_top+0)&255
-                DB      (bb_top+6)&255,(bb_top+2)&255,(bb_top+4)&255,(bb_top+0)&255
-                DB      (bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255
-                DB      (bb_top+4)&255,(bb_top+0)&255,(bb_top+4)&255,(bb_top+2)&255
-                DB      (bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255
-                DB      (bb_top+6)&255,(bb_top+2)&255,(bb_top+6)&255,(bb_top+0)&255
-                DB      (bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255,(bb_top+0)&255
-                DB      (bb_top+4)&255,(bb_top+0)&255,(bb_top+6)&255,(bb_top+2)&255
-                DB      (bb_top+4)&255,(bb_top+2)&255,(bb_top+6)&255,(bb_top+2)&255
-                DB      (bb_top+4)&255,(bb_top+2)&255,(bb_top+6)&255,(bb_top+0)&255

@@ -83,24 +83,23 @@ mul_s16_u8:
                 jr      z,ms16_hi0              ; 0 <= DE < 256
                 inc     a
                 jr      z,ms16_him1             ; DE high byte = $FF
-                dec     a                       ; restore
-                push    af
-                ld      a,c
-                ld      (m16_mult),a
-                pop     af
-                ; --- general case: high and low partials ---
-                ld      h,a
-                ld      l,c
+                ; --- general case: the high and low partials, inline ---
+                push    bc                      ; C = the multiplier
                 push    de
-                call    mul_s8_u8               ; HL = dhi * mult (signed)
-                ld      b,h                     ; B:C = high partial
-                ld      c,l
+                ld      h,d                     ; hi, as unsigned
+                ld      l,c
+                MUL_U8_BODY                     ; HL = hi_u * mult
                 pop     de
-                push    bc
+                pop     bc
+                bit     7,d
+                jr      z,ms16_gp
+                ld      a,h
+                sub     c
+                ld      h,a                     ; signed: less mult << 8
+ms16_gp:        push    hl                      ; the high partial
                 ld      h,e
-                ld      a,(m16_mult)
-                ld      l,a
-                call    mul_u8                  ; HL = dlo * mult (unsigned)
+                ld      l,c
+                MUL_U8_BODY                     ; HL = lo * mult
                 pop     bc
                 ld      a,h
                 add     a,c
@@ -188,47 +187,42 @@ ra_fast:        ld      a,c
 ; rns_hl : HL = (HL + 1<<(B-1)) >> B, arithmetic, 16-bit.  B in 1..16.
 ; corrupts A, B
 rns_hl:
-                ld      a,16
-                sub     b
+                ld      a,b
+                sub     8
+                jr      z,rh_8
+                jr      nc,rh_big
+                ; B = 1..7: B-1 plain shifts then the rounding one, entering
+                ; the chain 16-B steps from its end
+                neg
                 add     a,a
                 add     a,a                     ; * 4 bytes a step
-                add     a,rh_chain & 255
+                add     a,(rh_chain & 255) + 32
                 ld      (rh_jp+1),a
 rh_jp:          jp      rh_chain
-
-                ; the chains, kept off a page boundary
-                IF      ($ & 255) > 256-80
-                ALIGN   256
-                ENDIF
-ra_chain:
-                DUP     9
-                sra     a
-                rr      h
-                rr      l
-                EDUP
-                ld      c,a
-                ld      de,1
-                add     hl,de
-                ld      a,c
+rh_big:         ; B = 9..16: the low byte can only carry into the rounding
+                ; bit, which is a whole byte up, so drop it and shift by B-8
+                ld      b,a
+                ld      a,h
+                ld      l,a
+                rla
+                sbc     a,a
+                ld      h,a
+                jr      rns_hl
+rh_8:           ; (HL + 128) >> 8: the sign-extended high byte plus bit 7
+                ld      a,h
+                rla
+                sbc     a,a
+                ld      b,a                     ; the sign
+                ld      a,l
+                rla                             ; carry = the rounding bit
+                ld      a,h
                 adc     a,0
-                sra     a
-                rr      h
-                rr      l
+                ld      l,a
+                ld      a,b
+                adc     a,0
+                ld      h,a
                 ret
-                ASSERT  (ra_chain >> 8) == (($ - 1) >> 8), "ra_chain crosses a page"
-                IF      ($ & 255) > 256-70
-                ALIGN   256
-                ENDIF
-rh_chain:
-                DUP     15
-                sra     h
-                rr      l
-                EDUP
-                inc     hl
-                sra     h
-                rr      l
-                ret
-                ASSERT  (rh_chain >> 8) == (($ - 1) >> 8), "rh_chain crosses a page"
+
 
 ; ---------------------------------------------------------------------------
 ; cmp_s16 : carry set when HL < DE, signed.  HL and DE are preserved.
@@ -355,4 +349,95 @@ rns8_ahl:
                 ld      h,a
                 rla
                 sbc     a,a                     ; sign extend into A
+                ret
+
+; ---------------------------------------------------------------------------
+; div8b : one byte of dividend in L against the divisor in C, with the running
+; remainder in A.  L comes back as the quotient byte, A as the new remainder.
+; ---------------------------------------------------------------------------
+div8b:
+                or      a
+                rl      l
+                rla
+                jr      c,db_s0
+                cp      c
+                ccf
+                jr      nc,db_n0
+db_s0:         sub     c
+                scf
+db_n0:
+                rl      l
+                rla
+                jr      c,db_s1
+                cp      c
+                ccf
+                jr      nc,db_n1
+db_s1:         sub     c
+                scf
+db_n1:
+                rl      l
+                rla
+                jr      c,db_s2
+                cp      c
+                ccf
+                jr      nc,db_n2
+db_s2:         sub     c
+                scf
+db_n2:
+                rl      l
+                rla
+                jr      c,db_s3
+                cp      c
+                ccf
+                jr      nc,db_n3
+db_s3:         sub     c
+                scf
+db_n3:
+                rl      l
+                rla
+                jr      c,db_s4
+                cp      c
+                ccf
+                jr      nc,db_n4
+db_s4:         sub     c
+                scf
+db_n4:
+                rl      l
+                rla
+                jr      c,db_s5
+                cp      c
+                ccf
+                jr      nc,db_n5
+db_s5:         sub     c
+                scf
+db_n5:
+                rl      l
+                rla
+                jr      c,db_s6
+                cp      c
+                ccf
+                jr      nc,db_n6
+db_s6:         sub     c
+                scf
+db_n6:
+                rl      l
+                rla
+                jr      c,db_s7
+                cp      c
+                ccf
+                jr      nc,db_n7
+db_s7:         sub     c
+                scf
+db_n7:
+                rl      l
+                ret
+
+; neg_hl : HL = -HL
+neg_hl:                                         ; DE preserved
+                xor     a
+                sub     l
+                ld      l,a
+                sbc     a,a
+                sub     h
+                ld      h,a
                 ret
