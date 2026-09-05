@@ -342,6 +342,44 @@ def build_walkdata(md):
     return bytes(w)
 
 
+def build_collision(md):
+    """Bank 1: the BBC port's player-collision tables (colmap.py), for a
+    faithful P_CheckPosition box-vs-solid-line test in read_input.  All in
+    one bank paged in during movement (read_input runs outside the walk).
+      COL_SEG  $C000  N x 8   blocking lines (x1,y1,dx,dy s16 LE, CENTRE-
+                             relative) - one-sided + ML_BLOCKING, pruned,
+                             colinear-merged (colmap 'colsegs').
+      COL_IDX  $C700  36 x 3  per 128-unit X column: (list ptr lo, hi, count)
+      COL_LIST $C780  u8      solid seg indices, per-column runs.
+    (Two-sided 'ports' - doors/lifts, height-dependent - are NOT emitted
+    here; they need the vz/opening test, a further pmove.s feature.)"""
+    import colmap
+    m = colmap.build()
+    segs = m["colsegs"]
+    n = len(segs)
+    COL_SEG, COL_IDX, COL_LIST = 0xC000, 0xC700, 0xC780
+    assert n * 8 <= COL_IDX - COL_SEG, "COL_SEG overran COL_IDX"
+    buf = bytearray(0x2000)
+    for i, (x1, y1, dx, dy) in enumerate(segs):
+        struct.pack_into("<hhhh", buf, (COL_SEG - 0xC000) + i * 8, x1, y1, dx, dy)
+    lst = []
+    cur = COL_LIST
+    for c in range(colmap.COLS):
+        off, cnt = m["colidx"][c]
+        idxs = [m["collist"][off + k] for k in range(cnt) if m["collist"][off + k] < n]
+        o = (COL_IDX - 0xC000) + c * 3
+        buf[o], buf[o + 1], buf[o + 2] = cur & 0xff, (cur >> 8) & 0xff, len(idxs)
+        for idx in idxs:
+            lst.append(idx)
+        cur += len(idxs)
+    assert cur <= 0x10000, "COL_LIST overran the bank"
+    for k, idx in enumerate(lst):
+        buf[(COL_LIST - 0xC000) + k] = idx
+    end = (COL_LIST - 0xC000) + len(lst)
+    print(f"  collision:   {n} solid lines, {len(lst)} column entries ({end} B)")
+    return bytes(buf[:end])
+
+
 def main():
     md = ref.load_from_reference()
     b0, tables, nodebb, l8, atan = build(md)
@@ -363,6 +401,8 @@ def main():
         f.write(build_objects(md))
     with open(os.path.join(outdir, "walkdata.bin"), "wb") as f:
         f.write(build_walkdata(md))
+    with open(os.path.join(outdir, "coldata.bin"), "wb") as f:
+        f.write(build_collision(md))
 
     sx, sy, sa, eye = md.start
     meta = {

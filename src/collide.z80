@@ -1,0 +1,476 @@
+; ===========================================================================
+; collide.z80 : player wall collision - the BBC port's P_CheckPosition box
+; test (colmap.py box_scan / bsp/pmove.s), solid lines only, with
+; axis-separated sliding.
+;
+; The player is a radius-16 box.  A candidate point is blocked if the box
+; straddles any solid blocking line in the 128-unit X column(s) the box
+; spans.  The blocking lines and per-column index live in bank 1
+; (COL_SEG/COL_IDX/COL_LIST), paged in for the whole of read_input.
+;
+; Coordinates: pl_x/pl_y are 8.8 prescaled, centre-relative; the raw
+; centre-relative world coordinate is (integer part << 3), which is what the
+; colmap tables use.  box_hits_seg is bit-identical to colmap._box_hits_seg.
+; ===========================================================================
+
+; player_move : mv_dx/mv_dy = the desired move (s16 8.8).  Commit the full
+; move if the box is clear there; else x alone, else y alone (slide along the
+; wall); else nothing.
+player_move:
+                ld      hl,(mv_dx)
+                call    cand_px                 ; cand_x/xf = pl_x + mv_dx
+                ld      hl,(mv_dy)
+                call    cand_py                 ; cand_y/yf = pl_y + mv_dy
+                ; full move
+                ld      hl,(cand_x)
+                ld      (cm_qx),hl
+                ld      hl,(cand_y)
+                ld      (cm_qy),hl
+                call    box_clear
+                jr      c,pm_commit_xy
+                ; x only
+                ld      hl,(cand_x)
+                ld      (cm_qx),hl
+                ld      hl,(pl_y)
+                ld      (cm_qy),hl
+                call    box_clear
+                jr      c,pm_commit_x
+                ; y only
+                ld      hl,(pl_x)
+                ld      (cm_qx),hl
+                ld      hl,(cand_y)
+                ld      (cm_qy),hl
+                call    box_clear
+                ret     nc                      ; fully blocked: stay put
+                ; commit y
+                ld      hl,(cand_y)
+                ld      (pl_y),hl
+                ld      a,(cand_yf)
+                ld      (pl_yf),a
+                ret
+pm_commit_x:    ld      hl,(cand_x)
+                ld      (pl_x),hl
+                ld      a,(cand_xf)
+                ld      (pl_xf),a
+                ret
+pm_commit_xy:   ld      hl,(cand_x)
+                ld      (pl_x),hl
+                ld      a,(cand_xf)
+                ld      (pl_xf),a
+                ld      hl,(cand_y)
+                ld      (pl_y),hl
+                ld      a,(cand_yf)
+                ld      (pl_yf),a
+                ret
+
+; cand_px : HL = an 8.8 delta -> cand_x/cand_xf = pl_x/pl_xf + HL (no commit)
+cand_px:
+                ld      a,(pl_xf)
+                add     a,l
+                ld      (cand_xf),a
+                ld      a,0
+                adc     a,0
+                ld      c,a                     ; carry out of the fraction
+                ld      a,h
+                rla
+                sbc     a,a
+                ld      d,a
+                ld      e,h                     ; DE = sign-extended delta int
+                ld      hl,(pl_x)
+                add     hl,de
+                ld      d,0
+                ld      e,c
+                add     hl,de
+                ld      (cand_x),hl
+                ret
+cand_py:
+                ld      a,(pl_yf)
+                add     a,l
+                ld      (cand_yf),a
+                ld      a,0
+                adc     a,0
+                ld      c,a
+                ld      a,h
+                rla
+                sbc     a,a
+                ld      d,a
+                ld      e,h
+                ld      hl,(pl_y)
+                add     hl,de
+                ld      d,0
+                ld      e,c
+                add     hl,de
+                ld      (cand_y),hl
+                ret
+
+; box_clear : cm_qx/cm_qy = a candidate point, 16-bit prescaled centre-rel.
+; Build the radius-16 box in raw centre-relative world coords and scan the
+; column(s) it spans.  Carry SET = clear (no solid line hit), clear = blocked.
+box_clear:
+                ; box[axis] = (q << 3) -/+ 16, into cm_bx0/bx1 then cm_by0/by1
+                ld      hl,(cm_qx)
+                ld      ix,cm_bx0
+                call    mk_axis
+                ld      hl,(cm_qy)
+                ld      ix,cm_by0
+                call    mk_axis
+                ; columns c0 = col(bx0), c1 = col(bx1).  scan_col clobbers all
+                ; registers, so both column indices ride in memory.
+                ld      hl,(cm_bx0)
+                call    col_of
+                ld      (cm_c1),a               ; cm_c1 = c0
+                ld      hl,(cm_bx1)
+                call    col_of
+                ld      (cm_qx),a               ; cm_qx = c1 (cm_qx free now)
+                ld      a,(cm_c1)
+                call    scan_col                ; scan c0
+                ret     nc                      ; blocked
+                ld      a,(cm_c1)
+                ld      hl,cm_qx
+                cp      (hl)
+                jr      z,bc_done               ; c0 == c1: done, clear
+                ld      a,(cm_qx)
+                jp      scan_col                ; scan c1
+bc_done:        scf
+                ret
+
+; mk_axis : HL = q, IX -> (lo, hi) pair.  Stores (q<<3)-16 at (IX), +16 at
+; (IX+2).
+mk_axis:
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl                   ; nx
+                ld      de,PL_RADIUS
+                add     hl,de
+                ld      (ix+2),l
+                ld      (ix+3),h                ; nx + 16
+                or      a
+                sbc     hl,de
+                sbc     hl,de                   ; (nx+16) - 32 = nx - 16
+                ld      (ix+0),l
+                ld      (ix+1),h
+                ret
+
+; col_of : HL = a centre-relative raw x -> A = clamp((x - RAWX_MIN) >> 7, 0, 35)
+col_of:
+                ld      de,-COL_RAWX_MIN        ; + 1936
+                add     hl,de
+                bit     7,h
+                jr      nz,co_lo                ; negative -> column 0
+                ; >> 7  (=  (hi<<1) | (lo>>7) )
+                ld      a,h
+                add     a,a                     ; hi << 1, carry = hi bit7 (0 here)
+                ld      b,a
+                ld      a,l
+                rlca                            ; lo bit7 -> carry, but we want lo>>7
+                and     1                       ; A = lo >> 7
+                or      b
+                cp      36
+                ret     c
+                ld      a,35                    ; clamp high
+                ret
+co_lo:          xor     a
+                ret
+
+; scan_col : A = column index -> scan its solid segs against the box.
+; Carry SET = clear, carry CLEAR = a line hit (blocked).
+scan_col:
+                ld      l,a
+                ld      h,0
+                ld      d,h
+                ld      e,l
+                add     hl,hl
+                add     hl,de                   ; c * 3
+                ld      de,COL_IDX
+                add     hl,de                   ; -> the column's (ptr, count)
+                ld      e,(hl)
+                inc     hl
+                ld      d,(hl)                  ; DE = list pointer
+                inc     hl
+                ld      b,(hl)                  ; B = count
+                ld      a,b
+                or      a
+                scf
+                ret     z                       ; empty column: clear
+sc_loop:
+                ld      a,(de)                  ; seg index
+                push    de
+                push    bc
+                ; IX = COL_SEG + idx * 8
+                ld      l,a
+                ld      h,0
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl                   ; idx * 8
+                ld      de,COL_SEG
+                add     hl,de
+                push    hl
+                pop     ix
+                call    box_hits_seg            ; carry = hit
+                pop     bc
+                pop     de
+                jr      c,sc_hit
+                inc     de
+                djnz    sc_loop
+                scf                             ; scanned all, no hit: clear
+                ret
+sc_hit:         or      a                       ; blocked
+                ret
+
+; box_hits_seg : IX -> seg (x1,y1,dx,dy s16); box in cm_bx0/by0/bx1/by1.
+; Carry SET = the box straddles the line (a hit).  Mirrors colmap.
+box_hits_seg:
+                ; --- lx0/lx1 from x1, dx ---
+                ld      l,(ix+0)
+                ld      h,(ix+1)                ; HL = x1
+                ld      e,(ix+4)
+                ld      d,(ix+5)                ; DE = dx
+                bit     7,d
+                jr      nz,bh_dxneg
+                ld      (cm_lx0),hl             ; dx >= 0: lx0 = x1
+                add     hl,de
+                ld      (cm_lx1),hl             ;          lx1 = x1 + dx
+                jr      bh_ly
+bh_dxneg:       ld      (cm_lx1),hl             ; dx < 0: lx1 = x1
+                add     hl,de
+                ld      (cm_lx0),hl             ;         lx0 = x1 + dx
+bh_ly:
+                ld      l,(ix+2)
+                ld      h,(ix+3)                ; HL = y1
+                ld      e,(ix+6)
+                ld      d,(ix+7)                ; DE = dy
+                bit     7,d
+                jr      nz,bh_dyneg
+                ld      (cm_ly0),hl
+                add     hl,de
+                ld      (cm_ly1),hl
+                jr      bh_bbox
+bh_dyneg:       ld      (cm_ly1),hl
+                add     hl,de
+                ld      (cm_ly0),hl
+bh_bbox:
+                ; strict overlap: miss if bx1<=lx0 or bx0>=lx1 or by1<=ly0 or by0>=ly1
+                ld      hl,(cm_bx1)
+                ld      de,(cm_lx0)
+                call    cmp16                   ; carry = HL < DE
+                jp      c,bh_miss               ; bx1 < lx0
+                jp      z,bh_miss               ; bx1 == lx0 (<=)
+                ld      hl,(cm_lx1)
+                ld      de,(cm_bx0)
+                call    cmp16
+                jp      c,bh_miss               ; lx1 < bx0  (bx0 > lx1)
+                jp      z,bh_miss               ; bx0 == lx1
+                ld      hl,(cm_by1)
+                ld      de,(cm_ly0)
+                call    cmp16
+                jp      c,bh_miss
+                jp      z,bh_miss
+                ld      hl,(cm_ly1)
+                ld      de,(cm_by0)
+                call    cmp16
+                jp      c,bh_miss
+                jp      z,bh_miss
+                ; --- axis line? dx==0 or dy==0 -> the overlap IS the hit ---
+                ld      a,(ix+4)
+                or      (ix+5)
+                jp      z,bh_hit                ; dx == 0
+                ld      a,(ix+6)
+                or      (ix+7)
+                jp      z,bh_hit                ; dy == 0
+                ; --- diagonal: the two quadrant corners must straddle ---
+                ; if (dx>0)==(dy>0): c1=(bx0,by1) c2=(bx1,by0)
+                ; else:              c1=(bx0,by0) c2=(bx1,by1)
+                ld      a,(ix+5)                ; dx hi (sign)
+                xor     (ix+7)                  ; ^ dy hi
+                bit     7,a
+                jr      nz,bh_opp
+                ; same sign: c1=(bx0,by1), c2=(bx1,by0)
+                ld      hl,(cm_bx0)
+                ld      (cm_c1x),hl
+                ld      hl,(cm_by1)
+                ld      (cm_c1y),hl
+                ld      hl,(cm_bx1)
+                ld      (cm_c2x),hl
+                ld      hl,(cm_by0)
+                ld      (cm_c2y),hl
+                jr      bh_cross
+bh_opp:         ld      hl,(cm_bx0)
+                ld      (cm_c1x),hl
+                ld      hl,(cm_by0)
+                ld      (cm_c1y),hl
+                ld      hl,(cm_bx1)
+                ld      (cm_c2x),hl
+                ld      hl,(cm_by1)
+                ld      (cm_c2y),hl
+bh_cross:
+                ; s = (cx - x1)*dy - (cy - y1)*dx ; the two corners straddle
+                ; when (s1 > 0) != (s2 > 0)  (colmap's test; 0 counts as "not >0")
+                ld      hl,(cm_c1x)
+                ld      (cm_cx),hl
+                ld      hl,(cm_c1y)
+                ld      (cm_cy),hl
+                call    corner_side             ; A = 1 if s1 > 0 else 0
+                push    af                      ; (corner_side/mul_s16 clobber BC)
+                ld      hl,(cm_c2x)
+                ld      (cm_cx),hl
+                ld      hl,(cm_c2y)
+                ld      (cm_cy),hl
+                call    corner_side             ; A = 1 if s2 > 0 else 0
+                pop     bc                      ; B = s1's verdict
+                xor     b
+                jp      nz,bh_hit               ; the two differ: straddle
+bh_miss:        or      a                       ; carry clear = no hit
+                ret
+bh_hit:         scf
+                ret
+
+; corner_side : s = (cm_cx - x1)*dy - (cm_cy - y1)*dx, IX -> the seg.
+; Returns the 4-byte signed result in cm_s (LE); A = its top (sign) byte.
+; colmap tests s>0, i.e. sign bit 0 AND non-zero; but only sign(s1)!=sign(s2)
+; matters and colmap uses (s1>0)!=(s2>0).  Zero is treated as its sign bit
+; (0 = "not >0"), matching (s>0) being false for s<=0.
+corner_side:
+                ; P = cx - x1
+                ld      hl,(cm_cx)
+                ld      e,(ix+0)
+                ld      d,(ix+1)
+                or      a
+                sbc     hl,de
+                push    hl                      ; P
+                ; dy
+                ld      l,(ix+6)
+                ld      h,(ix+7)
+                pop     de                      ; DE = P, HL = dy
+                call    mul_s16                 ; cm_prod = P * dy (s32)
+                ld      hl,cm_prod
+                ld      de,cm_s
+                ld      bc,4
+                ldir                            ; cm_s = P*dy
+                ; Q = cy - y1
+                ld      hl,(cm_cy)
+                ld      e,(ix+2)
+                ld      d,(ix+3)
+                or      a
+                sbc     hl,de
+                push    hl                      ; Q
+                ld      l,(ix+4)
+                ld      h,(ix+5)                ; dx
+                pop     de                      ; DE = Q
+                call    mul_s16                 ; cm_prod = Q * dx
+                ; cm_s = cm_s - cm_prod  (32-bit)
+                ld      hl,(cm_s)
+                ld      de,(cm_prod)
+                or      a
+                sbc     hl,de
+                ld      (cm_s),hl
+                ld      hl,(cm_s+2)
+                ld      de,(cm_prod+2)
+                sbc     hl,de
+                ld      (cm_s+2),hl
+                ; A = 1 if cm_s > 0 (positive AND non-zero), else 0
+                bit     7,h                     ; H = cm_s top byte
+                jr      nz,cs_notpos            ; negative -> 0
+                ld      a,(cm_s)
+                or      a
+                jr      nz,cs_pos
+                ld      a,(cm_s+1)
+                or      a
+                jr      nz,cs_pos
+                ld      a,(cm_s+2)
+                or      a
+                jr      nz,cs_pos
+                or      h                       ; all four bytes zero -> 0
+                jr      nz,cs_pos
+                xor     a                       ; s == 0 -> 0
+                ret
+cs_pos:         ld      a,1
+                ret
+cs_notpos:      xor     a
+                ret
+
+; mul_s16 : HL * DE (both signed s16) -> cm_prod (4-byte signed LE).
+mul_s16:
+                ld      a,h
+                xor     d
+                ld      (cm_sign),a
+                bit     7,h
+                jr      z,ms16_a
+                call    neg_hl16
+ms16_a:         bit     7,d
+                jr      z,ms16_b
+                ex      de,hl
+                call    neg_hl16
+                ex      de,hl
+ms16_b:
+                ; cm_acc = |a| (32-bit), cm_prod = 0, BC = |b|
+                ld      (cm_acc),hl
+                ld      hl,0
+                ld      (cm_acc+2),hl
+                ld      (cm_prod),hl
+                ld      (cm_prod+2),hl
+                ld      c,e
+                ld      b,d                     ; BC = |b|
+ms16_loop:
+                ld      a,b
+                or      c
+                jr      z,ms16_sign
+                srl     b
+                rr      c                       ; BC >>= 1, carry = old bit0
+                jr      nc,ms16_shift
+                ld      hl,(cm_prod)
+                ld      de,(cm_acc)
+                add     hl,de
+                ld      (cm_prod),hl
+                ld      hl,(cm_prod+2)
+                ld      de,(cm_acc+2)
+                adc     hl,de
+                ld      (cm_prod+2),hl
+ms16_shift:
+                ld      hl,(cm_acc)
+                add     hl,hl
+                ld      (cm_acc),hl
+                ld      hl,(cm_acc+2)
+                adc     hl,hl
+                ld      (cm_acc+2),hl
+                jr      ms16_loop
+ms16_sign:
+                ld      a,(cm_sign)
+                bit     7,a
+                ret     z
+                ld      hl,0
+                ld      de,(cm_prod)
+                or      a
+                sbc     hl,de
+                ld      (cm_prod),hl
+                ld      hl,0
+                ld      de,(cm_prod+2)
+                sbc     hl,de
+                ld      (cm_prod+2),hl
+                ret
+
+; neg_hl16 : HL = -HL
+neg_hl16:
+                ld      a,h
+                cpl
+                ld      h,a
+                ld      a,l
+                cpl
+                ld      l,a
+                inc     hl
+                ret
+
+; cmp16 : signed compare HL vs DE.  Carry SET when HL < DE; Z set when equal.
+cmp16:
+                ld      a,h
+                xor     d
+                jp      m,cm_diff               ; signs differ
+                or      a
+                sbc     hl,de                   ; same sign: true subtract, no overflow
+                ret
+cm_diff:        ; different signs: HL < DE iff HL is negative
+                bit     7,h
+                jr      z,cm_ge                 ; HL positive, DE negative -> HL >= DE
+                scf                             ; HL negative -> HL < DE
+                ret
+cm_ge:          or      a                       ; clear carry; Z is irrelevant here
+                ret

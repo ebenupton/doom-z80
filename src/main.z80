@@ -190,6 +190,10 @@ KEY_ROW_09876   EQU     $ef
 KEY_ROW_SPACE   EQU     $7f
 
 read_input:
+                ; the collision tables are in bank 1; page it in for all of
+                ; read_input (nothing here needs the geometry bank)
+                ld      a,BANK_COL
+                call    set_page
                 ; run modifier doubles both speeds
                 ld      a,KEY_ROW_SPACE
                 call    key_row
@@ -272,7 +276,8 @@ ri_s1:
                 ld      a,MV_RIGHT
                 call    move_dir
 ri_s2:
-                ret
+                ld      a,BANK_GEOM
+                jp      set_page
 
 ; key_row : A = row select -> A = key bits (0 = pressed)
 key_row:
@@ -344,7 +349,7 @@ move_dir:
                 or      a
                 jr      z,md_fx
                 call    neg_hl
-md_fx:          call    add_px
+md_fx:          ld      (mv_dx),hl
                 ld      a,(mv_smag)
                 ld      c,a
                 ld      a,(mv_sneg)
@@ -355,7 +360,8 @@ md_fx:          call    add_px
                 or      a
                 jr      z,md_fy
                 call    neg_hl
-md_fy:          jp      add_py
+md_fy:          ld      (mv_dy),hl
+                jp      player_move
 md_strafe:
                 ; right: dx = step*sin, dy = -step*cos ; left is the negation
                 ld      a,(mv_smag)
@@ -368,7 +374,7 @@ md_strafe:
                 cp      MV_LEFT
                 jr      nz,md_sx
                 call    neg_hl
-md_sx:          call    add_px
+md_sx:          ld      (mv_dx),hl
                 ld      a,(mv_cmag)
                 ld      c,a
                 ld      a,(mv_cneg)
@@ -379,7 +385,8 @@ md_sx:          call    add_px
                 cp      MV_LEFT
                 jr      z,md_sy
                 call    neg_hl
-md_sy:          jp      add_py
+md_sy:          ld      (mv_dy),hl
+                jp      player_move
 
 ; mv_term : C = magnitude, B = negative flag, A = unity flag
 ;           -> HL = signed 8.8 displacement
@@ -406,50 +413,11 @@ mvt_sign:
                 or      a
                 ret     z
 
-; add_px / add_py : add a signed 8.8 delta to the player position.
-add_px:
-                ld      a,(pl_xf)
-                add     a,l
-                ld      (pl_xf),a
-                ld      a,0
-                adc     a,0
-                ld      c,a                     ; carry out of the fraction
-                ld      a,h
-                rla
-                sbc     a,a
-                ld      d,a
-                ld      e,h                     ; DE = sign-extended high byte
-                ld      hl,(pl_x)
-                add     hl,de
-                ld      d,0
-                ld      e,c
-                add     hl,de
-                ld      (pl_x),hl
-                ret
-add_py:
-                ld      a,(pl_yf)
-                add     a,l
-                ld      (pl_yf),a
-                ld      a,0
-                adc     a,0
-                ld      c,a
-                ld      a,h
-                rla
-                sbc     a,a
-                ld      d,a
-                ld      e,h
-                ld      hl,(pl_y)
-                add     hl,de
-                ld      d,0
-                ld      e,c
-                add     hl,de
-                ld      (pl_y),hl
-                ret
-
                 include "math.z80"
                 include "view.z80"
                 include "clip.z80"
                 include "bsp.z80"
+                include "collide.z80"
 
 CODE_END:
                 DISPLAY "code ends at ", /H, CODE_END, ", span pool at ", /H, SPANS_BASE

@@ -28,6 +28,12 @@ BOOT:
                 ld      ix,OBJ_CODE
                 ld      de,BANK4_LEN
                 call    load_block
+                ld      a,BANK_COL or P7_ROM48  ; the collision tables' bank
+                ld      bc,PORT_7FFD
+                out     (c),a
+                ld      ix,COL_SEG
+                ld      de,COL_LEN
+                call    load_block
                 ld      a,BANK_GEOM or P7_ROM48
                 ld      bc,PORT_7FFD
                 out     (c),a

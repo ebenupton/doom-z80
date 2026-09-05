@@ -20,6 +20,7 @@
                 include "view.z80"
                 include "clip.z80"
                 include "bsp.z80"
+                include "collide.z80"
                 ; the rasteriser, in bank 7 as in the engine
                 DS      RASTER_BASE-$,0
                 include "raster.z80"
