@@ -11,7 +11,7 @@ z.m.ram[1].set(fs.readFileSync(ROOT + 'build/coldata.bin'), 0);   // collision t
 z.pokeBytes(0x8800, fs.readFileSync(ROOT + 'build/tables.bin'));
 z.m.applyPaging(1);
 const S = n => z.sym_(n), s16 = v => v >= 32768 ? v - 65536 : v;
-const clearAt = (qx, qy) => { z.poke16(S('cm_qx'), qx & 0xffff); z.poke16(S('cm_qy'), qy & 0xffff); return !!z.call('box_clear').cf; };
+const clearAt = (qx, qy) => { z.poke16(S('cm_qx'), qx & 0xffff); z.poke(S('cm_qxf'), 0); z.poke16(S('cm_qy'), qy & 0xffff); z.poke(S('cm_qyf'), 0); return !!z.call('box_clear').cf; };
 
 let mism = 0;
 for (const [qx, qy, blk] of gold) {

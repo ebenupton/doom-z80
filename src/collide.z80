@@ -16,30 +16,106 @@
 ; player_move : mv_dx/mv_dy = the desired move (s16 8.8).  Commit the full
 ; move if the box is clear there; else x alone, else y alone (slide along the
 ; wall); else nothing.
+; player_move : split the move into chunks no bigger than MM_HALF (so a
+; single chunk's box overlaps the last, and a thin wall can't be tunnelled),
+; then apply each chunk with pm_step.  n = halvings until max(|dx|,|dy|) <=
+; MM_HALF; chunk = mv_dx >> n, mv_dy >> n; 2^n chunks.
 player_move:
+                ld      hl,(mv_dx)
+                call    abs_hl                  ; |dx|
+                ex      de,hl                   ; DE = |dx|
+                ld      hl,(mv_dy)
+                call    abs_hl                  ; HL = |dy|
+                or      a                       ; amax = max(|dx|,|dy|) in HL
+                sbc     hl,de
+                add     hl,de
+                jr      nc,pm_amax              ; |dy| >= |dx|: HL = |dy|
+                ex      de,hl                   ; else HL = |dx|
+pm_amax:        ld      b,0                     ; n
+pm_ncount:      ld      de,MM_HALF
+                or      a
+                sbc     hl,de
+                jr      c,pm_have_n             ; amax < MM_HALF: done
+                jr      z,pm_have_n             ; amax == MM_HALF: done
+                add     hl,de                   ; restore
+                srl     h
+                rr      l                       ; amax >>= 1
+                inc     b
+                jr      pm_ncount
+pm_have_n:      ld      a,b
+                or      a
+                ld      a,1                     ; count = 1 when n = 0
+                jr      z,pm_setcount
+                ; chunk = mv_dx >> n, mv_dy >> n (arithmetic); count = 1 << n.
+                ; sra_hl_b consumes B, so save n across each shift.
+                ld      hl,(mv_dx)
+                push    bc
+                call    sra_hl_b
+                pop     bc
+                ld      (mv_dx),hl
+                ld      hl,(mv_dy)
+                push    bc
+                call    sra_hl_b
+                pop     bc
+                ld      (mv_dy),hl
+                ld      a,1
+pm_shl:         add     a,a
+                djnz    pm_shl                  ; A = 1 << n (B = n here)
+pm_setcount:    ld      (pm_count),a
+                ; zero move?  (a chunk of 0,0 - nothing to do)
+                ld      hl,(mv_dx)
+                ld      a,h
+                or      l
+                jr      nz,pm_loop
+                ld      hl,(mv_dy)
+                ld      a,h
+                or      l
+                ret     z
+pm_loop:
+                call    pm_step
+                ld      a,(pm_count)
+                dec     a
+                ld      (pm_count),a
+                jr      nz,pm_loop
+                ret
+
+; pm_step : apply one chunk (mv_dx, mv_dy) with box collision + sliding.
+pm_step:
                 ld      hl,(mv_dx)
                 call    cand_px                 ; cand_x/xf = pl_x + mv_dx
                 ld      hl,(mv_dy)
                 call    cand_py                 ; cand_y/yf = pl_y + mv_dy
-                ; full move
+                ; full move (candidate x and y, with their fractions)
                 ld      hl,(cand_x)
                 ld      (cm_qx),hl
+                ld      a,(cand_xf)
+                ld      (cm_qxf),a
                 ld      hl,(cand_y)
                 ld      (cm_qy),hl
+                ld      a,(cand_yf)
+                ld      (cm_qyf),a
                 call    box_clear
                 jr      c,pm_commit_xy
-                ; x only
+                ; x only (candidate x, current y)
                 ld      hl,(cand_x)
                 ld      (cm_qx),hl
+                ld      a,(cand_xf)
+                ld      (cm_qxf),a
                 ld      hl,(pl_y)
                 ld      (cm_qy),hl
+                ld      a,(pl_yf)
+                ld      (cm_qyf),a
                 call    box_clear
                 jr      c,pm_commit_x
-                ; y only
+                ; y only (current x, candidate y)
                 ld      hl,(pl_x)
                 ld      (cm_qx),hl
+                ld      a,(pl_xf)
+                ld      (cm_qxf),a
                 ld      hl,(cand_y)
                 ld      (cm_qy),hl
+                ld      a,(cand_yf)
+                ld      (cm_qyf),a
                 call    box_clear
                 ret     nc                      ; fully blocked: stay put
                 ; commit y
@@ -107,12 +183,40 @@ cand_py:
 ; Build the radius-16 box in raw centre-relative world coords and scan the
 ; column(s) it spans.  Carry SET = clear (no solid line hit), clear = blocked.
 box_clear:
-                ; box[axis] = (q << 3) -/+ 16, into cm_bx0/bx1 then cm_by0/by1
+                ; nx = (q << 3) + (qf >> 5); box[axis] = nx -/+ 16.  The
+                ; fraction (0.8 of a prescaled = 8-world unit) contributes the
+                ; low 3 world bits, so the box tracks the true position.
                 ld      hl,(cm_qx)
-                ld      ix,cm_bx0
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                ld      a,(cm_qxf)
+                srl     a
+                srl     a
+                srl     a
+                srl     a
+                srl     a                       ; qf >> 5 (0..7)
+                add     a,l
+                ld      l,a
+                jr      nc,bcx_n
+                inc     h
+bcx_n:          ld      ix,cm_bx0
                 call    mk_axis
                 ld      hl,(cm_qy)
-                ld      ix,cm_by0
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                ld      a,(cm_qyf)
+                srl     a
+                srl     a
+                srl     a
+                srl     a
+                srl     a
+                add     a,l
+                ld      l,a
+                jr      nc,bcy_n
+                inc     h
+bcy_n:          ld      ix,cm_by0
                 call    mk_axis
                 ; columns c0 = col(bx0), c1 = col(bx1).  scan_col clobbers all
                 ; registers, so both column indices ride in memory.
@@ -134,12 +238,9 @@ box_clear:
 bc_done:        scf
                 ret
 
-; mk_axis : HL = q, IX -> (lo, hi) pair.  Stores (q<<3)-16 at (IX), +16 at
-; (IX+2).
+; mk_axis : HL = nx (raw centre-relative), IX -> (lo, hi) pair.  Stores
+; nx-16 at (IX), nx+16 at (IX+2).
 mk_axis:
-                add     hl,hl
-                add     hl,hl
-                add     hl,hl                   ; nx
                 ld      de,PL_RADIUS
                 add     hl,de
                 ld      (ix+2),l
@@ -448,6 +549,11 @@ ms16_sign:
                 ld      (cm_prod+2),hl
                 ret
 
+; abs_hl : HL = |HL| (signed)
+abs_hl:
+                bit     7,h
+                ret     z
+                ; fall into neg_hl16
 ; neg_hl16 : HL = -HL
 neg_hl16:
                 ld      a,h
@@ -457,6 +563,16 @@ neg_hl16:
                 cpl
                 ld      l,a
                 inc     hl
+                ret
+
+; sra_hl_b : HL >>= B, arithmetic (sign-preserving)
+sra_hl_b:
+                ld      a,b
+                or      a
+                ret     z
+sra_hl_l:       sra     h
+                rr      l
+                djnz    sra_hl_l
                 ret
 
 ; cmp16 : signed compare HL vs DE.  Carry SET when HL < DE; Z set when equal.

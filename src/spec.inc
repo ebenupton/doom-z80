@@ -422,23 +422,26 @@ cm_bx1          EQU     VARS_BASE+456   ; (bx0,bx1 contiguous for mk_axis; then 
 cm_by0          EQU     VARS_BASE+458
 cm_by1          EQU     VARS_BASE+460
 cm_c1           EQU     VARS_BASE+462   ; c0 stash across the two-column scan
-cm_qx           EQU     VARS_BASE+463   ; box_clear's query point, 16-bit prescaled
-cm_qy           EQU     VARS_BASE+465
-cm_lx0          EQU     VARS_BASE+467   ; a seg's x/y extents (s16)
-cm_lx1          EQU     VARS_BASE+469
-cm_ly0          EQU     VARS_BASE+471
-cm_ly1          EQU     VARS_BASE+473
-cm_cx           EQU     VARS_BASE+475   ; the corner under test (s16)
-cm_cy           EQU     VARS_BASE+477
-cm_c1x          EQU     VARS_BASE+479   ; the two straddle corners
-cm_c1y          EQU     VARS_BASE+481
-cm_c2x          EQU     VARS_BASE+483
-cm_c2y          EQU     VARS_BASE+485
-cm_s            EQU     VARS_BASE+487   ; the cross product accumulator (s32)
-cm_prod         EQU     VARS_BASE+491   ; a 16x16 product (s32)
-cm_acc          EQU     VARS_BASE+495   ; the shift-add multiplicand (u32)
-cm_sign         EQU     VARS_BASE+499   ; product sign
-VARS_END        EQU     VARS_BASE+500
+cm_qx           EQU     VARS_BASE+463   ; box_clear's query point, prescaled int + frac
+cm_qxf          EQU     VARS_BASE+465
+cm_qy           EQU     VARS_BASE+466
+cm_qyf          EQU     VARS_BASE+468
+cm_lx0          EQU     VARS_BASE+469   ; a seg's x/y extents (s16)
+cm_lx1          EQU     VARS_BASE+471
+cm_ly0          EQU     VARS_BASE+473
+cm_ly1          EQU     VARS_BASE+475
+cm_cx           EQU     VARS_BASE+477   ; the corner under test (s16)
+cm_cy           EQU     VARS_BASE+479
+cm_c1x          EQU     VARS_BASE+481
+cm_c1y          EQU     VARS_BASE+483
+cm_c2x          EQU     VARS_BASE+485
+cm_c2y          EQU     VARS_BASE+487
+cm_s            EQU     VARS_BASE+489   ; the cross product accumulator (s32)
+cm_prod         EQU     VARS_BASE+493   ; a 16x16 product (s32)
+cm_acc          EQU     VARS_BASE+497   ; the shift-add multiplicand (u32)
+cm_sign         EQU     VARS_BASE+501   ; product sign
+pm_count        EQU     VARS_BASE+502   ; move chunks remaining
+VARS_END        EQU     VARS_BASE+503
 ; --- batched sloped-edge drawing ------------------------------------------
 ; --- fused draw + tighten ---------------------------------------------------
 ; the seg chain: a subsector's segs share endpoints, so the pair projected for
@@ -537,6 +540,9 @@ COL_SEG         EQU     $C000           ; N x 8: blocking lines (x1,y1,dx,dy s16
 COL_IDX         EQU     $C700           ; 36 x 3: per X column (list ptr lo, hi, count)
 COL_LIST        EQU     $C780           ; u8 solid seg indices, per-column runs
 PL_RADIUS       EQU     16              ; the player's collision box half-width (world)
+MM_HALF         EQU     724             ; max move chunk (8.8 prescaled); a chunk's
+                                        ; diagonal stays under 2*RADIUS so a move
+                                        ; cannot tunnel a thin wall (BBC colmap)
 COL_RAWX_MIN    EQU     -1936           ; column 0's left edge, centre-relative (colmap)
 OBJ_CODE        EQU     $C000           ; obj_subsector is the first byte
 OBJ_DATA        EQU     $D300           ; objdata.bin (tools/pack.py)
