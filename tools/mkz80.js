@@ -62,12 +62,44 @@ function build() {
   hdr[37] = 0;                       // no 'hardware modify' bit
   hdr[38] = 0;                       // $FFFD (AY latch)
 
+  // Pages are RLE-COMPRESSED, not stored raw.  The .z80 v2 format marks an
+  // uncompressed page with a length of 0xFFFF, but that is a sentinel, not a
+  // real byte count - and at least one emulator (Tom Harte's CLK) advances
+  // the file position by that 0xFFFF after an uncompressed page instead of by
+  // 16384, which mislays every following page and leaves the code bank zero.
+  // Compressed pages carry their true length, so every loader (CLK, Fuse,
+  // ZEsarUX, ...) reads them correctly.
+  //
+  // Encoding: a run of >=5 equal bytes -> ED ED count value; a run of the
+  // byte ED (>=2) -> ED ED count ED; a lone ED is emitted with the byte after
+  // it (never leaving ED ED to be misread); everything else raw.
+  const compressPage = (buf) => {
+    const out = [];
+    let i = 0;
+    while (i < buf.length) {
+      const b = buf[i];
+      let run = 1;
+      while (i + run < buf.length && buf[i + run] === b && run < 255) run++;
+      if (b === 0xed) {
+        if (run >= 2) { out.push(0xed, 0xed, run, 0xed); i += run; }
+        else { out.push(0xed); if (i + 1 < buf.length) out.push(buf[i + 1]); i += 2; }
+      } else if (run >= 5) {
+        out.push(0xed, 0xed, run, b); i += run;
+      } else {
+        for (let k = 0; k < run; k++) out.push(b);
+        i += run;
+      }
+    }
+    return Buffer.from(out);
+  };
+
   const parts = [hdr];
   for (let b = 0; b < 8; b++) {
+    const comp = compressPage(banks[b]);
     const page = Buffer.alloc(3);
-    page.writeUInt16LE(0xffff, 0);   // 0xFFFF = stored uncompressed
-    page[2] = b + 3;                 // .z80 page number for RAM bank b
-    parts.push(page, banks[b]);
+    page.writeUInt16LE(comp.length, 0);   // real compressed length
+    page[2] = b + 3;                       // .z80 page number for RAM bank b
+    parts.push(page, comp);
   }
   const out = Buffer.concat(parts);
   const file = path.join(ROOT, "build/doom.z80");
