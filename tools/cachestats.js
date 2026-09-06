@@ -29,7 +29,10 @@ for (const raw of lst) {
 const counters = new Map();
 const name = new Map();
 const add = (n, a) => { name.set(a, n); counters.set(a, 0); };
-for (const n of ["vg_miss", "project_y", "py_miss", "corner_phi_pp", "corner_phi_pn", "corner_phi_np", "corner_phi_nn",
+// the project_y probe is INLINE at the seg body's eight sites (PY_INLINE
+// pyv1..pyv8) and at the standalone project_y: count them all as probes
+for (const n of ["vg_miss", "project_y", "py_miss", "pyv1", "pyv2", "pyv3", "pyv4", "pyv5", "pyv6", "pyv7", "pyv8",
+                 "corner_phi_pp", "corner_phi_pn", "corner_phi_np", "corner_phi_nn",
                  "vspan_emit", "sp_hasgap", "render_seg", "render_seg_body", "walk", "point_on_side", "bbox_visible", "lf_ns", "obj_project", "obj_draw_slot"])
   add(n, S.get(n) >= 0xc000 ? S.get(n) + 0x40000 : S.get(n));   // (the walk's routines live in bank 4)
 sites.vget.forEach((a, i) => add("vget_probe" + i, a));
@@ -127,7 +130,7 @@ const line = (label, probes, misses) =>
   console.log(`  ${label.padEnd(22)} probes ${(probes / n).toFixed(2).padStart(8)}/frame  misses ${(misses / n).toFixed(2).padStart(8)}  hit ${(100 * (probes - misses) / Math.max(1, probes)).toFixed(1).padStart(5)}%`);
 console.log(`Z80 ${path.basename(framesPath)}: ${n} frames`);
 line("vertex cache", vprobe, tot("vg_miss"));
-line("project_y cache", tot("project_y"), tot("py_miss"));
+line("project_y cache", tot("project_y") + [1,2,3,4,5,6,7,8].reduce((a, i) => a + tot("pyv" + i), 0), tot("py_miss"));
 line("corner-phi memo", cpmProbe, cpmMiss);
 line("vertex-span stamp", tot("vspan_emit"), tot("vspan_fresh"));
 console.log(`  render_seg ${(tot("render_seg") / n).toFixed(2)}/f  bodies ${(tot("render_seg_body") / n).toFixed(2)}  sp_hasgap ${(tot("sp_hasgap") / n).toFixed(2)}  walk nodes ${(tot("walk") / n).toFixed(2)}  point_on_side ${(tot("point_on_side") / n).toFixed(2)}  bbox ${(tot("bbox_visible") / n).toFixed(2)}  lf_ns ${(tot("lf_ns") / n).toFixed(2)}`);

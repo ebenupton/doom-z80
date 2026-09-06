@@ -659,7 +659,7 @@ sg_n:           dec     l
                 inc     l
                 ld      a,(hl)
                 cp      b
-                jp      nc,sg_hit
+                jr      nc,sg_hit
                 dec     l
                 dec     l
                 ld      e,l
@@ -698,7 +698,7 @@ hg_n:           dec     l
                 inc     l
                 ld      a,(hl)
                 cp      b
-                jp      nc,hg_hit
+                jr      nc,hg_hit
                 dec     l
                 dec     l
                 ld      a,(hl)
@@ -913,13 +913,12 @@ draw_clipped_line:
                 ; ox1 = xr, the run closed by the exit check).  The walk
                 ; takes over from that span otherwise.
                 ld      a,(lc_x2)
+                ld      b,a                     ; (B = xr: not reloaded below)
                 ld      hl,lc_x1
                 sub     (hl)
                 jp      z,dcl_vertical_h
                 ld      (cd_dx),a
                 ld      c,(hl)                  ; C = xl
-                ld      a,(lc_x2)
-                ld      b,a                     ; B = xr
                 ld      a,(sp_head)
                 or      a
                 ret     z
@@ -2657,7 +2656,7 @@ ar_walk:        or      a
                 inc     l                       ; -> xe
                 ld      a,e
                 cp      (hl)
-                jp      nc,ar_next              ; ax0 >= xe: wholly left
+                jr      nc,ar_next              ; ax0 >= xe: wholly left
 ar_hit:         dec     l
                 ld      b,(hl)                  ; xs
                 ld      a,d

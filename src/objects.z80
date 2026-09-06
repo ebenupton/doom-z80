@@ -848,12 +848,13 @@ obj_mirror:
                 ld      e,a
                 ld      d,0
                 ld      hl,(obj_cx)
-                or      a
+                push    hl                      ; (the centre stands: not
+                or      a                       ;  reloaded for the mirror)
                 sbc     hl,de
                 OBJ_STXY
                 ld      a,(obj_px)
                 ld      c,a
-                ld      hl,(obj_cx)
+                pop     hl
                 add     hl,de
                 OBJ_STXY
                 ret
