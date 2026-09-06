@@ -1390,37 +1390,43 @@ rsb_fused:
 ; seg that touches it - and a first touch that is near-clipped or off the
 ; screen still uses it up.
 ; ---------------------------------------------------------------------------
+; The vertex-span stamp is probed HERE, before anything is staged (the BBC
+; port's stage-7 twin: its VDONE test is inline at the site and only a FRESH
+; vertex pays the call).  A hit leaves with nothing loaded; a miss marks the
+; stamp and hands the emit HL at the stamp byte.
+                MACRO   VSDONE_PROBE skip, stamp
+                ld      a,l
+                or      VXR_DONE
+                ld      l,a                     ; -> the vertex-span stamp
+stamp:          ld      a,0                     ; SMC: vd_stamp (render_frame)
+                cp      (hl)
+                jr      z,skip                  ; already emitted this frame
+                ld      (hl),a
+                ENDM
 rsb_vspans:
                 ld      a,(ch_hit)              ; a chained v1 was done as the
                 or      a                       ;  previous seg's v2
                 jr      nz,rsb_vs2
                 ld      hl,(sg_v1)
+                VSDONE_PROBE rsb_vs2, vsd1
                 ld      de,(sg_sx1)
                 ld      bc,(sg_m1)
                 ld      a,(sg_n1)
                 call    vspan_emit
 rsb_vs2:        ld      hl,(sg_v2)
+                VSDONE_PROBE rsb_vsdone, vsd2
                 ld      de,(sg_sx2)
                 ld      bc,(sg_m2)
                 ld      a,(sg_n2)
                 jp      vspan_emit2
+rsb_vsdone:     ret
 
 ; vspan_emit / vspan_emit2 : HL = the vertex's VXR record, DE = its column
 ; (s16), BC = (S, M8), A = 1 when near-clipped; the seg's projected rows at
 ; this endpoint are read by address (VSPAN_ENTRY: ft; fb +2, bt +8, bb +10)
-                MACRO   VSPAN_ENTRY name, ft, stamp
-name:
-                ex      af,af'                  ; the near-clipped flag rides A'
-                ld      a,l
-                or      VXR_DONE
-                ld      l,a                     ; -> the vertex-span stamp
-                ; done this frame?  (before any staging)
-stamp:          ld      a,0                     ; SMC: vd_stamp (render_frame)
-                cp      (hl)
-                ret     z                       ; already
-                ld      (hl),a
-                ex      af,af'
-                or      a
+                MACRO   VSPAN_ENTRY name, ft
+name:                                           ; (HL at the stamp byte, the
+                or      a                       ;  probe done by the caller)
                 ret     nz                      ; near-clipped
                 ld      a,d
                 or      a
@@ -1470,8 +1476,8 @@ stamp:          ld      a,0                     ; SMC: vd_stamp (render_frame)
                 pop     bc
                 jr      .c2
                 ENDM
-                VSPAN_ENTRY vspan_emit, sg_ft1, vsd1
-                VSPAN_ENTRY vspan_emit2, sg_ft2, vsd2
+                VSPAN_ENTRY vspan_emit, sg_ft1
+                VSPAN_ENTRY vspan_emit2, sg_ft2
 ve_explicit:
                 ld      (vs_sx),de              ; (the explicit path projects)
                 ld      (vs_ms),bc

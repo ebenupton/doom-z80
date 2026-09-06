@@ -2657,8 +2657,8 @@ ar_walk:        or      a
                 inc     l                       ; -> xe
                 ld      a,e
                 cp      (hl)
-                jr      nc,ar_next              ; ax0 >= xe: wholly left
-                dec     l
+                jp      nc,ar_next              ; ax0 >= xe: wholly left
+ar_hit:         dec     l
                 ld      b,(hl)                  ; xs
                 ld      a,d
                 cp      b
@@ -2739,7 +2739,19 @@ ar_bot:         ld      a,l
                 inc     l
                 ld      a,(fwl_lo)
                 ld      (hl),a
-ar_next:        ld      a,l
+ar_next:        ld      a,l                     ; (two spans to a back edge)
+                and     $F8
+                ld      l,a
+                ld      a,(hl)
+                or      a
+                ret     z
+                ld      l,a
+                inc     l
+                inc     l                       ; -> xe
+                ld      a,e
+                cp      (hl)
+                jp      c,ar_hit                ; ax0 < xe
+                ld      a,l
                 and     $F8
                 ld      l,a
                 ld      a,(hl)
