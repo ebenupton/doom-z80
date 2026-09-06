@@ -1,0 +1,158 @@
+; ===========================================================================
+; coldinit.z80 : once-only initialisation, assembled OVER THE SPAN POOL
+; ($BB00-$BD00).  sp_reset builds the pool on the first render_frame, so the
+; bytes here are live only until then: nothing in this file may be called
+; after the first frame, and it must end before VARS_BASE (asserted).
+; Moved out of bank 2's code proper to make room for hot-path inlining.
+; ===========================================================================
+; ---------------------------------------------------------------------------
+; cpm_init : once-only state.  The corner memo is gone (ptoa is cheaper than
+; its probe was); what remains is obj_anyb_fill (objects.s): the per-subsector
+; has-objects bitmap copied out of bank 4 so the walk can probe it without a
+; page flip.
+cpm_init:
+                ld      a,(back_buf)            ; the paging base for set_page
+                SET_PAGE_BASE
+                ; the vertex records: the static bytes copied in from the
+                ; geometry (ox, oy, the page pair into VRR; the span
+                ; descriptor into VXR) and every stamp clear
+                ld      a,BANK_GEOM
+                call    set_page
+                ld      hl,VRR
+                ld      bc,0                    ; the index
+vri_loop:       push    hl
+                ld      (hl),0                  ; the angle stamp
+                ld      a,l
+                or      VRR_OX
+                ld      l,a
+                push    hl
+                ld      hl,VP_OX
+                add     hl,bc
+                ld      d,(hl)                  ; ox
+                inc     h
+                inc     h
+                ld      e,(hl)                  ; oy
+                inc     h
+                inc     h
+                ld      a,(hl)                  ; the page pair
+                pop     hl
+                ld      (hl),d
+                inc     l
+                ld      (hl),e
+                inc     l
+                ld      (hl),a
+                pop     hl
+                push    hl
+                ld      a,h
+                add     a,VRR_TO_VXR
+                ld      h,a                     ; the VXR record
+                ld      (hl),0                  ; the frame stamp
+                ld      a,l
+                or      VXR_DONE
+                ld      l,a
+                ld      (hl),0                  ; the span stamp
+                inc     l
+                push    hl
+                ld      hl,VSDESC
+                add     hl,bc
+                ld      a,(hl)
+                pop     hl
+                ld      (hl),a                  ; the descriptor
+                pop     hl
+                ld      a,l
+                add     a,8
+                ld      l,a
+                jr      nc,vri_next
+                inc     h
+vri_next:       inc     bc
+                ld      a,c
+                cp      NVERTS & 255
+                jr      nz,vri_loop
+                ld      a,b
+                cp      NVERTS >> 8
+                jr      nz,vri_loop
+                ld      hl,PROD_ZERO            ; the zero product table
+                ld      de,PROD_ZERO+1
+                ld      bc,255
+                ld      (hl),0
+                ldir
+                ; the product tables X * M for every quadrant magnitude, into
+                ; bank 3 through the stack pointer: table q (64 down to 1) is
+                ; 128 words descending from its end, M = SIN_MAG[q] (256 when
+                ; SIN_UNITY[q]), 127M first then -M a step
+                PAGE_IN BANK_PROD
+                ld      (vs_spsave),sp
+                ld      sp,0                    ; PROD_BASE + 64 * 256
+                ld      c,64
+pf_q:           ld      a,c
+                add     a,SIN_UNITY & 255
+                ld      l,a
+                ld      h,SIN_UNITY >> 8
+                ld      a,(hl)
+                or      a
+                ld      de,256
+                jr      nz,pf_m
+                ld      a,c
+                add     a,SIN_MAG & 255
+                ld      l,a
+                ld      h,SIN_MAG >> 8
+                ld      e,(hl)
+                ld      d,0
+pf_m:           ld      h,d
+                ld      l,e
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl                   ; 128M
+                or      a
+                sbc     hl,de                   ; 127M
+                ld      a,e
+                cpl
+                ld      e,a
+                ld      a,d
+                cpl
+                ld      d,a
+                inc     de                      ; DE = -M
+                ld      b,16
+pf_l:           DUP     8
+                push    hl
+                add     hl,de
+                EDUP
+                djnz    pf_l
+                dec     c
+                jr      nz,pf_q
+                ld      sp,(vs_spsave)
+                ld      hl,VYC_S                ; project_y's memo: the S plane
+                ld      de,VYC_S+1              ; is its valid flag
+                ld      bc,255
+                ld      (hl),0
+                ldir
+                ld      a,BANK_OBJ
+                call    set_page
+                ld      hl,OBJ_BITS
+                ld      de,OBJ_ANYB
+                ld      bc,OBJ_BITS_LEN
+                ldir
+                ; obj_s7's table: (m * 47 * 4 + 128) >> 8 for m = 0..255, the
+                ; product as a running sum, the rounding exactly as before
+                ld      de,0                    ; m * 47
+                ld      bc,OBJ_T47
+t47_l:          ld      h,d
+                ld      l,e
+                add     hl,hl
+                add     hl,hl
+                ld      a,l
+                add     a,128
+                ld      a,h
+                adc     a,0
+                ld      (bc),a
+                ld      hl,47
+                add     hl,de
+                ex      de,hl
+                inc     c
+                jr      nz,t47_l
+                ld      a,BANK_GEOM
+                jp      set_page

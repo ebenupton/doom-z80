@@ -450,6 +450,12 @@ CODE_END:
 ; frees bank 2 for the geometry pipeline.  The image is padded through the
 ; pool, variables, stack and screen B, all of which are rebuilt at run time.
 ; ---------------------------------------------------------------------------
+                ; once-only init over the span pool (see coldinit.z80)
+                DS      SPANS_BASE-$,0
+                include "coldinit.z80"
+COLD_END:
+                DISPLAY "cold init ends at ", /H, COLD_END, ", vars at ", /H, VARS_BASE
+                ASSERT  COLD_END <= VARS_BASE   ; the once-only code must fit the pool pages
                 DS      RASTER_BASE-$,0
                 include "raster.z80"
 RASTER_END:

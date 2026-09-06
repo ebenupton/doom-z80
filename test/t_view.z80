@@ -26,6 +26,9 @@ T_CODE_END:
                 ; the rasteriser, in bank 7 as in the engine, the collision
                 ; code above it at COL_CODE (it used to follow bsp.z80 and
                 ; grew over the span pool and VARS: back_buf read as code)
+                DS      SPANS_BASE-$,0
+                include "coldinit.z80"
+                ASSERT  $ <= VARS_BASE
                 DS      RASTER_BASE-$,0
                 include "raster.z80"
                 DS      COL_CODE-$,0
