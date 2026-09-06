@@ -40,9 +40,10 @@ sq2_loop:
 ; init_video : blank both bitmaps and set both attribute files to white on
 ; black, then show buffer B while buffer A is drawn first.
 init_video:
-                call    cpm_init
                 xor     a
                 ld      (back_buf),a
+                call    cpm_init                ; (sets page_base from back_buf)
+                xor     a
                 out     ($fe),a                 ; black border
                 ; buffer A is always at $4000
                 ld      hl,FB_A

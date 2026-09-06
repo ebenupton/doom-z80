@@ -1,6 +1,16 @@
 ; The unrolled rounding-shift chains sit first in the code region, which
 ; starts on a page, so that the byte-indexed dispatch into them never
 ; crosses one.
+; RHTAB : rns_hl's entry by the shift count B (1..16), a low byte each -
+; the whole page is the shifter (the BBC port selects its rns shifter by S
+; once per reciprocal; here one indexed load does it per call).
+RHTAB:          DB      0
+                DB      (rh_chain+60) & 255, (rh_chain+56) & 255
+                DB      (rh_chain+52) & 255, (rh_chain+48) & 255
+                DB      rh_5 & 255, rh_6 & 255, rh_7 & 255, rh_8 & 255
+                DUP     8
+                DB      rh_drop & 255
+                EDUP
 ra_chain:
                 DUP     9
                 sra     a
@@ -26,4 +36,72 @@ rh_chain:
                 sra     h
                 rr      l
                 ret
-                ASSERT  (rh_chain >> 8) == (($ - 1) >> 8), "rh_chain crosses a page"
+; B = 5..7: (V + 2^(B-1)) >> B as the top two bytes of the 24-bit value
+; shifted LEFT by 8-B (three doublings at most against B shifts)
+rh_5:           ld      a,h
+                rla
+                sbc     a,a                     ; A:HL = V, s24
+                ld      bc,16
+                add     hl,bc
+                adc     a,0
+                add     hl,hl
+                rla
+                add     hl,hl
+                rla
+                add     hl,hl
+                rla
+                ld      l,h
+                ld      h,a
+                ret
+rh_6:           ld      a,h
+                rla
+                sbc     a,a
+                ld      bc,32
+                add     hl,bc
+                adc     a,0
+                add     hl,hl
+                rla
+                add     hl,hl
+                rla
+                ld      l,h
+                ld      h,a
+                ret
+rh_7:           ld      a,h
+                rla
+                sbc     a,a
+                ld      bc,64
+                add     hl,bc
+                adc     a,0
+                add     hl,hl
+                rla
+                ld      l,h
+                ld      h,a
+                ret
+rh_8:           ; (HL + 128) >> 8: the sign-extended high byte plus bit 7
+                ld      a,h
+                rla
+                sbc     a,a
+                ld      b,a                     ; the sign
+                ld      a,l
+                rla                             ; carry = the rounding bit
+                ld      a,h
+                adc     a,0
+                ld      l,a
+                ld      a,b
+                adc     a,0
+                ld      h,a
+                ret
+rh_drop:        ; B = 9..16: the low byte can only carry into the rounding
+                ; bit, which is a whole byte up, so drop it and shift by B-8
+                ld      a,h
+                ld      l,a
+                rla
+                sbc     a,a
+                ld      h,a
+                ld      a,c                     ; C = B still, B = the page
+                sub     8
+                ld      c,a
+                ld      a,(bc)
+                ld      (rh_jp+1),a
+                jp      rh_jp
+                ASSERT  (RHTAB >> 8) == (($ - 1) >> 8), "the rns_hl page overflows"

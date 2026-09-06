@@ -142,51 +142,20 @@ obj_project:
                 ret     nc
                 ld      e,c
                 ld      d,0
-                ld      hl,OBJ_OXL
+                ld      hl,OBJ_OX7
                 add     hl,de
                 ld      de,N_OBJ
-                ld      c,(hl)
+                ld      c,(hl)                  ; ox (7 bits)
                 add     hl,de
-                ld      b,(hl)                  ; BC = wx
+                ld      a,(hl)                  ; the page pair
+                add     a,a
+                add     a,a
+                ld      iyl,a                   ; * 4: PB's index
                 add     hl,de
-                ld      a,(hl)
-                add     hl,de
-                ld      d,(hl)
-                ld      e,a                     ; DE = wy
-                push    bc
-                push    de
-                call    rot_cos                 ; A:HL = wy * cos
-                ld      (vs_acc),hl
-                ld      (vs_acc+2),a
-                pop     de
-                call    rot_sin                 ; A:HL = wy * sin
-                ld      (vs_acc2),hl
-                ld      (vs_acc2+2),a
-                pop     de                      ; wx
-                push    de
-                call    rot_sin                 ; A:HL = wx * sin
-                ld      de,(vs_acc)
-                or      a
-                sbc     hl,de
-                ld      c,a
-                ld      a,(vs_acc+2)
-                ld      d,a
-                ld      a,c
-                sbc     a,d                     ; wx*sin - wy*cos
-                RNS3
-                ld      de,(vs_rx)
-                add     hl,de                   ; HL = tvx
-                ex      (sp),hl                 ; tvx down, wx up
-                ex      de,hl
-                call    rot_cos                 ; A:HL = wx * cos
-                ld      de,(vs_acc2)
-                add     hl,de
-                ld      d,a
-                ld      a,(vs_acc2+2)
-                adc     a,d                     ; wx*cos + wy*sin
-                RNS3
-                ld      de,(vs_ry)
-                add     hl,de                   ; HL = tvy
+                ld      d,(hl)                  ; oy
+                ld      e,c
+ob_rot:         call    obj_rot                 ; the vertex transform (bank 2;
+                push    de                      ;  DE = tvx, HL = tvy
                 bit     7,h
                 jr      nz,obj_pj_drop          ; behind
                 ld      a,h
@@ -251,12 +220,9 @@ obj_pj_z:
                 ld      c,a
                 ld      b,0
                 add     hl,bc
-                ld      a,(vs_vz)
-                ld      c,a
                 ld      a,(hl)
-                sub     c                       ; s8, as the 6502's SBC
                 push    de
-                call    project_y
+                call    project_y_vz            ; subtracts vs_vz (SMC) itself
                 pop     de
                 ret
 
@@ -375,7 +341,6 @@ obj_hok:
                 ; the template and its tier
                 xor     a
                 ld      (fw_touch),a
-                ld      (obj_fused),a
                 ld      a,(obj_asp)
                 ld      c,a
                 ld      b,0
@@ -443,11 +408,71 @@ obj_sel_hex:
                 ld      (obj_Y+14),hl
 obj_art_go:
                 call    obj_probe
-obj_stamp:
-                ld      hl,(obj_e)
+                ld      a,(obj_fast)            ; the stamp mode: 0 direct, 1
+                xor     1                       ;  slow, 2 fused, 3 fused fast
+                ld      (obj_fused),a
+                ld      hl,(obj_e)              ; HL walks the template (4 bytes
+obj_stamp:                                      ;  an entry), kept across the emits
                 ld      a,(hl)
                 cp      OBJ_ART_ARM
-                jr      nc,obj_ctl
+                jp      nc,obj_ctl
+                ld      a,(obj_fused)           ; the mode: 0 = direct
+                or      a
+                jr      nz,obj_st_gen
+                ; --- the direct stamp: every vertex is inside the u8 box, so
+                ; the low bytes go straight to the rasteriser in dl_emit's
+                ; registers, with dcl_emit_segment's point and vertical
+                ; ordering rules applied here ---
+                ld      b,OBJ_XY >> 8
+                ld      a,(hl)
+                add     a,OBJ_XY & 255
+                ld      c,a
+                ld      a,(bc)
+                ex      af,af'                  ; x1
+                inc     hl
+                ld      a,(hl)
+                add     a,(obj_Y-obj_X) + (OBJ_XY & 255)
+                ld      c,a
+                ld      a,(bc)
+                sub     Y_BIAS
+                ld      d,a                     ; y1
+                inc     hl
+                ld      a,(hl)
+                add     a,OBJ_XY & 255
+                ld      c,a
+                ld      a,(bc)
+                ld      e,a                     ; x2
+                inc     hl
+                ld      a,(hl)
+                add     a,(obj_Y-obj_X) + (OBJ_XY & 255)
+                ld      c,a
+                ld      a,(bc)
+                sub     Y_BIAS                  ; y2
+                inc     hl
+                push    hl                      ; the next entry
+                ld      b,d
+                ld      d,a
+                ld      c,e
+                ex      af,af'                  ; A = x1, B = y1, C = x2, D = y2
+                cp      c
+                jr      nz,obj_sd_go
+                ld      a,b                     ; a vertical goes out top first,
+                cp      d                       ; as the 6502's des_to_v orders it
+                jr      z,obj_sd_pt             ; a point: nothing
+                ld      a,c
+                jr      c,obj_sd_go
+                ld      e,b
+                ld      b,d
+                ld      d,e
+obj_sd_go:      ld      hl,adyn_ctr             ; (the BBC's direct stamps go
+                inc     (hl)                    ;  through dcl_emit_segment: counted)
+                call    dl_emit
+obj_sd_pt:      pop     hl
+                jr      obj_stamp
+obj_st_gen:     ; the clipped stamps: the s16 line staged in lc_x1..lc_y2
+                cp      3                       ; (A = the mode)
+                jr      z,obj_st_fl
+                ld      a,(hl)
                 ld      de,lc_x1
                 OBJ_LDX                         ; x1
                 inc     hl
@@ -461,32 +486,68 @@ obj_stamp:
                 ld      a,(hl)
                 add     a,obj_Y-obj_X
                 OBJ_LDX                         ; y2
+                inc     hl
+                push    hl
                 ld      a,(obj_fused)
-                or      a
-                jr      z,obj_plain
+                dec     a
+                jr      z,obj_slow              ; 1: the plain clip
                 ld      a,$80
                 call    fused_line              ; fused_below_raw
                 jr      obj_st_next
-obj_plain:
-                ld      a,(obj_fast)
-                or      a
-                jr      z,obj_slow
-                call    obj_emit_direct
-                jr      obj_st_next
 obj_slow:
                 call    dcl_s16
-obj_st_next:
-                ld      hl,(obj_e)
-                ld      de,4
-                add     hl,de
-                ld      (obj_e),hl
-                jr      obj_stamp
+obj_st_next:    pop     hl
+                jp      obj_stamp
+obj_st_fl:      ; a fused stamp of a fast object: every vertex is u8-clean, the
+                ; senior bytes were zeroed at the arm, so low bytes only
+                ld      b,OBJ_XY >> 8
+                ld      a,(hl)
+                add     a,OBJ_XY & 255
+                ld      c,a
+                ld      a,(bc)
+                ld      (lc_x1),a
+                inc     hl
+                ld      a,(hl)
+                add     a,(obj_Y-obj_X) + (OBJ_XY & 255)
+                ld      c,a
+                ld      a,(bc)
+                ld      (lc_y1),a
+                inc     hl
+                ld      a,(hl)
+                add     a,OBJ_XY & 255
+                ld      c,a
+                ld      a,(bc)
+                ld      (lc_x2),a
+                inc     hl
+                ld      a,(hl)
+                add     a,(obj_Y-obj_X) + (OBJ_XY & 255)
+                ld      c,a
+                ld      a,(bc)
+                ld      (lc_y2),a
+                inc     hl
+                push    hl
+                ld      a,$80
+                call    fused_line              ; fused_below_raw
+                jr      obj_st_next
 obj_ctl:
                 cp      OBJ_ART_END
                 jr      z,obj_art_done
-                ld      a,1
-                ld      (obj_fused),a
-                jr      obj_st_next
+                ld      a,(obj_fast)
+                or      a
+                ld      a,2                     ; fused
+                jr      z,obj_ctl_set
+                xor     a                       ; fast: the fused stamps copy
+                ld      (lc_x1+1),a             ;  low bytes into zeroed seniors
+                ld      (lc_y1+1),a
+                ld      (lc_x2+1),a
+                ld      (lc_y2+1),a
+                ld      a,3                     ; fused fast
+obj_ctl_set:    ld      (obj_fused),a
+                inc     hl
+                inc     hl
+                inc     hl
+                inc     hl
+                jp      obj_stamp
 obj_art_done:
                 ld      a,(fw_touch)
                 or      a
@@ -530,8 +591,8 @@ obj_ds_hi:
                 jp      fused_merge_range
 
 
-; obj_stxy : C = a byte offset into the vertex block <- HL
-obj_stxy:
+; OBJ_STXY : C = a byte offset into the vertex block <- HL (inline: 36 a frame)
+                MACRO   OBJ_STXY
                 ld      a,c
                 add     a,OBJ_XY & 255
                 ld      c,a
@@ -541,6 +602,8 @@ obj_stxy:
                 inc     bc
                 ld      a,h
                 ld      (bc),a
+                ENDM
+obj_stxy:       OBJ_STXY
                 ret
 
 ; obj_ycp1 : (DE) <- (HL) + BC, s16, both advanced
@@ -559,62 +622,71 @@ obj_ycp1:
 
 ; obj_s7 : IX -> a magnitude m: m2 = (m * 47 * 4 + 128) >> 8, m3 = m - m2
 obj_s7:
-                ld      h,(ix+0)
-                ld      l,47
-                call    mul_u8
-                add     hl,hl
-                add     hl,hl
-                ld      a,l
-                add     a,128
-                ld      a,h
-                adc     a,0
+                ld      l,(ix+0)
+                ld      h,OBJ_T47>>8
+                ld      a,(hl)                  ; the rounded product, tabled
                 ld      (ix+1),a
                 ld      c,a
-                ld      a,(ix+0)
+                ld      a,l
                 sub     c
                 ld      (ix+2),a
                 ret
 
 ; obj_hex : HL -> three magnitudes m0 m1 m2, DE -> six s16 slots:
 ;   ctr - m0, ctr - m1, ctr - m2, ctr + m2, ctr + m1, ctr + m0
-obj_hex:
-                ld      b,3
-oh_minus:
-                push    hl
-                push    bc
-                ld      c,(hl)
-                ld      b,0
-                ld      hl,(obj_ctr)
-                or      a
-                sbc     hl,bc
-                ex      de,hl
-                ld      (hl),e
+obj_hex:        ; (unrolled: the six slots sit in one page, so E steps)
+                ld      bc,(obj_ctr)
+                ld      a,c
+                sub     (hl)                    ; ctr - m0
+                ld      (de),a
+                inc     e
+                ld      a,b
+                sbc     a,0
+                ld      (de),a
+                inc     e
                 inc     hl
-                ld      (hl),d
+                ld      a,c
+                sub     (hl)                    ; ctr - m1
+                ld      (de),a
+                inc     e
+                ld      a,b
+                sbc     a,0
+                ld      (de),a
+                inc     e
                 inc     hl
-                ex      de,hl
-                pop     bc
-                pop     hl
-                inc     hl
-                djnz    oh_minus
-                ld      b,3
-oh_plus:
+                ld      a,c
+                sub     (hl)                    ; ctr - m2
+                ld      (de),a
+                inc     e
+                ld      a,b
+                sbc     a,0
+                ld      (de),a
+                inc     e
+                ld      a,c
+                add     a,(hl)                  ; ctr + m2
+                ld      (de),a
+                inc     e
+                ld      a,b
+                adc     a,0
+                ld      (de),a
+                inc     e
                 dec     hl
-                push    hl
-                push    bc
-                ld      c,(hl)
-                ld      b,0
-                ld      hl,(obj_ctr)
-                add     hl,bc
-                ex      de,hl
-                ld      (hl),e
-                inc     hl
-                ld      (hl),d
-                inc     hl
-                ex      de,hl
-                pop     bc
-                pop     hl
-                djnz    oh_plus
+                ld      a,c
+                add     a,(hl)                  ; ctr + m1
+                ld      (de),a
+                inc     e
+                ld      a,b
+                adc     a,0
+                ld      (de),a
+                inc     e
+                dec     hl
+                ld      a,c
+                add     a,(hl)                  ; ctr + m0
+                ld      (de),a
+                inc     e
+                ld      a,b
+                adc     a,0
+                ld      (de),a
                 ret
 
 ; ---------------------------------------------------------------------------
@@ -673,10 +745,11 @@ obj_probe:
                 ret     nc
                 ld      a,(obj_X)
                 ld      (obj_cur),a
-                ld      ix,(sp_head)
-                ld      a,ixh
-                or      ixl
+                ld      a,(sp_head)
+                or      a
                 ret     z
+                ld      ixl,a
+                ld      ixh,SPH>>8
 op_loop:
                 ld      a,(obj_cur)
                 ld      c,a
@@ -703,9 +776,9 @@ op_in:
                 jr      z,op_next
                 jr      nc,op_yes
 op_next:
-                SP_NEXT_DE
+                SP_NEXT_A
                 ret     z
-                IX_FROM_DE
+                IX_FROM_A
                 jr      op_loop
 op_yes:
                 ld      a,1
@@ -748,7 +821,8 @@ obj_ends:
                 ld      a,c
                 add     a,obj_Y-obj_X
                 ld      c,a
-                jp      obj_stxy
+                OBJ_STXY
+                ret
 
 ; obj_mirror : A = a magnitude, C = the -side x slot, obj_px = the +side:
 ; x[C] = cx - round(A * mulb / 256), x[px] = cx + it
@@ -762,12 +836,13 @@ obj_mirror:
                 ld      hl,(obj_cx)
                 or      a
                 sbc     hl,de
-                call    obj_stxy
+                OBJ_STXY
                 ld      a,(obj_px)
                 ld      c,a
                 ld      hl,(obj_cx)
                 add     hl,de
-                jp      obj_stxy
+                OBJ_STXY
+                ret
 
 ; obj_ymirror : as obj_mirror about the s16 base in obj_pb, into y slots
 obj_ymirror:
@@ -783,13 +858,14 @@ obj_ymirror:
                 ld      a,c
                 add     a,obj_Y-obj_X
                 ld      c,a
-                call    obj_stxy
+                OBJ_STXY
                 ld      a,(obj_px)
                 add     a,obj_Y-obj_X
                 ld      c,a
                 ld      hl,(obj_pb)
                 add     hl,de
-                jp      obj_stxy
+                OBJ_STXY
+                ret
 
 ; obj_yladder : HL = a table of H fractions, B = its last index:
 ;   y[1 + X] = yt + round(H * tab[X] / 256) for X = B..0
@@ -815,7 +891,7 @@ oyl_m:
                 add     a,a
                 add     a,2+obj_Y-obj_X
                 ld      c,a
-                call    obj_stxy
+                OBJ_STXY
                 pop     bc
                 dec     b
                 jp      p,oyl_m
@@ -887,14 +963,14 @@ olx_s:                                          ; x[2X] = cx - pb[X],
                 ld      a,c
                 add     a,a
                 ld      c,a
-                call    obj_stxy
+                OBJ_STXY
                 pop     bc
                 ld      hl,obj_lpo
                 add     hl,bc
                 ld      c,(hl)
                 ld      hl,(obj_cx)
                 add     hl,de
-                call    obj_stxy
+                OBJ_STXY
                 pop     bc
                 dec     b
                 jp      p,olx_s
@@ -991,7 +1067,8 @@ obj_ybsub:
                 ld      a,c
                 add     a,obj_Y-obj_X
                 ld      c,a
-                jp      obj_stxy
+                OBJ_STXY
+                ret
 
 obj_potion_xy:
                 ld      a,(obj_a)
@@ -1067,7 +1144,7 @@ obj_vest_xy:
                 call    obj_xladder
                 ld      hl,(obj_cx)             ; the curved rims ride the
                 ld      c,62                    ;   centre line
-                call    obj_stxy
+                OBJ_STXY
                 ld      hl,obj_vgy
                 ld      b,12
                 call    obj_yladder

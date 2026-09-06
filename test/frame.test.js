@@ -23,7 +23,7 @@ const A = { pl_x: V+28, pl_xf: V+30, pl_y: V+31, pl_yf: V+33, pl_ang: V+34,
             dlist_ptr: V+8, bsp_root: z.sym_('bsp_root'),
             frame_nodes: z.sym_('frame_nodes'), frame_ss: z.sym_('frame_ss'), frame_segs: z.sym_('frame_segs'),
             sp_count: z.sym_('sp_count') };
-z.poke16(A.bsp_root, 194);
+z.poke16(A.bsp_root, JSON.parse(fs.readFileSync(ROOT + 'build/map.json', 'utf8')).root);
 z.poke(A.vc_stamp, 0);
 
 let fail = 0, shown = 0, tsum = 0, worst = 0, worstI = -1, totalDiff = 0;

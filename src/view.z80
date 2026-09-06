@@ -15,8 +15,8 @@
 ; ---------------------------------------------------------------------------
 
 ; ---------------------------------------------------------------------------
-; sincos_lookup : A = angle byte -> magnitude in C, neg in B, unity in E
-; Mirrors fp._sin_mag_sign.
+; sincos_lookup : A = angle byte -> magnitude in C, neg in B, unity in E,
+; the quadrant index (0..64) in D.  Mirrors fp._sin_mag_sign.
 ; ---------------------------------------------------------------------------
 sincos_lookup:
                 ld      d,a
@@ -33,6 +33,7 @@ sincos_lookup:
                 sub     e
                 ld      e,a                     ; mirror in odd quadrants
 sc_noflip:
+                ld      d,e                     ; D = the index
                 ld      a,e
                 or      a
                 jr      nz,sc_nonzero
@@ -72,6 +73,22 @@ sc_notunity:
 ; tables and vs_rx/vs_ry.
 ; ---------------------------------------------------------------------------
 view_setup:
+                ld      a,(vs_vz)               ; bake the eye height into
+                ld      (pyv_imm+1),a           ; project_y_vz for this frame
+                ld      (pyv1+1),a              ;  and its eight inlined probes
+                ld      (pyv2+1),a
+                ld      (pyv3+1),a
+                ld      (pyv4+1),a
+                ld      (pyv5+1),a
+                ld      (pyv6+1),a
+                ld      (pyv7+1),a
+                ld      (pyv8+1),a
+                ld      hl,(pl_x)               ; the viewer as immediates at
+                ld      (bfx1+1),hl             ;  the back-face sites
+                ld      (bfx2+1),hl
+                ld      hl,(pl_y)
+                ld      (bfy1+1),hl
+                ld      (bfy2+1),hl
                 ; The trig state and the two 256-entry product tables depend
                 ; only on the view angle, so a frame that merely moved reuses
                 ; them; rebuilding costs about 29k T-states.
@@ -88,6 +105,14 @@ vs_rebuild:
                 ld      (vs_lastang),a
                 ld      a,1
                 ld      (vs_haveang),a
+                ; the rotated-vertex cache goes with the angle
+                ld      a,(vx_stamp)
+                inc     a
+                jr      nz,vxs_ok
+                call    vxcache_wipe
+                ld      a,1
+vxs_ok:         ld      (vx_stamp),a
+                ld      (vgm_vxs+1),a           ; vg_miss's immediate
                 ; the trig state and every patch site it feeds live in
                 ; bank 4 (fsetup.z80): once an angle change, not in the walk
                 ld      a,BANK_OBJ
@@ -149,6 +174,7 @@ vs_origin:
                 ld      de,(vs_t1)
                 add     hl,de
                 ld      (vs_rx),hl
+                ld      (vxh_rx+1),hl           ; vx_have's immediate
 
                 ; ref_vy = rot_cos(nx) + rot_sin(ny)
                 ld      de,(vs_nx)
@@ -161,6 +187,7 @@ vs_origin:
                 ld      de,(vs_t2)
                 add     hl,de
                 ld      (vs_ry),hl
+                ld      (vxh_ry+1),hl
 
                 ; advance the vertex-cache generation
                 ld      a,(vc_stamp)
@@ -170,6 +197,9 @@ vs_origin:
                 ld      a,1
 vs_stampok:
                 ld      (vc_stamp),a
+                ld      (vcs1+1),a              ; the three VGETP sites
+                ld      (vcs2+1),a
+                ld      (vcs3+1),a
                 ret
 
 ; patch_sign : HL = patch site, A = 0 for "RET NOP NOP", else "JP neg_ahl"
@@ -322,45 +352,79 @@ sub_pushed:
 ;   into [2, 255]; S counts those on top of the table's own.  Each case is
 ;   a shift up read a byte high.
 ; ---------------------------------------------------------------------------
-recip:
+                MACRO   RECIP_BODY              ; HL = tvy -> E = M8, D = S; eats A, B, HL
                 ld      a,h
                 cp      $10
-                jr      nc,rp_far
+                jr      nc,.far
                 add     hl,hl
                 add     hl,hl
                 add     hl,hl
                 add     hl,hl
                 ld      b,0
-                jr      rp_idx
-rp_far:         cp      $20
-                jr      nc,rp_far2
+                jr      .idx
+.far:           cp      $20
+                jr      nc,.far2
                 add     hl,hl
                 add     hl,hl
                 add     hl,hl
                 ld      b,1
-                jr      rp_idx
-rp_far2:        cp      $40
-                jr      nc,rp_clamp
+                jr      .idx
+.far2:          cp      $40
+                jr      nc,.clamp
                 add     hl,hl
                 add     hl,hl
                 ld      b,2
-                jr      rp_idx
-rp_clamp:       ld      h,255
+                jr      .idx
+.clamp:         ld      h,255
                 ld      b,2
-rp_idx:         ld      a,h
+.idx:           ld      a,h
                 cp      2
-                jr      nc,rp_ok
+                jr      nc,.ok
                 ld      a,2
-rp_ok:          ld      l,a
+.ok:            ld      l,a
                 ld      h,RECIP_M8>>8
                 ld      e,(hl)
                 inc     h
                 ld      a,(hl)
                 add     a,b
                 ld      d,a
+                ENDM
+recip:
+                RECIP_BODY
                 ret
 
 
+; PY_INLINE : project_y_vz's probe inlined at a hot site (the seg body's
+; eight): A = raw height, DE = (M8, S) -> HL = the row; the site's eye
+; height is patched with pyv_imm's each frame (view_setup's list)
+                MACRO   PY_INLINE site
+site:           sub     0                       ; SMC: - vs_vz
+                ld      c,a                     ; h
+                xor     e
+                ld      l,a                     ; the slot = h ^ M8
+                ld      h,VYC_M8>>8
+                ld      a,e
+                cp      (hl)
+                jr      nz,.miss
+                inc     h                       ; VYC_S
+                ld      a,d
+                cp      (hl)
+                jr      nz,.miss
+                inc     h                       ; VYC_L
+                ld      a,(hl)
+                inc     h                       ; VYC_HI
+                ld      h,(hl)
+                ld      l,a
+                jr      .done
+.miss:          call    py_miss
+.done:
+                ENDM
+project_y_vz:
+                ; A = raw height; subtract the eye height (patched each frame
+                ; by find_eye_height) to form the delta, then fall into the
+                ; core.  Saves the `ld hl,vs_vz / sub (hl)` (17 T -> 7 T) at
+                ; every render-path call site.
+pyv_imm:        sub     0                       ; SMC: - vs_vz
 project_y:
                 ; A = height delta, E = M8, D = S -> HL = screen y (biased).
                 ; The whole input tuple is the key, so an entry survives
@@ -371,13 +435,9 @@ project_y:
                 ; and the walk between them is INC H.  DE is kept.
                 ld      c,a                     ; h
                 xor     e
-                ld      l,a                     ; the slot
-                ld      h,VYC_H>>8
-                ld      a,c
-                cp      (hl)
-                jr      nz,py_miss
-                inc     h                       ; VYC_M8
-                ld      a,e
+                ld      l,a                     ; the slot = h ^ M8, so a slot
+                ld      h,VYC_M8>>8             ; whose M8 matches has h implied:
+                ld      a,e                     ; the key is (M8, S) alone
                 cp      (hl)
                 jr      nz,py_miss
                 inc     h                       ; VYC_S
@@ -391,27 +451,85 @@ project_y:
                 ld      l,a
                 ret
 py_miss:
-                ld      h,VYC_H>>8
-                ld      (hl),c                  ; the key first: h,
-                inc     h
-                ld      (hl),e                  ;   M8,
+                ld      h,VYC_M8>>8
+                ld      (hl),e                  ; the key: M8,
                 inc     h
                 ld      (hl),d                  ;   S (valid: nothing can
                 inc     h                       ;   interrupt the fill)
                 push    hl                      ; -> VYC_L slot
-                push    de                      ; (M8, S)
-                push    bc                      ; h (the multiply eats BC)
-                ld      h,c
-                ld      l,e
-                call    mul_s8_u8               ; HL = h * M8 (signed)
-                pop     bc
-                ld      d,c
-                ld      e,0                     ; DE = h << 8
-                add     hl,de                   ; HL = h * m9, fits s16
-                pop     de
-                ld      b,d
+                ld      a,c
+                ex      af,af'                  ; h rides A' across the multiply
+                ld      a,c
+                or      a
+                jp      m,pym_neg
+                MUL_AE                          ; HL = h * M8 (DE kept)
+pym_add:        ex      af,af'
+                ld      b,a
+                ld      c,0                     ; BC = h << 8
+                add     hl,bc                   ; HL = h * m9, fits s16
+                ; rns by S, the common counts inline in order of frequency
+                ; (S = 8 is the mode): 8 as rh_8 ((V + 128) >> 8), 7 and 6 as
+                ; rh_7/rh_6 ((V + 2^(S-1)) as s24 shifted LEFT by 8 - S, the
+                ; top two bytes taken), 9 as rh_drop (the low byte dropped, one
+                ; rounding shift); the rest through rns_hl
+                ld      a,d
+                cp      8
+                jr      z,pyr_8
+                cp      7
+                jr      z,pyr_7
+                cp      9
+                jr      z,pyr_9
+                cp      6
+                jr      nz,pyr_gen
+                ld      a,h                     ; S = 6
+                rla
+                sbc     a,a
+                ld      bc,32
+                add     hl,bc
+                adc     a,0
+                add     hl,hl
+                rla
+                add     hl,hl
+                rla
+                ld      l,h
+                ld      h,a
+                jr      pyr_done
+pyr_8:          ld      a,h
+                rla
+                sbc     a,a
+                ld      b,a                     ; the sign
+                ld      a,l
+                rla                             ; carry = the rounding bit
+                ld      a,h
+                adc     a,0
+                ld      l,a
+                ld      a,b
+                adc     a,0
+                ld      h,a
+                jr      pyr_done
+pyr_7:          ld      a,h
+                rla
+                sbc     a,a
+                ld      bc,64
+                add     hl,bc
+                adc     a,0
+                add     hl,hl
+                rla
+                ld      l,h
+                ld      h,a
+                jr      pyr_done
+pyr_9:          ld      a,h
+                ld      l,a
+                rla
+                sbc     a,a
+                ld      h,a                     ; HL = V >> 8, s16
+                inc     hl
+                sra     h
+                rr      l
+                jr      pyr_done
+pyr_gen:        ld      b,d
                 call    rns_hl                  ; leaves DE alone
-                ld      a,HALF_H+Y_BIAS         ; the row, in the clipper's
+pyr_done:       ld      a,HALF_H+Y_BIAS         ; the row, in the clipper's
                 sub     l                       ; biased units
                 ld      l,a
                 ld      a,0
@@ -424,6 +542,11 @@ py_miss:
                 ld      a,h
                 ld      (bc),a
                 ret
+pym_neg:        MUL_AE                          ; (h + 256) * M8: less M8 << 8
+                ld      a,h
+                sub     e
+                ld      h,a
+                jp      pym_add
 
 ; ---------------------------------------------------------------------------
 ; project_x : HL = tvx (s16 counts), E = M8, D = S -> HL = screen column, s16.
@@ -441,63 +564,120 @@ py_miss:
 project_x:
                 ld      a,e
                 or      a
-                jr      z,px_q                  ; m9 = 256: Q = tvx
+                jp      z,px_q                  ; m9 = 256: Q = tvx
                 ; floor(tvx * M8 / 256) = hi * M8 + floor(lo * M8 / 256) for
-                ; tvx = 256 * hi + lo (hi signed, lo unsigned): two 8x8s,
-                ; and none at all for the high byte when it is 0 or -1
-                push    de                      ; (M8, S)
+                ; tvx = 256 * hi + lo (hi signed, lo unsigned): two 8x8s
+                ; (MUL_AE keeps M8 and S in DE), and none at all for the high
+                ; byte when it is 0 or -1
                 push    hl                      ; tvx
-                ld      h,l                     ; lo
-                ld      l,e                     ; M8
-                MUL_U8_BODY                     ; HL = lo * M8
                 ld      a,h
-                ld      (px_lop),a              ; the low partial
-                pop     hl                      ; tvx
-                pop     de                      ; (M8, S)
-                ld      a,h
+                ex      af,af'                  ; A' = hi
+                ld      a,l
+                MUL_AE                          ; HL = lo * M8
+                ld      a,h                     ; the low partial
+                ex      af,af'                  ; A = hi, A' = the partial
                 or      a
                 jr      z,px_hi0
                 inc     a
                 jr      z,px_him1
                 dec     a
-                push    de
-                push    hl
-                ld      h,a                     ; hi, as unsigned
-                ld      l,e                     ; M8
-                MUL_U8_BODY                     ; HL = hi_u * M8
-                pop     de                      ; tvx
-                pop     bc                      ; C = M8, B = S
-                bit     7,d
-                jr      z,px_hp
-                ld      a,h
-                sub     c
-                ld      h,a                     ; signed: less M8 << 8
-px_hp:          ld      a,(px_lop)
-                add     a,l
+                jp      m,px_neg
+                MUL_AE                          ; HL = hi * M8
+px_join:        ex      af,af'
+                add     a,l                     ; + the low partial
                 ld      l,a
                 ld      a,0
                 adc     a,h
-                ld      h,a                     ; hi * M8 + the low partial
-                add     hl,de                   ; Q
-                ld      d,b                     ; S
+                ld      h,a
+                pop     bc                      ; tvx
+                add     hl,bc                   ; Q
                 jr      px_q
-px_hi0:         ld      a,(px_lop)              ; Q = tvx + the low partial
+px_neg:         MUL_AE                          ; HL = hi_u * M8: the two's
+                ld      a,h                     ;  complement's 256 * M8 off
+                sub     e
+                ld      h,a
+                jr      px_join
+px_hi0:         ex      af,af'                  ; Q = tvx + the low partial
+                pop     hl
                 add     a,l
                 ld      l,a
                 jr      nc,px_q
                 inc     h
                 jr      px_q
-px_him1:        ld      a,(px_lop)              ; Q = tvx + the partial - M8,
+px_him1:        ex      af,af'                  ; Q = tvx + the partial - M8,
                 sub     e                       ;   the difference in [-M8, -1]
                 ld      c,a
                 ld      b,$ff
+                pop     hl
                 add     hl,bc
 px_q:           ld      a,d
                 sub     3
                 jr      z,px_done
                 jr      c,px_left
-                ld      b,a
-                call    rns_hl                  ; round half up by S - 3
+                ; round half up by S - 3, the common counts inline in order
+                ; of frequency (S = 8 is the mode): 5 and 6 as rh_5/rh_6
+                ; ((V + 2^(B-1)) as s24 shifted LEFT by 8 - B, the top two
+                ; bytes taken), 1..4 as the chain (B - 1 plain shifts, + 1,
+                ; one more); the rest through rns_hl
+                cp      5
+                jr      z,pxr_5
+                cp      4
+                jr      z,pxr_4
+                cp      6
+                jr      z,pxr_6
+                cp      3
+                jr      z,pxr_3
+                cp      2
+                jr      z,pxr_2
+                dec     a
+                jr      nz,pxr_gen
+pxr_1:          inc     hl
+                sra     h
+                rr      l
+                jr      px_done
+pxr_4:          sra     h
+                rr      l
+pxr_3:          sra     h
+                rr      l
+pxr_2:          sra     h
+                rr      l
+                inc     hl
+                sra     h
+                rr      l
+                jr      px_done
+pxr_5:          ld      a,h
+                rla
+                sbc     a,a
+                ld      bc,16
+                add     hl,bc
+                adc     a,0
+                add     hl,hl
+                rla
+                add     hl,hl
+                rla
+                add     hl,hl
+                rla
+                ld      l,h
+                ld      h,a
+                jr      px_done
+pxr_6:          ld      a,h
+                rla
+                sbc     a,a
+                ld      bc,32
+                add     hl,bc
+                adc     a,0
+                add     hl,hl
+                rla
+                add     hl,hl
+                rla
+                ld      l,h
+                ld      h,a
+                jr      px_done
+pxr_gen:        ld      b,d
+                dec     b
+                dec     b
+                dec     b
+                call    rns_hl
                 jr      px_done
 px_left:        add     hl,hl                   ; S = 2: one doubling,
                 inc     a
@@ -508,15 +688,23 @@ px_done:        ld      de,HALF_W
                 ret
 
 ; ---------------------------------------------------------------------------
-vcache_wipe:
-                ld      hl,VCACHE_BASE
-                ld      de,VCACHE_ENT
-                ld      bc,NVERTS
-vw_loop:
-                ld      (hl),0
-                add     hl,de
-                dec     bc
-                ld      a,b
-                or      c
-                jr      nz,vw_loop
+vcache_wipe:                                    ; the VXCACHE stamps
+                ld      hl,VXR
+                jr      wipe8
+vxcache_wipe:                                   ; the VRCACHE stamps
+                ld      hl,VRR
+; wipe8 : clear every 8th byte from HL over 16 pages (the 512 record slots)
+wipe8:
+                ld      a,h
+                add     a,16
+                ld      c,a                     ; the end page
+w8_loop:        ld      (hl),0
+                ld      a,l
+                add     a,8
+                ld      l,a
+                jr      nc,w8_loop
+                inc     h
+                ld      a,h
+                cp      c
+                jr      nz,w8_loop
                 ret

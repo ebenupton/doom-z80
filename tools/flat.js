@@ -7,6 +7,7 @@ const fs = require("fs"), path = require("path");
 const { assemble, readSymbols } = require("./zbuild.js");
 const { Spectrum128 } = require("./spectrum.js");
 const ROOT = path.resolve(__dirname, "..");
+const BSP_ROOT = JSON.parse(fs.readFileSync(path.join(ROOT, "build/map.json"), "utf8")).root;   // the tree's root node, from the pack
 const rows = Number(process.argv[2] || 60), only = process.argv[3] || "";
 const frames = JSON.parse(fs.readFileSync(path.join(ROOT, "build/parity.json"), "utf8")).filter(f => f.key.includes(only));
 const r = assemble(path.join(ROOT, "src/main.z80"), path.join(ROOT, "build/doom.bin"));
@@ -43,11 +44,18 @@ function runUntilHalt() {
     const o = owner[pc]; if (o >= 0) { T[o] += m.tstates - t0; N[o]++; }
   }
 }
+let adynPose = null;
 for (const f of frames) {
   poke16(V + 28, f.px_int & 0xffff); poke(V + 30, f.px_f); poke16(V + 31, f.py_int & 0xffff); poke(V + 33, f.py_f);
   poke(V + 34, f.ang); poke(V + 26, f.vz & 0xff); poke16(V + 36, f.wx & 0xffff); poke16(V + 38, f.wy & 0xffff);
-  poke16(S.get("bsp_root"), 194); poke(S.get("vs_haveang"), 0);
+  poke16(S.get("bsp_root"), BSP_ROOT);
   m.ram[2][V + 10 - 0x8000] = 0;                 // screen A is the back buffer: cleared outside the measure
+  // the walk's always-descend bits carry between frames, as in play; a bench that
+  // jumps between unrelated poses clears them, with the BBC harness's windows
+  // (128 world units or 24 angle bytes - a motion the walk's kinematics can never make)
+  if (!adynPose || Math.abs(f.wx - adynPose[0]) > 128 || Math.abs(f.wy - adynPose[1]) > 128 ||
+      Math.min((f.ang - adynPose[2]) & 255, (adynPose[2] - f.ang) & 255) > 24) m.ram[4].fill(0, 0x3800, 0x3900);
+  adynPose = [f.wx, f.wy, f.ang];
   m.applyPaging(0x16);
   m.poke(0xbff8, 0x76);
   for (const [entry, a] of [[S.get("raster_select"), 0], [S.get("raster_clear"), 0]]) {

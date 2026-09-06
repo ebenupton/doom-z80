@@ -17,12 +17,12 @@ walk_frame:
                 ld      a,h
                 xor     $80
                 ld      h,a
-                ld      (bca_pxs),hl
+                ld      (bv_pxs+1),hl           ; bbox_visible's immediates
                 ld      hl,(pl_y)
                 ld      a,h
                 xor     $80
                 ld      h,a
-                ld      (bca_pys),hl
+                ld      (bv_pys+1),hl
                 ld      a,(pl_ang)
                 ld      b,a
                 rrca
@@ -41,6 +41,13 @@ walk_frame:
                 and     $F0
                 or      EPSILON_F               ; the first corner's widening
                 ld      (bca_afn),a
+                ld      (walk_sp),sp            ; the unwind's target
+                ld      hl,(pl_wx)              ; the viewer as immediates at
+                ld      (pos_wx1+1),hl          ;  point_on_side's sites
+                ld      (pos_wx2+1),hl
+                ld      hl,(pl_wy)
+                ld      (pos_wy1+1),hl
+                ld      (pos_wy2+1),hl
                 ld      hl,(bsp_root)
                 jp      walk
 
@@ -49,83 +56,113 @@ walk_frame:
 ; ---------------------------------------------------------------------------
 walk:
                 ld      a,(sp_head)
-                ld      c,a
-                ld      a,(sp_head+1)
-                or      c
+                or      a
                 ret     z                       ; screen fully occluded
                 bit     7,h
                 jp      nz,walk_ss
-                ld      a,(frame_nodes)
-                inc     a
-                ld      (frame_nodes),a
-                ld      b,l                     ; B = the node id (a byte)
-                add     hl,hl
-                ld      d,h
-                ld      e,l
-                add     hl,hl
-                add     hl,hl
-                add     hl,de                   ; * ND_SIZE
-                ld      de,NODES4
-                add     hl,de
-                ld      (bsp_node),hl
+                ; L = the node id: the fields are planes, no record address
+                push    hl
+                call    point_on_side           ; A = the side
+                pop     bc                      ; C = the id
+                ld      b,c                     ; B = the id
+                ld      c,a                     ; C = the near side
                 push    bc
-                call    point_on_side           ; A = the side, IX = the node
-                pop     bc
-                ld      c,a
-                push    ix
-                push    bc                      ; B = id, C = the near side
                 ; BBC 5e9b019: descend the NEAR child UNCONDITIONALLY, as
                 ; r_bsp.c does.  It is the half-space the viewer stands in, so
                 ; the box check rejected it only ~5% of the time while costing
                 ; a bbox_visible call on every node.  Over-descent draws
                 ; nothing - an invisible subtree's segs are rejected one by one
                 ; (the far child still gets the check).  Pixels unchanged.
-                ld      a,c
-                ld      (bsp_side),a
+                ld      l,b
                 or      a
                 jr      nz,wk_n1
-                ld      l,(ix+ND_CHILD0)
-                ld      h,(ix+ND_CHILD0+1)
+                ld      h,NP_C0L
                 jr      wk_go
-wk_n1:          ld      l,(ix+ND_CHILD1)
-                ld      h,(ix+ND_CHILD1+1)
-wk_go:          call    walk
+wk_n1:          ld      h,NP_C1L
+wk_go:          ld      a,(hl)
+                inc     h
+                ld      h,(hl)
+                ld      l,a                     ; HL = the near child
+                call    walk
 wk_back:
                 ld      a,(sp_head)
-                ld      c,a
-                ld      a,(sp_head+1)
-                or      c
-                jr      z,walk_pop
-                pop     bc
-                pop     ix
-                ld      (bsp_node),ix
+                or      a
+                jr      z,walk_done
+                pop     bc                      ; B = the id, C = the near side
                 ld      a,c
                 xor     1
                 jr      walk_child              ; the far child, if its box shows
-walk_pop:
-                pop     bc
-                pop     ix
+walk_done:      ; the screen is full: the BBC's bsp_done_full resets the
+                ; stack to the root's frame, so every pending far-side judge
+                ; is skipped and its bit stays as it was
+                ld      sp,(walk_sp)
                 ret
 
-; walk_child : A = the side, B = the node id, IX = the node.  The far child's
-; box is checked against the view and the span list; a no-show prunes it.
+; walk_child : A = the side, B = the node id.  The far child's box is
+; checked against the view and the span list; a no-show prunes it.
 ; BBC 4cab6b5 measured the static always-descend policy (ADESC, baked into
 ; ND_POL) a net loss - it over-descended into subtrees that drew nothing -
 ; and it is a bigger loss on the Z80, where bbox_visible is dearer; retired.
-walk_child:
-                ld      (bsp_side),a
-                push    ix
+walk_child:                                     ; A = the side, B = the node
+                ld      c,a                     ; (the side rides C)
+                ; the dynamic always-descend bit (BBC 4cab6b5): one bit per
+                ; (node, side) says the last descent here drew something, so
+                ; the box check is skipped and the far child taken on faith;
+                ; a judge after every descent sets or clears it from the
+                ; emitted-segment counter.  Over-descent costs one wasted
+                ; descent; the bits carry across frames.
+                ld      l,b
+                ld      h,ND_POL>>8
+                ld      a,(hl)
+                dec     c
+                inc     c
+                jr      nz,wc_s1
+                rlca                            ; carry = side 0's bit ($80)
+                jr      c,wc_spec
+                jr      wc_check
+wc_s1:          rlca
+                rlca                            ; carry = side 1's bit ($40)
+                jr      c,wc_spec
+wc_check:       push    bc
+                ld      a,c                     ; the side
                 call    bbox_visible            ; carry when a column may show
-                pop     ix
+                pop     bc
                 ret     nc
-wc_go:          ld      a,(bsp_side)
+wc_spec:        ld      a,(adyn_ctr)            ; the judge's before-sample
+                push    af
+                push    bc
+                call    wc_descend
+                pop     bc
+                pop     af
+                ld      e,$80                   ; the side's bit
+                dec     c
+                inc     c
+                jr      z,wc_mask
+                ld      e,$40
+wc_mask:        ld      hl,adyn_ctr
+                cp      (hl)                    ; unchanged: nothing was drawn
+                ld      l,b
+                ld      h,ND_POL>>8
+                ld      a,e
+                jr      z,wc_clear
+                or      (hl)
+                ld      (hl),a
+                ret
+wc_clear:       cpl
+                and     (hl)
+                ld      (hl),a
+                ret
+wc_descend:     ld      a,c
+                ld      l,b
                 or      a
                 jr      nz,wc_c1
-                ld      l,(ix+ND_CHILD0)
-                ld      h,(ix+ND_CHILD0+1)
-                jp      walk
-wc_c1:          ld      l,(ix+ND_CHILD1)
-                ld      h,(ix+ND_CHILD1+1)
+                ld      h,NP_C0L
+                jr      wc_go2
+wc_c1:          ld      h,NP_C1L
+wc_go2:         ld      a,(hl)
+                inc     h
+                ld      h,(hl)
+                ld      l,a
                 jp      walk
 
 ; ---------------------------------------------------------------------------
@@ -150,18 +187,20 @@ walk_ss:
                 pop     hl
                 ld      a,l
                 and     7
-                inc     a
-                ld      b,a
-                ld      a,c
-ws_bit:         rrca
-                djnz    ws_bit
-                jr      nc,ws_noobj
+                add     a,ws_bits & 255
+                ld      e,a
+                ld      d,ws_bits >> 8
+                ld      a,(de)
+                and     c
+                jr      z,ws_noobj
                 push    hl
                 ld      a,l
                 call    obj_subsector
                 pop     hl
 ws_noobj:
-                jp      walk_ss_segs            ; main RAM: it pages the geometry
+                jp      walk_ss_segs
+ws_bits:        DB      1,2,4,8,16,32,64,128
+                ASSERT  (ws_bits & 255) <= 248, "ws_bits crosses a page"            ; main RAM: it pages the geometry
                                                 ; in, and this bank back before
                                                 ; returning here (a page flip
                                                 ; must come from code that stays
@@ -172,26 +211,18 @@ ws_noobj:
 fe_descend:
                 bit     7,h
                 ret     nz
-                add     hl,hl
-                ld      d,h
-                ld      e,l
-                add     hl,hl
-                add     hl,hl
-                add     hl,de
-                ld      de,NODES4
-                add     hl,de
-                ld      (bsp_node),hl
-                call    point_on_side
-                ld      hl,(bsp_node)
-                ld      de,ND_CHILD0
+                push    hl                      ; L = the node id
+                call    point_on_side           ; A = the side
+                pop     hl
                 or      a
-                jr      z,fe_c0
-                ld      de,ND_CHILD1
-fe_c0:          add     hl,de
-                ld      e,(hl)
-                inc     hl
-                ld      d,(hl)
-                ex      de,hl
+                jr      nz,fe_c1
+                ld      h,NP_C0L
+                jr      fe_go
+fe_c1:          ld      h,NP_C1L
+fe_go:          ld      a,(hl)
+                inc     h
+                ld      h,(hl)
+                ld      l,a
                 jr      fe_descend
 
 ; ---------------------------------------------------------------------------
@@ -199,31 +230,30 @@ fe_c0:          add     hl,de
 ; Returns A = 0 (front) or 1 (back).
 ; ---------------------------------------------------------------------------
 point_on_side:
-                ; DOOM's R_PointOnSide on the gcd-reduced partition
-                ; direction; IX = the node, dx and dy in registers
-                ld      ix,(bsp_node)
-                ld      e,(ix+0)
-                ld      d,(ix+1)
-                ld      hl,(pl_wx)
-                or      a
-                sbc     hl,de                   ; dx
-                push    hl
-                ld      e,(ix+2)
-                ld      d,(ix+3)
-                ld      hl,(pl_wy)
-                or      a
-                sbc     hl,de                   ; dy
-                ld      b,(ix+4)                ; rdx
-                ld      c,(ix+5)                ; rdy
-                pop     de                      ; DE = dx, HL = dy
-                ld      a,b
+                ; DOOM's R_PointOnSide on the gcd-reduced partition direction.
+                ; L = the node id (the fields are planes: H = the page).  The
+                ; form is tested first, as the BBC port's NODE_SETUP_DISPATCH:
+                ; an axis partition (73% of nodes) needs one delta and no
+                ; product, a diagonal one with opposite product signs none.
+                ; Returns A = the side; clobbers BC, DE, HL.
+                ld      h,NP_RDX
+                ld      a,(hl)
                 or      a
                 jr      nz,pos_notx0
                 ; a north-south partition: the side is dx's, by rdy's sign
-                ld      a,d
+                ld      h,NP_RDY
+                ld      c,(hl)                  ; C = rdy
+                ld      h,NP_NXL
+                ld      e,(hl)
+                inc     h
+                ld      d,(hl)                  ; nx
+pos_wx1:        ld      hl,0                    ; SMC: pl_wx (walk_frame)
+                or      a
+                sbc     hl,de                   ; dx
+                ld      a,h
                 or      a
                 jp      m,pos_dxle
-                or      e
+                or      l
                 jr      z,pos_dxle
                 ld      a,c                     ; dx > 0: side = rdy < 0
                 rla
@@ -237,10 +267,19 @@ pos_dxle:
                 ld      a,1
                 ret
 pos_notx0:
-                ld      a,c
+                ld      b,a                     ; B = rdx
+                ld      h,NP_RDY
+                ld      a,(hl)
                 or      a
                 jr      nz,pos_general
                 ; an east-west partition
+                ld      h,NP_NYL
+                ld      e,(hl)
+                inc     h
+                ld      d,(hl)                  ; ny
+pos_wy1:        ld      hl,0                    ; SMC: pl_wy
+                or      a
+                sbc     hl,de                   ; dy
                 ld      a,h
                 or      a
                 jp      m,pos_dyle
@@ -259,6 +298,45 @@ pos_dyle:
                 and     1
                 ret
 pos_general:
+                ld      c,a                     ; C = rdy
+                ld      h,NP_NXL
+                ld      e,(hl)
+                inc     h
+                ld      d,(hl)                  ; nx
+                push    hl                      ; (the id)
+pos_wx2:        ld      hl,0                    ; SMC: pl_wx
+                or      a
+                sbc     hl,de
+                ex      (sp),hl                 ; dx down, the id up
+                ld      h,NP_NYL
+                ld      e,(hl)
+                inc     h
+                ld      d,(hl)                  ; ny
+pos_wy2:        ld      hl,0                    ; SMC: pl_wy
+                or      a
+                sbc     hl,de                   ; HL = dy
+                pop     de                      ; DE = dx
+                ; the sign shortcut (the BBC port's node_side_general): with
+                ; both deltas nonzero and P1 = rdy*dx, P2 = rdx*dy of opposite
+                ; signs, D = P1 - P2 has P1's sign - no product
+                ld      a,d
+                or      e
+                jr      z,pos_mul
+                ld      a,h
+                or      l
+                jr      z,pos_mul
+                ld      a,d
+                xor     c                       ; b7 = sign(P1)
+                ld      (pos_l),a
+                xor     h
+                xor     b                       ; b7 set = opposite signs
+                jp      p,pos_mul
+                ld      a,(pos_l)               ; side = P1 < 0
+                rla
+                sbc     a,a
+                and     1
+                ret
+pos_mul:
                 push    hl                      ; dy
                 push    bc
                 ld      a,c
@@ -282,7 +360,6 @@ pos_general:
                 ret
 
 
-
 ; ===========================================================================
 ; bbox_visible : A = the side (0 = the right child's box, 1 = the left's),
 ; B = the node id -> carry when the box subtends visible columns AND the
@@ -297,104 +374,210 @@ pos_general:
 ; The four bound deltas from the viewer (the biases cancel) are formed
 ; first - the Beeb's hi-then-lo compares are exactly their signs - and the
 ; arms take their corner's pair from them.
-                MACRO   ZDELTA s, pg, var
+                ; ZDELTA/ZDELTAY : one box edge less the viewer, s16, into a
+                ; register pair (the low byte's borrow feeds the high byte:
+                ; nothing between may touch the carry)
+                MACRO   ZDELTA_IY s, pg
                 ld      h,(pg)+(s)
                 ld      a,(hl)
                 sub     e
-                ld      (var),a
+                ld      iyl,a
                 inc     h
                 inc     h
                 ld      a,(hl)
                 sbc     a,d
-                ld      (var+1),a
+                ld      iyh,a
                 ENDM
-                MACRO   ZDELTAY s, pg, var
+                MACRO   ZDELTA_IX s, pg
+                ld      h,(pg)+(s)
+                ld      a,(hl)
+                sub     e
+                ld      ixl,a
+                inc     h
+                inc     h
+                ld      a,(hl)
+                sbc     a,d
+                ld      ixh,a
+                ENDM
+                MACRO   ZDELTAY_DE s, pg        ; (DE = px is spent by now)
                 ld      h,(pg)+(s)
                 ld      a,(hl)
                 sub     c
-                ld      (var),a
+                ld      e,a
                 inc     h
                 inc     h
                 ld      a,(hl)
                 sbc     a,b
-                ld      (var+1),a
+                ld      d,a
                 ENDM
-                ; the leaf arms: the two silhouette corners (x, y deltas)
-                ; and their sign classes
-                MACRO   ZARM x1, y1, x2, y2, e1, e2
-                ld      de,(x1)
-                ld      bc,(y1)
-                call    e1
-                ld      (bca_p1),hl
-                ld      de,(x2)
-                ld      bc,(y2)
-                call    e2
-                jp      bca_tail
+                MACRO   ZDELTAY_BC s, pg        ; into BC itself: the low byte
+                ld      h,(pg)+(s)              ; waits on the stack
+                ld      a,(hl)
+                sub     c
+                push    af
+                inc     h
+                inc     h
+                ld      a,(hl)
+                sbc     a,b
+                ld      b,a
+                pop     hl
+                ld      c,h
                 ENDM
                 ; CLASSIFY : one side's tree, from the deltas' signs.
-                ; L = the node, DE = pxs, BC = pys
+                ; L = the node, DE = pxs, BC = pys.  The deltas ride the
+                ; registers: L - px in IY, R - px in IX, T - py in DE,
+                ; B - py in BC; each arm gets its pair in DE (x) and BC (y).
                 MACRO   CLASSIFY s
-                ZDELTA  s, BBP_L_LO, bd_l
-                ZDELTA  s, BBP_R_LO, bd_r
-                ZDELTAY s, BBP_T_LO, bd_t
-                ZDELTAY s, BBP_B_LO, bd_b
-                ld      a,(bd_l+1)
+                ZDELTA_IY  s, BBP_L_LO
+                ZDELTA_IX  s, BBP_R_LO
+                ZDELTAY_DE s, BBP_T_LO
+                ZDELTAY_BC s, BBP_B_LO
+                ld      a,iyh
                 or      a
                 jp      p,.yL                   ; L - px >= 0: left of the box
-                ld      a,(bd_r+1)
+                ld      a,ixh
                 or      a
                 jp      p,.yM                   ; R - px >= 0: within its x
-.yR:            ld      a,(bd_t+1)
+.yR:            ld      a,d
                 or      a
                 jp      m,.yRtop                ; T - py < 0
-                ld      hl,bd_t
-                or      (hl)
+                or      e
                 jr      z,.yRtop                ; T - py = 0: at or above the top
-                ld      a,(bd_b+1)
+                ld      a,b
                 or      a
                 jp      m,.yRmid                ; B - py < 0
-                ld      hl,bd_b
-                or      (hl)
+                or      c
                 jr      z,.yRmid                ; B - py = 0: within its y
-.yRbot:         ZARM    bd_l, bd_b, bd_r, bd_t, corner_phi_np, corner_phi_np
-.yRtop:         ZARM    bd_r, bd_b, bd_l, bd_t, corner_phi_nn, corner_phi_nn
-.yRmid:         ZARM    bd_r, bd_b, bd_r, bd_t, corner_phi_nn, corner_phi_np
-.yL:            ld      a,(bd_t+1)
+.yRbot:
+                ; the leaf arms (bd_l, bd_b) then (bd_r, bd_t)
+                push    ix
+                push    de
+                push    iy
+                pop     de
+                call    corner_phi_np
+                ld      (bca_p1),hl
+                pop     bc
+                pop     de
+                call    corner_phi_np
+                jp      bca_tail
+.yRtop:
+                ; the leaf arms (bd_r, bd_b) then (bd_l, bd_t)
+                push    iy
+                push    de
+                push    ix
+                pop     de
+                call    corner_phi_nn
+                ld      (bca_p1),hl
+                pop     bc
+                pop     de
+                call    corner_phi_nn
+                jp      bca_tail
+.yRmid:
+                ; the leaf arms (bd_r, bd_b) then (bd_r, bd_t)
+                push    ix
+                push    de
+                push    ix
+                pop     de
+                call    corner_phi_nn
+                ld      (bca_p1),hl
+                pop     bc
+                pop     de
+                call    corner_phi_np
+                jp      bca_tail
+.yL:            ld      a,d
                 or      a
                 jp      m,.yLtop
-                ld      hl,bd_t
-                or      (hl)
+                or      e
                 jr      z,.yLtop
-                ld      a,(bd_b+1)
+                ld      a,b
                 or      a
                 jp      m,.yLmid
-                ld      hl,bd_b
-                or      (hl)
+                or      c
                 jr      z,.yLmid
-.yLbot:         ZARM    bd_l, bd_t, bd_r, bd_b, corner_phi_pp, corner_phi_pp
-.yLtop:         ZARM    bd_r, bd_t, bd_l, bd_b, corner_phi_pn, corner_phi_pn
-.yLmid:         ZARM    bd_l, bd_t, bd_l, bd_b, corner_phi_pp, corner_phi_pn
-.yM:            ld      a,(bd_t+1)
+.yLbot:
+                ; the leaf arms (bd_l, bd_t) then (bd_r, bd_b)
+                push    ix
+                push    bc
+                ld      b,d
+                ld      c,e
+                push    iy
+                pop     de
+                call    corner_phi_pp
+                ld      (bca_p1),hl
+                pop     bc
+                pop     de
+                call    corner_phi_pp
+                jp      bca_tail
+.yLtop:
+                ; the leaf arms (bd_r, bd_t) then (bd_l, bd_b)
+                push    iy
+                push    bc
+                ld      b,d
+                ld      c,e
+                push    ix
+                pop     de
+                call    corner_phi_pn
+                ld      (bca_p1),hl
+                pop     bc
+                pop     de
+                call    corner_phi_pn
+                jp      bca_tail
+.yLmid:
+                ; the leaf arms (bd_l, bd_t) then (bd_l, bd_b)
+                push    iy
+                push    bc
+                ld      b,d
+                ld      c,e
+                push    iy
+                pop     de
+                call    corner_phi_pp
+                ld      (bca_p1),hl
+                pop     bc
+                pop     de
+                call    corner_phi_pn
+                jp      bca_tail
+.yM:            ld      a,d
                 or      a
                 jp      m,.yMtop
-                ld      hl,bd_t
-                or      (hl)
+                or      e
                 jr      z,.yMtop
-                ld      a,(bd_b+1)
+                ld      a,b
                 or      a
                 jp      m,full_vis              ; inside the box
-                ld      hl,bd_b
-                or      (hl)
+                or      c
                 jp      z,full_vis
-.yMbot:         ZARM    bd_l, bd_b, bd_r, bd_b, corner_phi_np, corner_phi_pp
-.yMtop:         ZARM    bd_r, bd_t, bd_l, bd_t, corner_phi_pn, corner_phi_nn
+.yMbot:
+                ; the leaf arms (bd_l, bd_b) then (bd_r, bd_b)
+                push    ix
+                push    bc
+                push    iy
+                pop     de
+                call    corner_phi_np
+                ld      (bca_p1),hl
+                pop     bc
+                pop     de
+                call    corner_phi_pp
+                jp      bca_tail
+.yMtop:
+                ; the leaf arms (bd_r, bd_t) then (bd_l, bd_t)
+                push    iy
+                push    de
+                ld      b,d
+                ld      c,e
+                push    ix
+                pop     de
+                call    corner_phi_pn
+                ld      (bca_p1),hl
+                pop     bc
+                pop     de
+                call    corner_phi_nn
+                jp      bca_tail
                 ENDM
 
-bbox_visible:
+bbox_visible:                                   ; A = the side, B = the node
                 ld      l,b
-                ld      a,(bsp_side)
-                ld      de,(bca_pxs)
-                ld      bc,(bca_pys)
+bv_pxs:         ld      de,0                    ; SMC: the binned viewer
+bv_pys:         ld      bc,0                    ;  (walk_frame)
                 or      a
                 jp      nz,bv_side1
                 CLASSIFY 0
@@ -407,46 +590,12 @@ bv_side1:       CLASSIFY 1
 ; the key as (lo, hi) pairs of dx and dy, the value psi; a miss records the
 ; key, folds the signs into the octant base and runs lf_ns.
 ; ---------------------------------------------------------------------------
+                ; The corner-phi memo is retired (BBC b872178: it cost more
+                ; than it saved on both machines - on the Z80 it hit 22% of
+                ; 39 probes a frame): an entry folds the signs into the
+                ; octant base and runs lf_ns.
                 MACRO   CPM_ENTRY name, negx, negy, obase
 name:
-                ld      a,c
-                xor     e
-                and     $7F
-                add     a,a
-                ld      l,a
-                ld      ixl,a                   ; the slot
-                ld      h,CPM_PG+1              ; the dy key
-                ld      a,c
-                cp      (hl)
-                jr      nz,.miss
-                inc     l
-                ld      a,b
-                cp      (hl)
-                jr      nz,.miss
-                dec     h                       ; the dx key
-                ld      a,d
-                cp      (hl)
-                jr      nz,.miss
-                dec     l
-                ld      a,e
-                cp      (hl)
-                jr      nz,.miss
-                inc     h
-                inc     h                       ; psi
-                ld      e,(hl)
-                inc     l
-                ld      d,(hl)
-                jp      cp_havepsi
-.miss:          ld      a,ixl
-                ld      l,a
-                ld      h,CPM_PG
-                ld      (hl),e
-                inc     l
-                ld      (hl),d
-                inc     h
-                ld      (hl),b
-                dec     l
-                ld      (hl),c
                 ld      ixh,obase
                 ld      a,d
                 or      e
@@ -508,12 +657,7 @@ ns_khave:       ld      l,a
                 jr      nz,khave_sub
                 add     a,d
                 ld      d,a                     ; psi = base + ta
-mask_done:      ld      a,ixl
-                ld      l,a
-                ld      h,CPM_PSI_PG
-                ld      (hl),e
-                inc     l
-                ld      (hl),d
+mask_done:
 cp_havepsi:     ld      hl,(bca_afn)
                 or      a
                 sbc     hl,de

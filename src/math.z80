@@ -40,6 +40,38 @@
                 sbc     hl,bc
                 ENDM
 
+; MUL_AE : HL = A * E, D and E kept (the caller's second operand and its
+; companion stay put, so no shadow-set traffic); eats A, BC
+                MACRO   MUL_AE
+                ld      c,a
+                sub     e
+                jr      nc,.pos
+                neg
+.pos:           ld      b,a                     ; B = |a-b|
+                ld      a,c
+                add     a,e
+                ld      l,a
+                ld      a,SQ_LO>>8
+                adc     a,0
+                ld      h,a                     ; HL -> f(a+b), 9-bit
+                ld      c,(hl)
+                inc     h
+                inc     h
+                ld      a,(hl)                  ; A:C = f(a+b)
+                ld      l,b
+                ld      b,a
+                ld      h,SQ_LO>>8
+                ld      a,c
+                sub     (hl)
+                ld      c,a
+                inc     h
+                inc     h
+                ld      a,b
+                sbc     a,(hl)
+                ld      h,a
+                ld      l,c                     ; HL = f(a+b) - f(|a-b|)
+                ENDM
+
 ; ---------------------------------------------------------------------------
 ; mul_u8 : HL = H * L   (unsigned 8x8 -> 16)
 ; corrupts A, BC, DE
@@ -185,43 +217,13 @@ ra_fast:        ld      a,c
                 jr      rns_ahl
 
 ; rns_hl : HL = (HL + 1<<(B-1)) >> B, arithmetic, 16-bit.  B in 1..16.
-; corrupts A, B
+; corrupts A, B, C.  One indexed load picks the shifter (RHTAB, chains.z80).
 rns_hl:
-                ld      a,b
-                sub     8
-                jr      z,rh_8
-                jr      nc,rh_big
-                ; B = 1..7: B-1 plain shifts then the rounding one, entering
-                ; the chain 16-B steps from its end
-                neg
-                add     a,a
-                add     a,a                     ; * 4 bytes a step
-                add     a,(rh_chain & 255) + 32
+                ld      c,b
+                ld      b,RHTAB>>8
+                ld      a,(bc)
                 ld      (rh_jp+1),a
 rh_jp:          jp      rh_chain
-rh_big:         ; B = 9..16: the low byte can only carry into the rounding
-                ; bit, which is a whole byte up, so drop it and shift by B-8
-                ld      b,a
-                ld      a,h
-                ld      l,a
-                rla
-                sbc     a,a
-                ld      h,a
-                jr      rns_hl
-rh_8:           ; (HL + 128) >> 8: the sign-extended high byte plus bit 7
-                ld      a,h
-                rla
-                sbc     a,a
-                ld      b,a                     ; the sign
-                ld      a,l
-                rla                             ; carry = the rounding bit
-                ld      a,h
-                adc     a,0
-                ld      l,a
-                ld      a,b
-                adc     a,0
-                ld      h,a
-                ret
 
 
 ; ---------------------------------------------------------------------------

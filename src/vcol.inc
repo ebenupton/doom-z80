@@ -2,7 +2,8 @@
 ; step to the next row folded in - the screen thirds fall at render rows
 ; 47 and 111 (the render area starts at screen row 16).  A vertical enters
 ; at its top row's plot (VPE_LO/VPE_HI planes by row) and a RET patched
-; over the byte after its bottom row's plot (the entry + 3) ends it.  HL = the top byte, C = the mask.
+; over the byte after its bottom row's plot (the entry + 3) ends it.  HL = the top byte, C = the mask,
+; DE = $F920 (a cell step: L + 32, H - 7 in one add; the thirds have their own).
 VP_COL:
 vpr0:          ld      a,(hl)
                 or      c
@@ -35,12 +36,7 @@ vpx6:          inc     h
 vpr7:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx7:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx7:           add     hl,de                   ; the next cell: L + 32, H - 7
 vpr8:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -72,12 +68,7 @@ vpx14:          inc     h
 vpr15:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx15:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx15:          add     hl,de                   ; the next cell: L + 32, H - 7
 vpr16:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -109,12 +100,7 @@ vpx22:          inc     h
 vpr23:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx23:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx23:          add     hl,de                   ; the next cell: L + 32, H - 7
 vpr24:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -146,12 +132,7 @@ vpx30:          inc     h
 vpr31:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx31:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx31:          add     hl,de                   ; the next cell: L + 32, H - 7
 vpr32:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -183,12 +164,7 @@ vpx38:          inc     h
 vpr39:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx39:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx39:          add     hl,de                   ; the next cell: L + 32, H - 7
 vpr40:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -255,12 +231,7 @@ vpx54:          inc     h
 vpr55:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx55:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx55:          add     hl,de                   ; the next cell: L + 32, H - 7
 vpr56:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -292,12 +263,7 @@ vpx62:          inc     h
 vpr63:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx63:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx63:          add     hl,de                   ; the next cell: L + 32, H - 7
 vpr64:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -329,12 +295,7 @@ vpx70:          inc     h
 vpr71:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx71:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx71:          add     hl,de                   ; the next cell: L + 32, H - 7
 vpr72:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -366,12 +327,7 @@ vpx78:          inc     h
 vpr79:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx79:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx79:          add     hl,de                   ; the next cell: L + 32, H - 7
 vpr80:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -403,12 +359,7 @@ vpx86:          inc     h
 vpr87:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx87:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx87:          add     hl,de                   ; the next cell: L + 32, H - 7
 vpr88:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -440,12 +391,7 @@ vpx94:          inc     h
 vpr95:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx95:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx95:          add     hl,de                   ; the next cell: L + 32, H - 7
 vpr96:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -477,12 +423,7 @@ vpx102:          inc     h
 vpr103:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx103:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx103:         add     hl,de                   ; the next cell: L + 32, H - 7
 vpr104:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -549,12 +490,7 @@ vpx118:          inc     h
 vpr119:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx119:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx119:         add     hl,de                   ; the next cell: L + 32, H - 7
 vpr120:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -586,12 +522,7 @@ vpx126:          inc     h
 vpr127:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx127:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx127:         add     hl,de                   ; the next cell: L + 32, H - 7
 vpr128:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -623,12 +554,7 @@ vpx134:          inc     h
 vpr135:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx135:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx135:         add     hl,de                   ; the next cell: L + 32, H - 7
 vpr136:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -660,12 +586,7 @@ vpx142:          inc     h
 vpr143:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx143:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx143:         add     hl,de                   ; the next cell: L + 32, H - 7
 vpr144:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -697,12 +618,7 @@ vpx150:          inc     h
 vpr151:          ld      a,(hl)
                 or      c
                 ld      (hl),a
-vpx151:          ld      a,l
-                add     a,32
-                ld      l,a
-                ld      a,h
-                sub     7
-                ld      h,a
+vpx151:         add     hl,de                   ; the next cell: L + 32, H - 7
 vpr152:          ld      a,(hl)
                 or      c
                 ld      (hl),a
@@ -757,7 +673,8 @@ VPE_LO:
                 DB      vpr136&255,vpr137&255,vpr138&255,vpr139&255,vpr140&255,vpr141&255,vpr142&255,vpr143&255
                 DB      vpr144&255,vpr145&255,vpr146&255,vpr147&255,vpr148&255,vpr149&255,vpr150&255,vpr151&255
                 DB      vpr152&255,vpr153&255,vpr154&255,vpr155&255,vpr156&255,vpr157&255,vpr158&255,vpr159&255
-                DS      96, 0
+                DB      vpx159&255              ; entry 160: the column's own ret
+                DS      95, 0
 VPE_HI:
                 DB      vpr0>>8,vpr1>>8,vpr2>>8,vpr3>>8,vpr4>>8,vpr5>>8,vpr6>>8,vpr7>>8
                 DB      vpr8>>8,vpr9>>8,vpr10>>8,vpr11>>8,vpr12>>8,vpr13>>8,vpr14>>8,vpr15>>8
@@ -779,3 +696,4 @@ VPE_HI:
                 DB      vpr136>>8,vpr137>>8,vpr138>>8,vpr139>>8,vpr140>>8,vpr141>>8,vpr142>>8,vpr143>>8
                 DB      vpr144>>8,vpr145>>8,vpr146>>8,vpr147>>8,vpr148>>8,vpr149>>8,vpr150>>8,vpr151>>8
                 DB      vpr152>>8,vpr153>>8,vpr154>>8,vpr155>>8,vpr156>>8,vpr157>>8,vpr158>>8,vpr159>>8
+                DB      vpx159>>8

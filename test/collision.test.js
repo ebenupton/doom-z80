@@ -10,15 +10,15 @@ const ROOT = require('path').resolve(__dirname, '..') + '/';
 const gold = JSON.parse(fs.readFileSync(ROOT + 'test/collision_gold.json', 'utf8'));
 const z = new ZHarness(ROOT + 'test/t_view.z80');
 z.m.ram[0].set(fs.readFileSync(ROOT + 'build/bank0.bin'), 0);
-z.m.ram[1].set(fs.readFileSync(ROOT + 'build/coldata.bin'), 0);
+z.m.ram[6].set(fs.readFileSync(ROOT + 'build/coldata.bin'), 0xEE00 - 0xC000);   // the collision tables, above the rasteriser in bank 6
 z.pokeBytes(0x8800, fs.readFileSync(ROOT + 'build/tables.bin'));
-z.m.applyPaging(1);
+z.m.applyPaging(6);
 const S = n => z.sym_(n), s16 = v => v >= 32768 ? v - 65536 : v;
 const boxBlocked = (nx, ny, zf) => {
   z.poke16(S('cm_qx'), (nx >> 3) & 0xffff); z.poke(S('cm_qxf'), (nx & 7) << 5);
   z.poke16(S('cm_qy'), (ny >> 3) & 0xffff); z.poke(S('cm_qyf'), (ny & 7) << 5);
   z.poke(S('vs_vz'), zf & 0xff);
-  z.m.applyPaging(1);
+  z.m.applyPaging(6);
   return z.call('box_clear').cf ? 0 : 1;
 };
 
@@ -39,7 +39,7 @@ for (let i = 0; i < clears.length; i += 2) {
     z.poke16(S('pl_x'), (rx >> 3) & 0xffff); z.poke(S('pl_xf'), 0);
     z.poke16(S('pl_y'), (ry >> 3) & 0xffff); z.poke(S('pl_yf'), 0);
     z.poke(S('vs_vz'), 0); z.poke16(S('mv_dx'), dx & 0xffff); z.poke16(S('mv_dy'), dy & 0xffff);
-    z.m.applyPaging(1); z.call('player_move');
+    z.m.applyPaging(6); z.call('player_move');
     const nx = s16(z.peek16(S('pl_x'))) * 8 + (z.peek(S('pl_xf')) >> 5), ny = s16(z.peek16(S('pl_y'))) * 8 + (z.peek(S('pl_yf')) >> 5);
     if (boxBlocked(nx, ny, 0)) { if (bad < 6) console.log(`IN-WALL (${rx},${ry})+(${dx},${dy})`); bad++; }
     if (s16(z.peek16(S('pl_x'))) * 8 !== rx || s16(z.peek16(S('pl_y'))) * 8 !== ry) moved++;

@@ -44,6 +44,40 @@ BANK_SCREEN_B   EQU     7
 ; port $7FFD image: bits 0-2 bank, bit 3 screen (1 = bank 7 displayed),
 ; bit 4 ROM select (keep 1 = 48K ROM so the loader stays sane), bit 5 lock.
 PORT_7FFD       EQU     $7FFD
+; PAGE_IN bank : map a bank at $C000 inline (no call), from the per-frame
+; page_base.  Eats A and BC.
+                MACRO   PAGE_IN bank
+                ld      a,(page_base)
+                or      bank
+                ld      (cur_port),a
+                out     (PORT_7FFD & 255),a     ; (A15 = bit 7 of the value = 0,
+                ENDM                            ;  A1 = 0: the port decodes)
+; SET_PAGE_BASE : recompute page_base from back_buf (A = back_buf on entry)
+                MACRO   SET_PAGE_BASE
+                xor     1
+                rlca
+                rlca
+                rlca
+                or      P7_ROM48
+                ld      (page_base),a
+                push    af                      ; the per-frame port bytes, as
+                or      BANK_GEOM               ;  immediates at their sites
+                ld      (wss_pg1+1),a           ;  (PAGE_IMM: the seg loop)
+                pop     af
+                push    af
+                or      BANK_OBJ
+                ld      (wss_pg2+1),a
+                pop     af
+                or      BANK_PROD
+                ld      (prod_port),a           ; vg_rotate's port byte
+                ld      (vgr_pp+1),a
+                ENDM
+; PAGE_IMM site : PAGE_IN with the port byte an immediate SET_PAGE_BASE patches
+                MACRO   PAGE_IMM site
+site:           ld      a,0                     ; SMC: page_base | the bank
+                ld      (cur_port),a
+                out     (PORT_7FFD & 255),a
+                ENDM
 P7_ROM48        EQU     $10
 
 ; --- bank 5 ($4000-$7FFF): screen + scratch --------------------------------
@@ -84,19 +118,38 @@ NVERTS          EQU     455
 ; vs_rebuild_b4) combined with the frame's signs and floored by 8, plus a
 ; per-frame page term (PBX/PBY, 16 entries by the nibble).  The page term is
 ; an exact multiple of 8, so the result is the old rns3 of the full product.
-PBX             EQU     $6BA0           ; 16 x s16: the page term of L(w)x
-PBY             EQU     $6BC0           ;   and of L(w)y
-TS_TAB          EQU     $6C00           ; 256 x u16 (lo, hi): X * |sin|
-TC_TAB          EQU     $6E00           ; 256 x u16: X * |cos|
+PB              EQU     $6F00           ; 64 x (PBX s16, PBY s16): the page terms of
+                                        ; L(w)x and L(w)y by the 6-bit page pair
+PROD_ZERO       EQU     $7F00           ; a zero page: the product table of magnitude 0
+; The product tables X * M (128 x u16, lo/hi) for every quadrant magnitude
+; (SIN_MAG index q = 1..64, M = 256 when SIN_UNITY) live in bank 3, built
+; once at boot (cpm_init): table q at PROD_BASE + (q - 1) * 256.  The angle
+; selects the |sin| and |cos| tables' pages into vertex_get (vgx_ts...).
+BANK_PROD       EQU     3
+PROD_BASE       EQU     $C000
 
-VCACHE_BASE     EQU     $7000           ; NVERTS x 9, indexed by vertex
-VCACHE_ENT      EQU     9
-VC_STAMP        EQU     0               ; frame generation; 0 = empty
-VC_TVY          EQU     1               ; view-space depth, s16 counts
-VC_SX           EQU     3               ; projected screen column, s16
-VC_M8           EQU     5               ; and its reciprocal, (M8, S)
-VC_S            EQU     6
-VC_TVX          EQU     7               ; view-space x, s16 (near crossings)
+; The vertex caches as RECORDS, not the BBC port's planes (measured 2026-09-06:
+; a 512-entry plane is two pages, so a field is `inc h / inc h` from the last
+; and the index carries a page bit; an 8-byte record is `inc l` a field, the
+; four projected bytes copy with LDI, and the static per-vertex bytes ride the
+; same record).  A vertex is addressed by its record: H = VXR>>8 + v>>5,
+; L = (v*8)&255 - the form the seg record holds (SG_V1/SG_V2/SG_VHI).
+VXR             EQU     $7000           ; VXCACHE: 455 x 8 (to $7E38)
+VXR_M8          EQU     1               ;   +0 frame stamp (0 = empty)
+VXR_S           EQU     2               ;   the reciprocal (M8, S: 0 = behind the near plane)
+VXR_SXL         EQU     3               ;   the projected column, s16
+VXR_SXH         EQU     4
+VXR_DONE        EQU     5               ;   the vertex-span stamp (was VDONE)
+VXR_DESC        EQU     6               ;   the vertex-span descriptor (static, from VSDESC)
+VRR             EQU     $6000           ; VRCACHE: the rotated coordinates (before the
+VRR_RXL         EQU     1               ;   viewer's term) per vertex, valid while the view
+VRR_RXH         EQU     2               ;   ANGLE stands: +0 the angle stamp, rx, ry
+VRR_RYL         EQU     3
+VRR_RYH         EQU     4
+VRR_OX          EQU     5               ;   the static offsets and page pair (from VP_OX/OY/PG)
+VRR_OY          EQU     6
+VRR_PG          EQU     7
+VRR_TO_VXR      EQU     (VXR-VRR)>>8    ; the page distance between a vertex's two records
 
 ; --- bank 2 ($8000-$BFFF): code and hot tables -----------------------------
 SQ_LO           EQU     $8000           ; quarter-square f(n)=n*n/4, low bytes
@@ -136,7 +189,9 @@ IMAGE_BASE      EQU     ROWLO_A         ; the assembled image starts here
 ; sorted singly-linked list and the unused slots a free chain, so an occlusion
 ; update edits the spans it touches and leaves the rest where they are - there
 ; is no second pool and nothing to swap.
-SPANS_BASE      EQU     $BB80
+SPL             EQU     $BB00           ; the span pool's LINE page (8 bytes a slot)
+SPH             EQU     $BC00           ; and its HOT page: link, columns, extremes
+SPANS_BASE      EQU     SPL
 SPANS_MAX       EQU     32              ; the BBC port's pool: 32 slots
 ; Each boundary carries its extremes over the span: outer is the value further
 ; from the visible band, inner the value nearer it.  A line whose own extremes
@@ -148,7 +203,7 @@ SPANS_MAX       EQU     32              ; the BBC port's pool: 32 slots
 ; hot variables and stack live at the top of bank 2.  The stack's deepest
 ; point over the 1000 golden frames is 116 bytes (the walk's recursion is
 ; shallow once the box checks cull), so ~200 bytes is ample.
-VARS_BASE       EQU     $BD80
+VARS_BASE       EQU     $BD00
 STACK_TOP       EQU     $BFF0
 ; --- banks 6 and 7 ($C000-$FFFF): the rasteriser, above screen B in 7 and
 ; mirrored into the uncontended 6 for the frames drawn into buffer A --------
@@ -168,6 +223,14 @@ ln_errs         EQU     VARS_BASE+64
 ln_ls           EQU     VARS_BASE+65
 dlist_ptr       EQU     VARS_BASE+8     ; next free display-list slot (2)
 back_buf        EQU     VARS_BASE+10    ; 0 = A is the back buffer, 1 = B
+dcls_first      EQU     VARS_BASE+13    ; dcl_solid_pair: the first span pass 1 touched (id), 0 = none
+sp_live         EQU     VARS_BASE+14    ; 0 until the pool's first build (sp_reset)
+dcls_prev       EQU     VARS_BASE+42    ;   and the slot before it (id), 0 = it is the head (sp_marksolid_memo)
+vx_stamp        EQU     VARS_BASE+43    ; the rotated-vertex cache's generation (per view angle)
+adyn_ctr        EQU     VARS_BASE+44    ; emitted-segment counter: the walk's dynamic always-descend judge
+ch_v2           EQU     VARS_BASE+45    ; the vertex whose (M8, S, sx) stand in sg_m2/sg_sx2 (2), $FFFF = none
+ch_hit          EQU     VARS_BASE+47    ; 1 = this seg's v1 chained from the previous seg's v2 (rows and stamp reused)
+page_base       EQU     VARS_BASE+12    ; $7FFD bits for the displayed screen | P7_ROM48 (set_page ORs the bank in); kept by cpm_init and the flip
 
 ; --- view state ------------------------------------------------------------
 vs_smag         EQU     VARS_BASE+16    ; sin magnitude (0.8 unsigned)
@@ -193,6 +256,7 @@ tv_wx           EQU     VARS_BASE+48
 tv_wy           EQU     VARS_BASE+50
 tv_tvx          EQU     VARS_BASE+52
 tv_tvy          EQU     VARS_BASE+54
+walk_sp         EQU     VARS_BASE+56    ; SP at the walk's root: a full screen unwinds straight to it (bsp_done_full)
 acc32           EQU     VARS_BASE+58    ; 4-byte little-endian accumulator
 vs_nx           EQU     VARS_BASE+66
 vs_ny           EQU     VARS_BASE+68
@@ -207,9 +271,10 @@ py_res          EQU     VARS_BASE+86
 vs_acc2         EQU     VARS_BASE+81    ; 3 bytes
 
 ; --- clipper state ---------------------------------------------------------
-sp_head         EQU     VARS_BASE+90    ; first live span, 0 = none
+sp_head         EQU     VARS_BASE+90    ; first live span's id, 0 = none
+prod_port       EQU     VARS_BASE+91    ; page_base | BANK_PROD (SET_PAGE_BASE)
 sp_count        EQU     VARS_BASE+92    ; number of live spans
-sp_free         EQU     VARS_BASE+93    ; first unused slot
+sp_free         EQU     VARS_BASE+93    ; first unused slot's id
 
 
 ; --- BSP walk --------------------------------------------------------------
@@ -223,12 +288,12 @@ bb_any          EQU     VARS_BASE+125
 sg_ptr          EQU     VARS_BASE+126
 sg_v1           EQU     VARS_BASE+128
 sg_v2           EQU     VARS_BASE+130
-sg_sx1          EQU     VARS_BASE+132
-sg_sx2          EQU     VARS_BASE+134
-sg_m1           EQU     VARS_BASE+136
-sg_s1           EQU     VARS_BASE+137
-sg_m2           EQU     VARS_BASE+138
-sg_s2           EQU     VARS_BASE+139
+sg_m1           EQU     VARS_BASE+132   ; (M8, S, sx) of v1: the vertex
+sg_s1           EQU     VARS_BASE+133   ;  record's own order, one LDI run
+sg_sx1          EQU     VARS_BASE+134
+sg_m2           EQU     VARS_BASE+136
+sg_s2           EQU     VARS_BASE+137
+sg_sx2          EQU     VARS_BASE+138
 sg_ft1          EQU     VARS_BASE+140
 sg_fb1          EQU     VARS_BASE+142
 sg_ft2          EQU     VARS_BASE+144
@@ -311,7 +376,7 @@ bb_cc           EQU     VARS_BASE+288
 ch_vtx          EQU     VARS_BASE+300   ; the vertex whose projection the next seg inherits
 ch_ft           EQU     VARS_BASE+302
 ch_fb           EQU     VARS_BASE+304
-vs_h            EQU     VARS_BASE+306   ; the seg's heights for its vertex spans: fh, ch, bfh, bch
+vs_h            EQU     sg_fh           ; the seg's heights for its vertex spans: fh, ch, bfh, bch (aliased: rs_visible copies them there)
 vs_sx           EQU     VARS_BASE+310   ; the endpoint's column (s16)
 vs_ms           EQU     VARS_BASE+312   ; and its reciprocal (M8, S)
 vs_i            EQU     VARS_BASE+314   ; explicit entry cursor
@@ -366,10 +431,10 @@ dclv_yv         EQU     VARS_BASE+381
 fw_mode         EQU     VARS_BASE+382   ; $80 while a fused line is being clipped
 fw_side         EQU     VARS_BASE+383   ; 0 the top boundary, $80 the bottom
 fw_touch        EQU     VARS_BASE+384   ; any flat or run this seg
-fwl_xl          EQU     VARS_BASE+385   ; the walker's line
-fwl_yl          EQU     VARS_BASE+386
-fwl_xr          EQU     VARS_BASE+387
-fwl_yr          EQU     VARS_BASE+388
+fwl_xl          EQU     lc_x1           ; the walker's line: the u8 line's low
+fwl_yl          EQU     lc_y1           ;  bytes themselves (every entry to the
+fwl_xr          EQU     lc_x2           ;  walker used to copy them here)
+fwl_yr          EQU     lc_y2
 fwl_dx          EQU     VARS_BASE+389
 fwl_dy          EQU     VARS_BASE+390
 fwl_lo          EQU     VARS_BASE+391
@@ -382,7 +447,7 @@ fwl_zx0         EQU     VARS_BASE+397   ; the overlap with the span
 fwl_zx1         EQU     VARS_BASE+398
 fwl_leftf       EQU     VARS_BASE+399   ; where a left flat would start
 fwl_pend        EQU     VARS_BASE+400   ; the pending right flat ($80 = none)
-fw_slot         EQU     VARS_BASE+401   ; the span being clipped, its successor
+fw_slot         EQU     VARS_BASE+401   ; the span being clipped (IX: id, SPH>>8), its successor's id
 fw_next         EQU     VARS_BASE+403
 fw_rslot        EQU     VARS_BASE+405   ; the span the open run started on
 fw_ax0          EQU     VARS_BASE+407   ; the apply's range
@@ -396,7 +461,7 @@ cp_vev          EQU     VARS_BASE+414
 fw_pol          EQU     VARS_BASE+415   ; a flat's verdict
 fw_split_at     EQU     VARS_BASE+416
 fk_save         EQU     VARS_BASE+417   ; the seg's range across a kill (2)
-sp_prev         EQU     VARS_BASE+419   ; mark_solid's predecessor (2)
+sp_prev         EQU     VARS_BASE+419   ; mark_solid's predecessor (id)
 vd_stamp        EQU     VARS_BASE+421   ; the frame stamp the VDONE bytes carry
 pq_x            EQU     VARS_BASE+422   ; the viewer in quarter units, biased 128:
 pq_y            EQU     VARS_BASE+424   ; ceil then floor, per axis
@@ -464,7 +529,7 @@ TURN_RUN        EQU     5
 GEO_BASE        EQU     $C000
 VP_OX           EQU     GEO_BASE+$0000  ; 512: x low byte per vertex
 VP_OY           EQU     GEO_BASE+$0200  ; 512: y low byte
-VP_PG           EQU     GEO_BASE+$0400  ; 512: ((x>>8)+2)&3 | ((y>>8)+2)&3 << 2
+VP_PG           EQU     GEO_BASE+$0400  ; 512: ((x>>7)+4)&7 | ((y>>7)+4)&7 << 3 (128-unit pages)
 SEGS            EQU     GEO_BASE+$0720  ; 644 x 16
 SEG_SIZE        EQU     16
 SSEC            EQU     GEO_BASE+$2F60  ; 196 x (count, first_lo, first_hi)
@@ -477,28 +542,31 @@ VSEXPL          EQU     GEO_BASE+$3EA0  ; their explicit entries, (lo, hi, cont)
 
 
 ; --- the clipper (clip.z80): an exact port of the BBC port's EndpointClipSpans
-SLOT_SIZE       EQU     16
-SP_NEXT         EQU     0               ; the successor, 0 = none (2)
-SP_XS           EQU     2               ; the active columns, [xs, xe)
-SP_XE           EQU     3
-SP_TXLO         EQU     4               ; the top line: y at xlo and at xlo + den
-SP_TDEN         EQU     5
-SP_TL           EQU     6
-SP_TR           EQU     7
-SP_BXLO         EQU     8               ; the bottom line
-SP_BDEN         EQU     9
-SP_BL           EQU     10
-SP_BR           EQU     11
-SP_OT           EQU     12              ; min(tl, tr), max(tl, tr)
-SP_IT           EQU     13
-SP_OB           EQU     14              ; max(bl, br), min(bl, br)
-SP_IB           EQU     15
-SPANS_TOP       EQU     SPANS_BASE + SPANS_MAX*SLOT_SIZE
-VDONE           EQU     $B900           ; a frame stamp per vertex (455 bytes, bank 2); moved up from $B700 to give the code region room for collide.z80
+; The BBC port's pool: a slot is an id (its record's low byte, a multiple of
+; 8, 0 = none / the end of a list), its hot fields on the SPH page and its
+; two lines on the SPL page below it (dec h), so a walk holds one byte and
+; the page never changes.
+SLOT_SIZE       EQU     8
+SP_NEXT         EQU     0               ; the successor's id, 0 = none
+SP_XS           EQU     1               ; the active columns, [xs, xe)
+SP_XE           EQU     2
+SP_OT           EQU     3               ; min(tl, tr), max(tl, tr)
+SP_IT           EQU     4
+SP_OB           EQU     5               ; max(bl, br), min(bl, br)
+SP_IB           EQU     6
+SL_TXLO         EQU     0               ; the top line: y at xlo and at xlo + den
+SL_TDEN         EQU     1
+SL_TL           EQU     2
+SL_TR           EQU     3
+SL_BXLO         EQU     4               ; the bottom line
+SL_BDEN         EQU     5
+SL_BL           EQU     6
+SL_BR           EQU     7
+; (VDONE folded into the VXR record, +VXR_DONE)
 ; seg record
-SG_V1           EQU     0
-SG_V2           EQU     1
-SG_VHI          EQU     2
+SG_V1           EQU     0               ; (v1 * 8) & 255: the record's low byte
+SG_V2           EQU     1               ; (v2 * 8) & 255
+SG_VHI          EQU     2               ; v1 >> 5 | (v2 >> 5) << 4: the records' page offsets
 SG_FLAGS        EQU     3
 SG_FH           EQU     4
 SG_CH           EQU     5
@@ -537,11 +605,15 @@ NEAR_CROSS      EQU     32
 ; subsector's objects and restores the geometry bank.  Only the any-objects
 ; probe bitmap lives in bank 2, read before the page flip.
 BANK_OBJ        EQU     4
-BANK_COL        EQU     1               ; player-collision tables (coldata.bin)
-COL_SEG         EQU     $C000           ; N x 8: blocking lines (x1,y1,dx,dy s16, centre-rel)
-COL_PORT        EQU     $C700           ; ports: x1,y1,dx,dy s16 + ob,ot,mv (11 bytes)
-COL_IDX         EQU     $CA00           ; 36 x 3: per X column (list ptr lo, hi, count)
-COL_LIST        EQU     $CA80           ; u8 unified indices (idx < COL_N_SOLID = solid)
+; The collision tables (coldata.bin) and the collision code sit above the
+; rasteriser in banks 6/7 (the image carries them; read_input pages bank 6,
+; the uncontended copy, in), which keeps bank 2 for the render path.
+BANK_COL        EQU     6               ; = BANK_RASTER_A
+COL_SEG         EQU     $EE00           ; N x 8: blocking lines (x1,y1,dx,dy s16, centre-rel)
+COL_PORT        EQU     $F500           ; ports: x1,y1,dx,dy s16 + ob,ot,mv (11 bytes)
+COL_IDX         EQU     $F800           ; 36 x 3: per X column (list ptr lo, hi, count)
+COL_LIST        EQU     $F880           ; u8 unified indices (idx < COL_N_SOLID = solid)
+COL_CODE        EQU     $FA40           ; collide.z80
 COL_N_SOLID     EQU     204             ; colmap len(colsegs); idx >= this is a port
 DOOR_MIN_OPEN   EQU     7               ; colmap DOOR_MIN_OPEN_PS (56 world)
 EYE_PS          EQU     5               ; colmap EYE_PS (+41 world eye offset)
@@ -552,12 +624,14 @@ MM_HALF         EQU     724             ; max move chunk (8.8 prescaled); a chun
                                         ; cannot tunnel a thin wall (BBC colmap)
 COL_RAWX_MIN    EQU     -1936           ; column 0's left edge, centre-relative (colmap)
 OBJ_CODE        EQU     $C000           ; obj_subsector is the first byte
+OBJ_T47         EQU     $D200           ; 256 x u8: (m * 47 * 4 + 128) >> 8, obj_s7's
+                                        ; rounding product, built by cpm_init
 OBJ_DATA        EQU     $D300           ; objdata.bin (tools/pack.py)
 N_OBJ           EQU     50              ; LAY_N_OBJ
-OBJ_OXL         EQU     OBJ_DATA+0*N_OBJ    ; prescaled x, s16
-OBJ_OXH         EQU     OBJ_DATA+1*N_OBJ
-OBJ_OYL         EQU     OBJ_DATA+2*N_OBJ    ; prescaled y
-OBJ_OYH         EQU     OBJ_DATA+3*N_OBJ
+OBJ_OX7         EQU     OBJ_DATA+0*N_OBJ    ; x: the 7-bit offset (as VP_OX)
+OBJ_PG          EQU     OBJ_DATA+1*N_OBJ    ; the 6-bit page pair (as VP_PG)
+OBJ_OY7         EQU     OBJ_DATA+2*N_OBJ    ; y: the 7-bit offset
+OBJ_SPARE       EQU     OBJ_DATA+3*N_OBJ
 OBJ_SS          EQU     OBJ_DATA+4*N_OBJ    ; home subsector (the planes are
 OBJ_ASP         EQU     OBJ_DATA+5*N_OBJ    ;   sorted by it); kind index
 OBJ_ZT          EQU     OBJ_DATA+6*N_OBJ    ; prescaled top, s8
@@ -574,7 +648,7 @@ OBJ_K_LAMP      EQU     1
 OBJ_K_HELMET    EQU     3
 OBJ_K_BOXS      EQU     4
 OBJ_K_VEST      EQU     6
-OBJ_ANYB        EQU     $B8D0           ; bank 2 copy of OBJ_BITS (25 bytes, below the second display list)
+OBJ_ANYB        EQU     $BAD0           ; bank 2 copy of OBJ_BITS (25 bytes, just under the span pool)
 ; the workspace, bank 4 (objects.s SEG_WORK)
 OBJ_WS          EQU     $F420           ; (past VATOX's 1025th entry)
 obj_i           EQU     OBJ_WS+0        ; the object being projected
@@ -620,15 +694,28 @@ vs_m16s         EQU     FS_WS+0         ; |sin| as 1..256 (2)
 vs_m16c         EQU     FS_WS+2
 vs_kx           EQU     FS_WS+4         ; sS * 32 * |sin| (2)
 vs_ky           EQU     FS_WS+6
-vs_fa           EQU     FS_WS+8         ; -2kx, -kx, 0, kx
-vs_fb           EQU     FS_WS+16        ; -2ky, -ky, 0, ky
+vs_fixx         EQU     FS_WS+8         ; the PB build's row fixups: 8kx + ky, 8ky - kx (2 each)
+vs_fixy         EQU     FS_WS+10
+vs_rows         EQU     FS_WS+12        ;   and its row count
 OBJ_XY          EQU     $F4A0           ; the art vertex block: 6 x s16 x then
 obj_X           EQU     OBJ_XY          ;   26 x s16 y - templates index it in
 obj_Y           EQU     OBJ_XY+12       ;   bytes from obj_X (x) or obj_Y (y)
 
 ; --- the walk bank (bank 4, walkdata.bin): the node records and the BBC
 ; port's angle-space box check (ang/bca.s) with its tables --------------------
-NODES4          EQU     $D800           ; 195 x ND_SIZE
+NODES4          EQU     $D800           ; the node planes (walkdata.bin starts here)
+; the node fields as node-id-indexed planes (the BBC port's NODE_* layout):
+; a field is `ld h,NP_x / ld a,(hl)` with L = the node id
+NP_NXL          EQU     $D8             ; the partition point, s16 world
+NP_NXH          EQU     $D9
+NP_NYL          EQU     $DA
+NP_NYH          EQU     $DB
+NP_C0L          EQU     $DC             ; the children, DOOM encoding (bit 15 = subsector)
+NP_C0H          EQU     $DD
+NP_C1L          EQU     $DE
+NP_C1H          EQU     $DF
+NP_RDX          EQU     $FB             ; the gcd-reduced direction, s8
+NP_RDY          EQU     $FC
 BBP_BASE        EQU     $E000           ; the BBC's bounding-box planes: 4 fields
                                         ; (top, bottom, left, right) x (lo, hi)
                                         ; x (right box, left box), node-indexed;
@@ -646,9 +733,9 @@ CPM_PG          EQU     $F8             ; the corner-phi memo, 128 slots, 6 plan
                                         ; KDXL $F800, KDXH $F880, KDYL $F900,
                                         ; KDYH $F980, PSIL $FA00, PSIH $FA80
 CPM_PSI_PG      EQU     $FA
-ND_POL          EQU     $FB00           ; per node: $40/$80 always-descend side
+ND_POL          EQU     $F800           ; per node: the dynamic always-descend bits, $80 = side 0, $40 = side 1 (BBC 4cab6b5); the retired corner-phi memo's first page ($FB00 is NP_RDX)
                                         ; 0/1, $10/$20 same-as-parent serve
-BCA_WS          EQU     $FC00           ; the check's workspace
+BCA_WS          EQU     $FD00           ; the check's workspace
 bca_pxs         EQU     BCA_WS+0        ; the viewer, s16 with the hi byte ^$80 (2 each)
 bca_pys         EQU     BCA_WS+2
 bca_afn         EQU     BCA_WS+4        ; ab*16 + 512 + EPSILON, 12-bit (hi nibble)

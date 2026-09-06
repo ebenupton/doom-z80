@@ -16,20 +16,21 @@
 ; ---------------------------------------------------------------------------
 render_frame:
                 call    view_setup
-                call    sp_reset
+                ld      hl,$ffff
+                ld      (ch_v2),hl              ; the chain starts empty
                 ; the vertices' spans go out once a frame: a stamp per vertex,
                 ; wiped only when the frame counter comes round
                 ld      hl,vd_stamp
                 inc     (hl)
                 jr      nz,rf_stamped
-                ld      hl,VDONE
-                ld      de,VDONE+1
-                ld      bc,NVERTS-1
-                ld      (hl),0
-                ldir
+                ld      hl,VXR+VXR_DONE
+                call    wipe8
                 ld      a,1
                 ld      (vd_stamp),a
 rf_stamped:
+                ld      a,(vd_stamp)            ; the stamp as an immediate at
+                ld      (vsd1+1),a              ;  the two vspan entries
+                ld      (vsd2+1),a
                 ; lines are plotted as they are emitted (dl_emit): the
                 ; rasteriser is mirrored in banks 6 and 7, and the back
                 ; buffer's own bank serves it (B lives in 7; A's rows are
@@ -46,6 +47,7 @@ rf_stamped:
                 or      d
                 or      P7_ROM48
                 ld      (rast_port),a
+                ld      (dle_port+1),a          ; dl_emit's immediate
                 xor     a
                 ld      (frame_nodes),a
                 ld      (frame_ss),a
@@ -55,6 +57,7 @@ rf_stamped:
                 ; each subsector's segs
                 ld      a,BANK_OBJ
                 call    set_page
+                call    sp_reset                ; (bank 4)
                 call    walk_frame
                 ld      a,BANK_GEOM
                 jp      set_page
@@ -65,13 +68,7 @@ rf_stamped:
 ; walk4.z80), then the walk bank back before the return there.
 ; ---------------------------------------------------------------------------
 walk_ss_segs:
-                push    hl
-                ld      a,BANK_GEOM
-                call    set_page
-                pop     hl
-                ld      a,(frame_ss)
-                inc     a
-                ld      (frame_ss),a
+                PAGE_IMM wss_pg1                ; BANK_GEOM (keeps HL)
                 ; SSEC + ssid * 3
                 ld      d,h
                 ld      e,l
@@ -86,29 +83,21 @@ walk_ss_segs:
                 inc     hl
                 ld      e,(hl)
                 inc     hl
-                ld      d,(hl)
-                ex      de,hl
-                add     hl,hl
-                add     hl,hl
-                add     hl,hl
-                add     hl,hl
-                ld      de,SEGS
-                add     hl,de
-                push    hl
+                ld      d,(hl)                  ; the first seg's record (the pack
+                push    de                      ;  stores the address)
                 pop     ix                      ; IX -> the first seg's record
                 ld      hl,$ffff
                 ld      (ch_vtx),hl             ; the chain starts empty
-ss_loop:
-                push    bc
-                push    ix
-                call    render_seg
-                pop     ix
-                pop     bc
+                ld      a,b
+                ld      iyh,a                   ; the count rides IYH (a cull
+ss_loop:                                        ;  keeps IX and IYH; the body
+                call    render_seg              ;  saves them around itself)
                 ld      de,SEG_SIZE
                 add     ix,de
-                djnz    ss_loop
-wss_done:       ld      a,BANK_OBJ              ; the walk continues in bank 4
-                jp      set_page
+                dec     iyh
+                jp      nz,ss_loop
+wss_done:       PAGE_IMM wss_pg2                ; BANK_OBJ: the walk continues in bank 4
+                ret
 
 ; ---------------------------------------------------------------------------
 ; set_page : A = bank to map at $C000.  The displayed screen follows back_buf:
@@ -116,17 +105,11 @@ wss_done:       ld      a,BANK_OBJ              ; the walk continues in bank 4
 ; ---------------------------------------------------------------------------
 set_page:
                 ld      e,a
-                ld      a,(back_buf)
-                xor     1                       ; 1 when buffer B is displayed
-                rlca
-                rlca
-                rlca                            ; -> bit 3 of $7FFD
+                ld      a,(page_base)           ; the displayed screen's bits, per frame
                 or      e
-                or      P7_ROM48
                 ld      (cur_port),a            ; dl_emit restores it after a plot
-                ld      bc,PORT_7FFD
-                out     (c),a
-                ret
+                out     (PORT_7FFD & 255),a     ; (as dl_emit: the port decodes on
+                ret                             ;  A15/A1 alone, both 0)
 
 ; ---------------------------------------------------------------------------
 ; cpm_init : once-only state.  The corner memo is gone (ptoa is cheaper than
@@ -134,6 +117,120 @@ set_page:
 ; has-objects bitmap copied out of bank 4 so the walk can probe it without a
 ; page flip.
 cpm_init:
+                ld      a,(back_buf)            ; the paging base for set_page
+                SET_PAGE_BASE
+                ; the vertex records: the static bytes copied in from the
+                ; geometry (ox, oy, the page pair into VRR; the span
+                ; descriptor into VXR) and every stamp clear
+                ld      a,BANK_GEOM
+                call    set_page
+                ld      hl,VRR
+                ld      bc,0                    ; the index
+vri_loop:       push    hl
+                ld      (hl),0                  ; the angle stamp
+                ld      a,l
+                or      VRR_OX
+                ld      l,a
+                push    hl
+                ld      hl,VP_OX
+                add     hl,bc
+                ld      d,(hl)                  ; ox
+                inc     h
+                inc     h
+                ld      e,(hl)                  ; oy
+                inc     h
+                inc     h
+                ld      a,(hl)                  ; the page pair
+                pop     hl
+                ld      (hl),d
+                inc     l
+                ld      (hl),e
+                inc     l
+                ld      (hl),a
+                pop     hl
+                push    hl
+                ld      a,h
+                add     a,VRR_TO_VXR
+                ld      h,a                     ; the VXR record
+                ld      (hl),0                  ; the frame stamp
+                ld      a,l
+                or      VXR_DONE
+                ld      l,a
+                ld      (hl),0                  ; the span stamp
+                inc     l
+                push    hl
+                ld      hl,VSDESC
+                add     hl,bc
+                ld      a,(hl)
+                pop     hl
+                ld      (hl),a                  ; the descriptor
+                pop     hl
+                ld      a,l
+                add     a,8
+                ld      l,a
+                jr      nc,vri_next
+                inc     h
+vri_next:       inc     bc
+                ld      a,c
+                cp      NVERTS & 255
+                jr      nz,vri_loop
+                ld      a,b
+                cp      NVERTS >> 8
+                jr      nz,vri_loop
+                ld      hl,PROD_ZERO            ; the zero product table
+                ld      de,PROD_ZERO+1
+                ld      bc,255
+                ld      (hl),0
+                ldir
+                ; the product tables X * M for every quadrant magnitude, into
+                ; bank 3 through the stack pointer: table q (64 down to 1) is
+                ; 128 words descending from its end, M = SIN_MAG[q] (256 when
+                ; SIN_UNITY[q]), 127M first then -M a step
+                PAGE_IN BANK_PROD
+                ld      (vs_spsave),sp
+                ld      sp,0                    ; PROD_BASE + 64 * 256
+                ld      c,64
+pf_q:           ld      a,c
+                add     a,SIN_UNITY & 255
+                ld      l,a
+                ld      h,SIN_UNITY >> 8
+                ld      a,(hl)
+                or      a
+                ld      de,256
+                jr      nz,pf_m
+                ld      a,c
+                add     a,SIN_MAG & 255
+                ld      l,a
+                ld      h,SIN_MAG >> 8
+                ld      e,(hl)
+                ld      d,0
+pf_m:           ld      h,d
+                ld      l,e
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl                   ; 128M
+                or      a
+                sbc     hl,de                   ; 127M
+                ld      a,e
+                cpl
+                ld      e,a
+                ld      a,d
+                cpl
+                ld      d,a
+                inc     de                      ; DE = -M
+                ld      b,16
+pf_l:           DUP     8
+                push    hl
+                add     hl,de
+                EDUP
+                djnz    pf_l
+                dec     c
+                jr      nz,pf_q
+                ld      sp,(vs_spsave)
                 ld      hl,VYC_S                ; project_y's memo: the S plane
                 ld      de,VYC_S+1              ; is its valid flag
                 ld      bc,255
@@ -145,6 +242,24 @@ cpm_init:
                 ld      de,OBJ_ANYB
                 ld      bc,OBJ_BITS_LEN
                 ldir
+                ; obj_s7's table: (m * 47 * 4 + 128) >> 8 for m = 0..255, the
+                ; product as a running sum, the rounding exactly as before
+                ld      de,0                    ; m * 47
+                ld      bc,OBJ_T47
+t47_l:          ld      h,d
+                ld      l,e
+                add     hl,hl
+                add     hl,hl
+                ld      a,l
+                add     a,128
+                ld      a,h
+                adc     a,0
+                ld      (bc),a
+                ld      hl,47
+                add     hl,de
+                ex      de,hl
+                inc     c
+                jr      nz,t47_l
                 ld      a,BANK_GEOM
                 jp      set_page
 
@@ -271,7 +386,7 @@ d168_n:
 ; holds the view-space position and, when in front of the near plane, the
 ; projected column.
 ; ---------------------------------------------------------------------------
-; vertex_get : HL = a vertex index -> HL = its VCACHE entry (IX too), filled
+; vertex_get : HL = a vertex index -> HL = its stamp byte in the cache planes, filled
 ; this frame if it was not: the epoch's rotation L(w) from VXCACHE, or a
 ; cold transform, plus the frame's ref term, then the reciprocal and the
 ; column (vg_project).  The cold transform is the same integer arithmetic
@@ -280,7 +395,13 @@ d168_n:
 ; signs patched into it by vs_rebuild, so it runs straight through
 ; registers.  Eats everything.
 ; ---------------------------------------------------------------------------
-; vertex_get : HL = a vertex index -> HL = its VCACHE entry (IX too), filled
+                MACRO   VGETP site              ; HL = the vertex's VXR record
+site:           ld      a,0                     ; SMC: vc_stamp (vs_stampok)
+                cp      (hl)
+                call    nz,vg_miss
+                ENDM
+
+; vertex_get : HL = a vertex index -> HL = its stamp byte in the cache planes, filled
 ; this frame if it was not.  The transform is the BBC port's: the vertex is
 ; a low byte per axis and a page nibble; each axis is
 ;       floor((4 [+|-] ox*|s| [-|+] oy*|c|) / 8) + PB[pg] + ref
@@ -289,73 +410,233 @@ d168_n:
 ; the result is the rns3 of the full rotation, the integers unchanged.  Then
 ; the reciprocal and the column (vg_project).  Eats everything.
 ; ---------------------------------------------------------------------------
-; vg_build_tabs : page bank 4, build the product tables, page the geometry
-; back.  HL (the entry) and DE (the index) ride through.  Once a frame.
-vg_build_tabs:
-                push    hl
-                push    de
-                ld      a,BANK_OBJ
-                call    set_page
-                call    vs_build_tables
-                ld      a,BANK_GEOM
-                call    set_page
-                pop     de
-                pop     hl
-                ret
-
-vertex_get:
-                ld      d,h
-                ld      e,l                     ; DE = idx
-                add     hl,hl
-                add     hl,hl
-                add     hl,hl
-                add     hl,de                   ; nine bytes an entry
-                ld      a,l
-                add     a,VCACHE_BASE & 255
-                ld      l,a
-                ld      a,h
-                adc     a,VCACHE_BASE >> 8
-                ld      h,a
-                ld      a,(vc_stamp)
-                cp      (hl)
-                ret     z                       ; HL = the entry
-                ld      (hl),a
-                ld      a,(vs_tab_valid)
-                or      a
-                call    z,vg_build_tabs         ; build the angle's product
-                push    hl                      ; tables on the first cold vertex
-                pop     ix                      ; IX = the entry
-                ld      hl,VP_OX
-                add     hl,de
-                ld      c,(hl)                  ; ox
-                inc     h
-                inc     h
-                ld      b,(hl)                  ; oy
-                inc     h
-                inc     h
-                ld      a,(hl)                  ; the page nibble
-                add     a,a
-                ld      iyl,a                   ; * 2: PB's index
-                push    bc                      ; (oy, ox) for the y axis
-                ; --- x ---
-                ld      a,b
+; obj_rot : E = ox, D = oy (7-bit offsets), IYL = the page pair * 4 -> DE = tvx,
+; HL = tvy.  vertex_get's transform for an object's feet (objects.s:
+; rot_w_pages reused verbatim); bank 4 code calls it, so the product tables
+; page in here and bank 4 comes back before the return.  Its SMC sites are
+; patched with vertex_get's (fsetup.z80).
+obj_rot:
+                PAGE_IN BANK_PROD
+                push    de                      ; (oy, ox) for the y axis
+                ld      a,e
                 add     a,a
                 ld      l,a
-                ld      a,TC_TAB>>8
-                adc     a,0
-                ld      h,a
-                ld      e,(hl)
-                inc     l
-                ld      d,(hl)                  ; DE = oy * |cos|
-                ld      a,c
-                add     a,a
-                ld      l,a
-                ld      a,TS_TAB>>8
-                adc     a,0
-                ld      h,a
+orx_ts:         ld      h,0                     ; SMC: the |sin| table's page
                 ld      c,(hl)
                 inc     l
                 ld      b,(hl)                  ; BC = ox * |sin|
+                ld      a,d
+                add     a,a
+                ld      l,a
+orx_tc:         ld      h,0                     ; SMC: |cos|
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)                  ; DE = oy * |cos|
+                ld      hl,4
+                xor     a
+orx1:           add     hl,bc                   ; [+|-] ox*|s|   (patched, 5 bytes)
+                adc     a,0
+                nop
+                nop
+orx2:           or      a                       ; [-|+] oy*|c|
+                sbc     hl,de
+                sbc     a,0
+                rra
+                rr      h
+                rr      l
+                sra     h
+                rr      l
+                sra     h
+                rr      l                       ; floor(S / 8)
+                ld      a,iyl
+                ld      e,a
+                ld      d,PB >> 8
+                ld      a,(de)
+                inc     e
+                ld      c,a
+                ld      a,(de)
+                ld      b,a
+                add     hl,bc                   ; + the page term
+                ld      de,(vs_rx)
+                add     hl,de                   ; HL = tvx
+                ex      (sp),hl                 ; tvx down, (oy, ox) up
+                ld      c,l                     ; ox
+                ld      a,h                     ; oy
+                add     a,a
+                ld      l,a
+ory_ts:         ld      h,0                     ; SMC: |sin|
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)                  ; DE = oy * |sin|
+                ld      a,c
+                add     a,a
+                ld      l,a
+ory_tc:         ld      h,0                     ; SMC: |cos|
+                ld      c,(hl)
+                inc     l
+                ld      b,(hl)                  ; BC = ox * |cos|
+                ld      hl,4
+                xor     a
+ory1:           add     hl,bc                   ; [+|-] ox*|c|
+                adc     a,0
+                nop
+                nop
+ory2:           add     hl,de                   ; [+|-] oy*|s|
+                adc     a,0
+                nop
+                nop
+                rra
+                rr      h
+                rr      l
+                sra     h
+                rr      l
+                sra     h
+                rr      l
+                ld      a,iyl
+                add     a,2
+                ld      e,a
+                ld      d,PB >> 8
+                ld      a,(de)
+                inc     e
+                ld      c,a
+                ld      a,(de)
+                ld      b,a
+                add     hl,bc
+                ld      de,(vs_ry)
+                add     hl,de                   ; HL = tvy
+                pop     de                      ; DE = tvx
+                PAGE_IN BANK_OBJ
+                ret
+
+; vg_miss : HL = the VXR record, A = the frame stamp: fill the entry (the
+; BBC port's sx_vert miss).  The rotated coordinates stand while the angle
+; does (VRCACHE): a viewer that only moved rotates nothing.
+vg_miss:        ld      (hl),a                  ; the frame stamp
+                push    hl
+                ld      a,h
+                sub     VRR_TO_VXR
+                ld      h,a                     ; the VRR record
+vgm_vxs:        ld      a,0                     ; SMC: vx_stamp (vs_rebuild)
+                cp      (hl)
+                jr      nz,vx_miss
+                call    vx_fetch                ; DE = tvx, HL = tvy
+                jr      vg_project
+vx_miss:        ld      (hl),a                  ; the angle's stamp
+                push    hl
+vx_rot:         call    vg_rotate_rel           ; DE = rx, HL = ry (SMC: the
+                ex      (sp),hl                 ; HL = the record, ry down
+                                                ;  cardinal twins, vs_rebuild_b4)
+                inc     l
+                ld      (hl),e                  ; rx
+                inc     l
+                ld      (hl),d
+                inc     l
+                pop     bc                      ; ry
+                ld      (hl),c
+                inc     l
+                ld      (hl),b
+                ld      h,b
+                ld      l,c                     ; HL = ry, DE = rx
+                call    vx_have                 ; + the viewer's term
+vg_project:
+                ; project when in front of the near plane, keeping the
+                ; reciprocal with the column
+                bit     7,h
+                jr      nz,vg_behind
+                ld      a,h
+                or      a
+                jr      nz,vg_front
+                ld      a,l
+                cp      NEAR_VERDICT
+                jr      nc,vg_front
+vg_behind:
+                pop     hl                      ; the record
+                inc     l
+                inc     l                       ; -> S
+                xor     a
+                ld      (hl),a                  ; the verdict rs_visible reads
+                inc     l
+                ld      (hl),a                  ; sx = 0
+                inc     l
+                ld      (hl),a
+                res     2,l                     ; the record again
+                ret
+vg_front:
+                push    de                      ; tvx
+                RECIP_BODY                      ; E = M8, D = S
+                pop     hl                      ; tvx
+                ex      (sp),hl                 ; HL = the record, tvx down
+                inc     l
+                ld      (hl),e                  ; M8
+                inc     l
+                ld      (hl),d                  ; S
+                ex      (sp),hl                 ; HL = tvx, the S slot down
+                call    project_x               ; HL = the column
+                ex      de,hl
+                pop     hl                      ; the S slot
+                inc     l
+                ld      (hl),e                  ; sx
+                inc     l
+                ld      (hl),d
+                res     2,l                     ; the record again
+                ret
+
+; vx_fetch : HL = a vertex's VRR record -> DE = tvx, HL = tvy from the
+; rotated cache (valid: the angle stamp matched) plus the viewer's term
+vx_fetch:
+                inc     l
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)                  ; DE = rx
+                inc     l
+                ld      c,(hl)
+                inc     l
+                ld      h,(hl)
+                ld      l,c                     ; HL = ry
+vx_have:
+vxh_rx:         ld      bc,0                    ; + the viewer's term (SMC:
+                ex      de,hl                   ;  vs_rx/vs_ry, view_setup)
+                add     hl,bc
+                ex      de,hl                   ; DE = tvx
+vxh_ry:         ld      bc,0
+                add     hl,bc                   ; HL = tvy
+                ret
+
+; vg_rotate_rel : HL = a vertex's VRR record -> DE = rx, HL = ry (s16
+; counts, before the viewer's term): the BBC port's rot_w_pages through the
+; per-angle product tables (bank 3), paged in and the caller's bank put
+; back.  The offsets and page pair are the record's static bytes, so the
+; geometry bank need not be in.  Eats A, BC, IY.
+vg_rotate_rel:
+                ld      a,l
+                or      VRR_OX
+                ld      l,a
+                ld      e,(hl)                  ; ox (7 bits)
+                inc     l
+                ld      d,(hl)                  ; oy
+                inc     l
+                ld      a,(hl)                  ; the page pair (6 bits)
+                add     a,a
+                add     a,a
+                ld      iyl,a                   ; * 4: PB's index
+vgr_pp:         ld      a,0                     ; the product tables (bank 3;
+                out     (PORT_7FFD & 255),a     ;  SMC: prod_port)
+                push    de                      ; (oy, ox) for the y axis
+                ; --- x ---
+                ld      a,e
+                add     a,a
+                ld      l,a
+vgx_ts:         ld      h,0                     ; SMC: the |sin| table's page
+                ld      c,(hl)
+                inc     l
+                ld      b,(hl)                  ; BC = ox * |sin|
+                ld      a,d
+                add     a,a
+                ld      l,a
+vgx_tc:         ld      h,0                     ; SMC: the |cos| table's page
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)                  ; DE = oy * |cos|
                 ld      hl,4
                 xor     a
 vgx1:           add     hl,bc                   ; [+|-] ox*|s|   (patched, 5 bytes)
@@ -365,47 +646,39 @@ vgx1:           add     hl,bc                   ; [+|-] ox*|s|   (patched, 5 byt
 vgx2:           or      a                       ; [-|+] oy*|c|
                 sbc     hl,de
                 sbc     a,0
-                sra     a
+                ; the sum is 17 bits (7-bit offsets: |P| < 32768), so A is 0,
+                ; 1 or -1 and its bit 0 IS bit 16: one rotate injects it and
+                ; the rest is a 16-bit arithmetic shift (S >> 1 fits s16)
+                rra
                 rr      h
                 rr      l
-                sra     a
-                rr      h
+                sra     h
                 rr      l
-                sra     a
-                rr      h
+                sra     h
                 rr      l                       ; floor(S / 8)
                 ld      a,iyl
-                add     a,PBX & 255
                 ld      e,a
-                ld      d,PBX >> 8
+                ld      d,PB >> 8
                 ld      a,(de)
                 inc     e
                 ld      c,a
                 ld      a,(de)
                 ld      b,a
-                add     hl,bc                   ; + the page term
-                ld      de,(vs_rx)
-                add     hl,de                   ; HL = tvx
-                ld      (ix+VC_TVX),l
-                ld      (ix+VC_TVX+1),h
-                ex      (sp),hl                 ; tvx down, (oy, ox) up
+                add     hl,bc                   ; + the page term: HL = rx
+                ex      (sp),hl                 ; rx down, (oy, ox) up
                 ; --- y ---
                 ld      c,l                     ; ox
                 ld      a,h                     ; oy
                 add     a,a
                 ld      l,a
-                ld      a,TS_TAB>>8
-                adc     a,0
-                ld      h,a
+vgy_ts:         ld      h,0                     ; SMC: |sin|
                 ld      e,(hl)
                 inc     l
                 ld      d,(hl)                  ; DE = oy * |sin|
                 ld      a,c
                 add     a,a
                 ld      l,a
-                ld      a,TC_TAB>>8
-                adc     a,0
-                ld      h,a
+vgy_tc:         ld      h,0                     ; SMC: |cos|
                 ld      c,(hl)
                 inc     l
                 ld      b,(hl)                  ; BC = ox * |cos|
@@ -419,59 +692,111 @@ vgy2:           add     hl,de                   ; [+|-] oy*|s|
                 adc     a,0
                 nop
                 nop
-                sra     a
+                rra                             ; (as the x axis)
                 rr      h
                 rr      l
-                sra     a
-                rr      h
+                sra     h
                 rr      l
-                sra     a
-                rr      h
+                sra     h
                 rr      l
                 ld      a,iyl
-                add     a,PBY & 255
+                add     a,2
                 ld      e,a
-                ld      d,PBY >> 8
+                ld      d,PB >> 8
                 ld      a,(de)
                 inc     e
                 ld      c,a
                 ld      a,(de)
                 ld      b,a
-                add     hl,bc
-                ld      de,(vs_ry)
-                add     hl,de                   ; HL = tvy
-                ld      (ix+VC_TVY),l
-                ld      (ix+VC_TVY+1),h
-vg_project:
-                ; HL = tvy, (sp) = tvx: project when in front of the near
-                ; plane, keeping the reciprocal with the column
-                bit     7,h
-                jr      nz,vg_behind
-                ld      a,h
-                or      a
-                jr      nz,vg_front
+                add     hl,bc                   ; HL = ry
+                pop     de                      ; DE = rx
+                ld      a,(cur_port)            ; the caller's bank back
+                out     (PORT_7FFD & 255),a
+                ret
+
+; ---------------------------------------------------------------------------
+; The cardinal twins (BBC rwp_card_su / rwp_card_cu): at a cardinal angle one
+; trig is unity and the other zero, so each axis is PB +- (offset << 5)
+; exactly (floor((4 +- 256*o) / 8) = +-32*o) and the product tables are not
+; consulted: no paging.  vs_rebuild_b4 points vx_rot / ob_rot at the twin
+; for the epoch and patches the four sign sites (CARD_AXIS: `jr` = add,
+; `xor a / sub l` = subtract).
+;   su (sin unity):  rx = PBX +-s ox<<5,  ry = PBY +-s oy<<5
+;   cu (cos unity):  rx = PBX -+c oy<<5,  ry = PBY +-c ox<<5
+; rc_su / rc_cu : E = ox, D = oy, C = the PB index -> DE = rx, HL = ry
+; ---------------------------------------------------------------------------
+                MACRO   CARD_AXIS site          ; A = the offset -> HL = PB[BC] +- A << 5
+                rrca
+                rrca
+                rrca
+                ld      l,a
+                and     $1F
+                ld      h,a
                 ld      a,l
-                cp      NEAR_VERDICT
-                jr      nc,vg_front
-vg_behind:
-                pop     hl
-                xor     a
-                ld      (ix+VC_SX),a
-                ld      (ix+VC_SX+1),a
-                push    ix
-                pop     hl
+                and     $E0
+                ld      l,a                     ; HL = the offset << 5
+site:           jr      .add                    ; SMC: `xor a / sub l` negates
+                ld      l,a
+                sbc     a,a
+                sub     h
+                ld      h,a
+.add:           ld      a,(bc)
+                add     a,l
+                ld      l,a
+                inc     c
+                ld      a,(bc)
+                adc     a,h
+                ld      h,a
+                ENDM
+vg_rot_su:      ld      a,l
+                or      VRR_OX
+                ld      l,a
+                ld      e,(hl)                  ; ox
+                inc     l
+                ld      d,(hl)                  ; oy
+                inc     l
+                ld      a,(hl)                  ; the page pair
+                add     a,a
+                add     a,a
+                ld      c,a
+rc_su:          ld      b,PB>>8
+                ld      a,e
+                CARD_AXIS vsu_xs                ; HL = rx
+                inc     c                       ; -> PBY
+                ld      a,d
+                ex      de,hl                   ; DE = rx
+                CARD_AXIS vsu_ys                ; HL = ry
                 ret
-vg_front:
-                call    recip
-                ld      (ix+VC_M8),e
-                ld      (ix+VC_S),d
-                pop     hl
-                call    project_x
-                ld      (ix+VC_SX),l
-                ld      (ix+VC_SX+1),h
-                push    ix
-                pop     hl
+vg_rot_cu:      ld      a,l
+                or      VRR_OX
+                ld      l,a
+                ld      e,(hl)                  ; ox
+                inc     l
+                ld      d,(hl)                  ; oy
+                inc     l
+                ld      a,(hl)
+                add     a,a
+                add     a,a
+                ld      c,a
+rc_cu:          ld      b,PB>>8
+                ld      a,d                     ; x from oy
+                CARD_AXIS vcu_xs
+                inc     c                       ; -> PBY
+                ld      a,e                     ; y from ox
+                ex      de,hl                   ; DE = rx
+                CARD_AXIS vcu_ys                ; HL = ry
                 ret
+; the objects' twins: obj_rot's interface (E = ox, D = oy, IYL = the index),
+; the viewer's term added as vx_have does
+ob_rot_su:      ld      a,iyl
+                ld      c,a
+                call    rc_su
+                jp      vx_have
+ob_rot_cu:      ld      a,iyl
+                ld      c,a
+                call    rc_cu
+                jp      vx_have
+
 
 ; ---------------------------------------------------------------------------
 ; render_seg : HL = seg index.
@@ -479,6 +804,7 @@ vg_front:
 render_seg:     ; IX -> the seg record
                 ld      a,(ix+SG_FLAGS)
                 ld      (sg_flags),a
+                ld      c,a
 
                 ; --- back face -----------------------------------------
                 ; The reference's verdict is the sign of
@@ -492,22 +818,43 @@ render_seg:     ; IX -> the seg record
                 ; fractions can still turn it (the BBC port's DBOUND gate).
                 and     SF_LDX0
                 jp      nz,rs_bf_x0
-                ld      a,(sg_flags)
+                ld      a,c
                 and     SF_LDY0
                 jp      nz,rs_bf_y0
                 ld      e,(ix+SG_LX)
                 ld      d,(ix+SG_LX+1)
-                ld      hl,(pl_x)
+bfx1:           ld      hl,0                    ; SMC: pl_x (view_setup)
                 or      a
                 sbc     hl,de
                 ld      (pos_dx),hl             ; px - lx
                 ld      e,(ix+SG_LY)
                 ld      d,(ix+SG_LY+1)
-                ld      hl,(pl_y)
+bfy1:           ld      hl,0                    ; SMC: pl_y
                 or      a
                 sbc     hl,de                   ; py - ly
-                ex      de,hl
-                ld      a,(ix+SG_LDX)
+                ex      de,hl                   ; DE = dy
+                ; --- the sign shortcut (the BBC port's bf_g_both): dx and dy
+                ; both nonzero with P1 = ldy*dx and P2 = ldx*dy of opposite
+                ; signs means D = P1 - P2 has P1's sign and |D| = |P1| + |P2|
+                ; >= |ldx| + |ldy|, outside the band: no product ---
+                ld      a,d
+                or      e
+                jr      z,bf_prod
+                ld      hl,(pos_dx)
+                ld      a,h
+                or      l
+                jr      z,bf_prod
+                ld      a,h
+                xor     (ix+SG_LDY)             ; b7 = sign(P1)
+                ld      c,a
+                ld      a,d
+                xor     (ix+SG_LDX)             ; b7 = sign(P2)
+                xor     c
+                jp      p,bf_prod               ; the same sign: the products
+                bit     7,c
+                ret     nz                      ; P1 < 0: D < 0, behind
+                jp      rs_visible
+bf_prod:        ld      a,(ix+SG_LDX)
                 call    mul_s16_u8_signed       ; A:HL = ldx * dy
                 ld      (pos_l+2),a             ; the multiply eats BC
                 push    hl
@@ -605,7 +952,7 @@ rs_bf_x0:
                 ; unless it is zero, then the fractions, then the tie rule
                 ld      e,(ix+SG_LX)
                 ld      d,(ix+SG_LX+1)
-                ld      hl,(pl_x)
+bfx2:           ld      hl,0                    ; SMC: pl_x
                 or      a
                 sbc     hl,de
                 ld      a,h
@@ -629,7 +976,7 @@ rs_bf_y0:
                 ; dot = -ldx * (py88 - ly88)
                 ld      e,(ix+SG_LY)
                 ld      d,(ix+SG_LY+1)
-                ld      hl,(pl_y)
+bfy2:           ld      hl,0                    ; SMC: pl_y
                 or      a
                 sbc     hl,de
                 ld      a,h
@@ -650,97 +997,110 @@ by_tie:         bit     7,(ix+SG_LDX)           ; culled when ldx > 0
                 jr      nz,rs_visible
                 ret
 rs_visible:
-                ld      hl,frame_segs
-                inc     (hl)
-                ; the four heights, contiguous in the record
-                push    ix
-                pop     hl
-                ld      de,SG_FH
-                add     hl,de
-                ld      de,sg_fh
-                ldi
-                ldi
-                ldi
-                ldi
+                ; the vertex indices, as their stamp addresses (H = the
+                ; VXCACHE stamp page | the index's bit 8): VGETP probes them
+                ; as they are, and every plane hangs off them
+                ; the vertices, as their VXR records (H = the page, L = the
+                ; low byte of v*8, both straight from the seg record): VGETP
+                ; probes them as they are, and every field is `inc l` on
                 ld      a,(ix+SG_VHI)
                 ld      c,a
-                and     1
-                ld      h,a
-                ld      l,(ix+SG_V1)
-                ld      (sg_v1),hl
-                ld      a,c
                 rrca
-                and     1
+                rrca
+                rrca
+                rrca
+                and     $0F
+                add     a,VXR>>8
                 ld      h,a
                 ld      l,(ix+SG_V2)
                 ld      (sg_v2),hl
                 push    hl
-                ld      hl,(sg_v1)
-                call    vertex_get              ; HL = v1's record
-                ex      (sp),hl                 ; v1's record down, v2's index up
-                call    vertex_get
-                pop     ix                      ; IX = v1's record
-                push    hl
-                pop     iy                      ; IY = v2's
-
-                ; near-plane verdicts: tvy < NEAR_VERDICT, signed
-                ld      a,(ix+VC_TVY+1)
-                or      a
-                jp      m,rs_n1y
-                jr      nz,rs_n1n
-                ld      a,(ix+VC_TVY)
-                cp      NEAR_VERDICT
-                jr      nc,rs_n1n
-rs_n1y:         ld      c,1
-                jr      rs_n2
-rs_n1n:         ld      c,0
-rs_n2:          ld      a,(iy+VC_TVY+1)
-                or      a
-                jp      m,rs_n2y
-                jr      nz,rs_n2n
-                ld      a,(iy+VC_TVY)
-                cp      NEAR_VERDICT
-                jr      nc,rs_n2n
-rs_n2y:         ld      b,1
-                jr      rs_nd
-rs_n2n:         ld      b,0
+                ld      a,c
+                and     $0F
+                add     a,VXR>>8
+                ld      h,a
+                ld      l,(ix+SG_V1)
+                ld      (sg_v1),hl
+                ; v1 = the previous seg's v2?  Its (M8, S, sx) stand in
+                ; sg_m2/sg_sx2 (the BBC port's v1/v2 chain): take them as
+                ; v1's, no probe, no copy from the record
+                ld      a,(ch_v2)
+                cp      l
+                jr      nz,rs_v1get
+                ld      a,(ch_v2+1)
+                cp      h
+                jr      nz,rs_v1get
+                ld      hl,(sg_m2)
+                ld      (sg_m1),hl
+                ld      hl,(sg_sx2)
+                ld      (sg_sx1),hl
+                pop     hl                      ; v2's record
+                ld      (ch_v2),hl              ; (its copy follows at once)
+                VGETP   vcs1
+                inc     l
+                ld      de,sg_m2                ; (M8, S, sx lo, sx hi): one run
+                ldi
+                ldi
+                ldi
+                ldi
+                jr      rs_verdicts
+rs_v1get:       VGETP   vcs2                    ; HL = v1's record
+                ex      (sp),hl                 ; v1's record down, v2's up
+                ld      (ch_v2),hl              ; v2's copy follows at once
+                VGETP   vcs3                    ; HL = v2's record
+                inc     l
+                ld      de,sg_m2
+                ldi
+                ldi
+                ldi
+                ldi
+                pop     hl                      ; v1's record
+                inc     l
+                ld      de,sg_m1
+                ldi
+                ldi
+                ldi
+                ldi
+rs_verdicts:
+                ; near-plane verdicts: vg_project left S = 0 on a vertex
+                ; behind the near plane (a live reciprocal's S is never 0)
+                ld      a,(sg_s1)
+                sub     1
+                sbc     a,a
+                ld      c,a                     ; C = v1 behind ($FF)
+                ld      a,(sg_s2)
+                sub     1
+                sbc     a,a
+                ld      b,a                     ; B = v2 behind
 rs_nd:          ld      (sg_n1),bc              ; C = v1's verdict, B = v2's
                 ld      a,b
                 and     c
                 ret     nz                      ; both behind the near plane
                 ld      a,b
                 or      c
-                jr      nz,rs_clipx             ; a crossing needs the view coords
-rs_front:
+                jr      z,rs_havex              ; both in front: the copies stand
+rs_clipx:
+                ; a crossing needs the view coordinates: from the rotated
+                ; cache (both vertices were probed this frame)
+                push    bc
+                ld      hl,(sg_v1)
+                ld      a,h
+                sub     VRR_TO_VXR
+                ld      h,a                     ; its VRR record
+                call    vx_fetch
+                ld      (cr_vx1),de
+                ld      (cr_vy1),hl
+                ld      hl,(sg_v2)
+                ld      a,h
+                sub     VRR_TO_VXR
+                ld      h,a
+                call    vx_fetch
+                ld      (cr_vx2),de
+                ld      (cr_vy2),hl
+                pop     bc
                 ld      a,c
                 or      a
-                jr      nz,rs_clip1
-                ld      a,b
-                or      a
-                jr      nz,rs_clip2
-                ; both in front: the cached columns and reciprocals
-                ld      e,(ix+VC_M8)
-                ld      d,(ix+VC_S)
-                ld      (sg_m1),de
-                ld      l,(ix+VC_SX)
-                ld      h,(ix+VC_SX+1)
-                ld      (sg_sx1),hl
-                jr      rs_do2
-rs_clipx:
-                ; the view coordinates, from the entries
-                ld      l,(ix+VC_TVX)
-                ld      h,(ix+VC_TVX+1)
-                ld      (cr_vx1),hl
-                ld      l,(ix+VC_TVY)
-                ld      h,(ix+VC_TVY+1)
-                ld      (cr_vy1),hl
-                ld      l,(iy+VC_TVX)
-                ld      h,(iy+VC_TVX+1)
-                ld      (cr_vx2),hl
-                ld      l,(iy+VC_TVY)
-                ld      h,(iy+VC_TVY+1)
-                ld      (cr_vy2),hl
-                jr      rs_front
+                jr      z,rs_clip2
 rs_clip1:
                 ; v1 is behind: cross toward v2
                 call    near_cross_seg1
@@ -751,22 +1111,9 @@ rs_clip1:
                 ld      hl,(bb_cx)
                 call    project_x
                 ld      (sg_sx1),hl
-rs_do2:
-                ld      e,(iy+VC_M8)
-                ld      d,(iy+VC_S)
-                ld      (sg_m2),de
-                ld      l,(iy+VC_SX)
-                ld      h,(iy+VC_SX+1)
-                ld      (sg_sx2),hl
                 jr      rs_havex
 rs_clip2:
                 ; v2 is behind: cross toward v1
-                ld      e,(ix+VC_M8)
-                ld      d,(ix+VC_S)
-                ld      (sg_m1),de
-                ld      l,(ix+VC_SX)
-                ld      h,(ix+VC_SX+1)
-                ld      (sg_sx1),hl
                 call    near_cross_seg2
                 ret     nc
                 ld      hl,NEAR_CROSS
@@ -775,6 +1122,8 @@ rs_clip2:
                 ld      hl,(bb_cx)
                 call    project_x
                 ld      (sg_sx2),hl
+                ld      hl,$ffff                ; not the vertex's own: no chain
+                ld      (ch_v2),hl
 rs_havex:
                 ; a reversed or tied projection covers no columns: dropped
                 ld      hl,(sg_sx2)
@@ -836,10 +1185,32 @@ near_cross_seg2:
 ; apply the occlusion update it implies.
 ; ---------------------------------------------------------------------------
 render_seg_body:
+                push    ix                      ; the seg loop's record and count
+                push    iy
+                call    rsb_body
+                pop     iy
+                pop     ix
+                ret
+rsb_body:
+                ; the four heights, contiguous in the record (16-aligned: the
+                ; field offset never carries), copied only for a seg that
+                ; reaches the body (the culled half never read them)
+                ld      a,ixl
+                add     a,SG_FH
+                ld      l,a
+                ld      a,ixh
+                ld      h,a
+                ld      de,sg_fh
+                ldi
+                ldi
+                ldi
+                ldi
                 ; Four segs in five share v1 with the previous seg's v2, and
                 ; the front sector is the same right across a subsector, so
                 ; that seg's projected pair is this one's - no reciprocal, no
                 ; multiply, two loads.
+                xor     a
+                ld      (ch_hit),a
                 ld      a,(sg_n1)
                 or      a
                 jr      nz,rsb_p1
@@ -848,55 +1219,60 @@ render_seg_body:
                 or      a
                 sbc     hl,de
                 jr      nz,rsb_p1
-                ld      hl,(ch_ft)
+                ld      hl,(sg_ft2)             ; (still the previous seg's)
                 ld      (sg_ft1),hl
-                ld      hl,(ch_fb)
+                ld      hl,(sg_fb2)
                 ld      (sg_fb1),hl
+                ld      a,1                     ; (and its vertical spans went
+                ld      (ch_hit),a              ;  out with that seg)
                 jr      rsb_p2
 rsb_p1:
                 ld      de,(sg_m1)
                 ld      a,(sg_ch)
-                ld      hl,vs_vz
-                sub     (hl)
-                call    project_y
+                PY_INLINE pyv1
                 ld      (sg_ft1),hl
-                ld      de,(sg_m1)
-                ld      a,(sg_fh)
-                ld      hl,vs_vz
-                sub     (hl)
-                call    project_y
+                ld      a,(sg_fh)               ; DE = sg_m1 still (project_y keeps DE)
+                PY_INLINE pyv2
                 ld      (sg_fb1),hl
 rsb_p2:
+                ; a portal's back pair at v1 comes before v2's front pair (the
+                ; BBC port's ysb order: the project_y cache sees the same
+                ; sequence, so it holds the same entries)
+                ld      a,(sg_flags)
+                and     SF_SOLID
+                jr      nz,rsb_p2f
+                ld      a,(sg_flags)
+                and     SF_NEEDBT
+                jr      z,rsb_p2bb
+                ld      de,(sg_m1)
+                ld      a,(sg_bch)
+                PY_INLINE pyv3
+                ld      (sg_bt1),hl
+rsb_p2bb:       ld      a,(sg_flags)
+                and     SF_NEEDBB
+                jr      z,rsb_p2f
+                ld      de,(sg_m1)
+                ld      a,(sg_bfh)
+                PY_INLINE pyv4
+                ld      (sg_bb1),hl
+rsb_p2f:
                 ld      de,(sg_m2)
                 ld      a,(sg_ch)
-                ld      hl,vs_vz
-                sub     (hl)
-                call    project_y
+                PY_INLINE pyv5
                 ld      (sg_ft2),hl
-                ld      de,(sg_m2)
-                ld      a,(sg_fh)
-                ld      hl,vs_vz
-                sub     (hl)
-                call    project_y
+                ld      a,(sg_fh)               ; DE = sg_m2 still (project_y keeps DE)
+                PY_INLINE pyv6
                 ld      (sg_fb2),hl
-                ld      hl,$ffff                ; hand the pair to the next seg
-                ld      (ch_vtx),hl
-                ld      a,(sg_n2)
-                or      a
-                jr      nz,rsb_p3
+                ld      a,(sg_n2)               ; hand the pair to the next seg
+                or      a                       ; (it reads sg_ft2/sg_fb2 as
+                ld      hl,$ffff                ;  they stand)
+                jr      nz,rsb_p3n
                 ld      hl,(sg_v2)
-                ld      (ch_vtx),hl
-                ld      hl,(sg_ft2)
-                ld      (ch_ft),hl
-                ld      hl,(sg_fb2)
-                ld      (ch_fb),hl
+rsb_p3n:        ld      (ch_vtx),hl
 rsb_p3:
                 ; the heights the vertex-span descriptors read: the back
                 ; pair of a solid seg is aliased to the front by the pack
-                ld      hl,(sg_fh)              ; fh, ch
-                ld      (vs_h),hl
-                ld      hl,(sg_bfh)             ; bfh, bch
-                ld      (vs_h+2),hl
+                ; (vs_h aliases sg_fh..sg_bch: nothing to copy)
                 ; --- the eyeline rule: a ceiling at or below the eye kills
                 ; the top edges ($80), a floor at or above it the bottom
                 ; edges ($40); the top kill wins.  Byte subtractions, as
@@ -922,32 +1298,16 @@ rsb_esk:        ld      (sg_eskip),a
                 ld      a,(sg_flags)
                 and     SF_NEEDBT
                 jr      z,rsb_nbt
-                ld      de,(sg_m1)
+                ld      de,(sg_m2)              ; (v1's back pair went with v1)
                 ld      a,(sg_bch)
-                ld      hl,vs_vz
-                sub     (hl)
-                call    project_y
-                ld      (sg_bt1),hl
-                ld      de,(sg_m2)
-                ld      a,(sg_bch)
-                ld      hl,vs_vz
-                sub     (hl)
-                call    project_y
+                PY_INLINE pyv7
                 ld      (sg_bt2),hl
 rsb_nbt:        ld      a,(sg_flags)
                 and     SF_NEEDBB
                 jr      z,rsb_nbb
-                ld      de,(sg_m1)
-                ld      a,(sg_bfh)
-                ld      hl,vs_vz
-                sub     (hl)
-                call    project_y
-                ld      (sg_bb1),hl
                 ld      de,(sg_m2)
                 ld      a,(sg_bfh)
-                ld      hl,vs_vz
-                sub     (hl)
-                call    project_y
+                PY_INLINE pyv8
                 ld      (sg_bb2),hl
 rsb_nbb:
                 ; the companions: the front edges beside a step, plain draws
@@ -1024,7 +1384,46 @@ rsb_solid:
                 ld      a,(sg_eskip)
                 or      a
                 jr      nz,sc_esk
-                ld      hl,sg_ft1
+                ; --- the BBC port's dcl_solid_pair: with the six senior bytes
+                ; clear and the columns apart, the top and bottom lines share
+                ; xl/xr and ONE span seek (the bottom resumes at the top's
+                ; first span, dcl_pair2); otherwise the classic two lines ---
+                ld      hl,sg_ft1+1
+                ld      a,(hl)
+                inc     hl
+                inc     hl
+                or      (hl)                    ; fb1
+                inc     hl
+                inc     hl
+                or      (hl)                    ; ft2
+                inc     hl
+                inc     hl
+                or      (hl)                    ; fb2
+                ld      hl,sg_sx1+1
+                or      (hl)
+                ld      hl,sg_sx2+1
+                or      (hl)
+                jr      nz,sc_classic
+                ld      a,(sg_sx1)
+                ld      hl,sg_sx2
+                cp      (hl)
+                jr      z,sc_classic            ; one column: the vertical path
+                ld      (lc_x1),a
+                ld      a,(hl)
+                ld      (lc_x2),a
+                ld      a,(sg_ft1)
+                ld      (lc_y1),a
+                ld      a,(sg_ft2)
+                ld      (lc_y2),a
+                call    dcl_pair2               ; the top, from sp_hasgap's memo
+                ld      a,(sg_fb1)
+                ld      (lc_y1),a
+                ld      a,(sg_fb2)
+                ld      (lc_y2),a
+                call    dcl_pair2               ; the bottom, from the memo
+                call    rsb_vspans
+                jp      sp_marksolid_memo       ; from the memo too
+sc_classic:     ld      hl,sg_ft1
                 call    rsb_line
 sc_fb:          ld      hl,sg_fb1
                 call    rsb_line
@@ -1056,7 +1455,24 @@ cs8_ge:         or      a
 ; sx1 to sx2 through the clipper
 rsb_line:
                 call    rsb_stage
-                jp      dcl_s16
+                ; u8-clean and not a vertical: the seek is sp_hasgap's memo
+                ld      a,(lc_x1+1)
+                ld      hl,lc_y1+1
+                or      (hl)
+                ld      hl,lc_x2+1
+                or      (hl)
+                ld      hl,lc_y2+1
+                or      (hl)
+                jp      nz,dcl16_main
+                ld      a,(lc_x1)
+                ld      hl,lc_x2
+                cp      (hl)
+                jp      nz,dcl_pair2
+                ld      a,(lc_y1)
+                ld      hl,lc_y2
+                cp      (hl)
+                ret     z                       ; a point
+                jp      draw_clipped_line       ; a vertical
 ; rsb_fused : the same line as an aperture edge, A = the side
 rsb_fused:
                 push    af
@@ -1089,76 +1505,90 @@ rsb_stage:                                      ; (the rows are biased already)
 ; screen still uses it up.
 ; ---------------------------------------------------------------------------
 rsb_vspans:
+                ld      a,(ch_hit)              ; a chained v1 was done as the
+                or      a                       ;  previous seg's v2
+                jr      nz,rsb_vs2
                 ld      hl,(sg_v1)
                 ld      de,(sg_sx1)
                 ld      bc,(sg_m1)
                 ld      a,(sg_n1)
                 call    vspan_emit
-                ld      hl,(sg_v2)
+rsb_vs2:        ld      hl,(sg_v2)
                 ld      de,(sg_sx2)
                 ld      bc,(sg_m2)
                 ld      a,(sg_n2)
-                jp      vspan_emit
+                jp      vspan_emit2
 
-; vspan_emit : HL = the vertex, DE = its column (s16), BC = (S, M8), A = 1
-; when near-clipped
-vspan_emit:
-                ld      (vs_sx),de
-                ld      (vs_ms),bc
-                ld      c,a
-                ; done this frame?
-                ld      de,VDONE
-                add     hl,de
-                ld      a,(vd_stamp)
+; vspan_emit / vspan_emit2 : HL = the vertex's VXR record, DE = its column
+; (s16), BC = (S, M8), A = 1 when near-clipped; the seg's projected rows at
+; this endpoint are read by address (VSPAN_ENTRY: ft; fb +2, bt +8, bb +10)
+                MACRO   VSPAN_ENTRY name, ft, stamp
+name:
+                ex      af,af'                  ; the near-clipped flag rides A'
+                ld      a,l
+                or      VXR_DONE
+                ld      l,a                     ; -> the vertex-span stamp
+                ; done this frame?  (before any staging)
+stamp:          ld      a,0                     ; SMC: vd_stamp (render_frame)
                 cp      (hl)
                 ret     z                       ; already
                 ld      (hl),a
-                ld      de,VSDESC-VDONE
-                add     hl,de
+                ex      af,af'
+                or      a
+                ret     nz                      ; near-clipped
+                ld      a,d
+                or      a
+                ret     nz                      ; off the screen either side
+                inc     l
                 ld      a,(hl)                  ; the descriptor
                 or      a
                 ret     z
-                ld      b,a
-                ld      a,c
-                or      a
-                ret     nz                      ; near-clipped
-                ld      a,(vs_sx+1)
-                or      a
-                ret     nz                      ; off the screen either side
-                ld      a,b
                 bit     7,a
-                jr      nz,ve_explicit
-                ; a code: 1 (fh, ch)  2 (fh, bfh)  3 (bch, ch)  4 both of 2 and 3
+                jp      nz,ve_explicit
+                ; a code: 1 (fh, ch)  2 (fh, bfh)  3 (bch, ch)  4 both of 2 and
+                ; 3.  The rows are the seg's own at this endpoint (the BBC
+                ; port's vsx_c1/c2/c3): nothing is projected, and a back pair
+                ; the seg lacks is nothing
+                ld      c,e                     ; C = the column
                 cp      4
-                jr      z,ve_c4
+                jr      z,.c4
                 cp      3
-                jr      z,ve_c3
+                jr      z,.c3
                 cp      2
-                jr      z,ve_c2
-                ld      a,(vs_h)                ; fh
-                ld      (vs_lo),a
-                ld      a,(vs_h+1)              ; ch
-                ld      (vs_hi),a
-                jp      ve_pair
-ve_c2:          ld      a,(vs_h)
-                ld      (vs_lo),a
-                ld      a,(vs_h+2)              ; bfh
-                ld      (vs_hi),a
-                jp      ve_pair
-ve_c3:          ld      a,(vs_h+3)              ; bch
-                ld      (vs_lo),a
-                ld      a,(vs_h+1)
-                ld      (vs_hi),a
-                jp      ve_pair
-ve_c4:          ld      a,(vs_h+3)
-                ld      (vs_lo),a
-                ld      a,(vs_h+1)
-                ld      (vs_hi),a
-                call    ve_pair
-                jr      ve_c2
-ve_done:        pop     hl
-                ret
+                jr      z,.c2
+                ld      hl,(ft)                 ; ft (ch)
+                ld      (lc_y1),hl
+                ld      hl,(ft+2)               ; fb (fh)
+.emit:          ld      (lc_y2),hl
+                ld      a,c
+                jp      dcl_vert_on
+.c2:            ld      a,(sg_flags)
+                and     SF_NEEDBB
+                ret     z
+                ld      hl,(ft+10)              ; bb (bfh)
+                ld      (lc_y1),hl
+                ld      hl,(ft+2)               ; fb (fh)
+                jr      .emit
+.c3:            ld      a,(sg_flags)
+                and     SF_NEEDBT
+                ret     z
+                ld      hl,(ft)                 ; ft (ch)
+                ld      (lc_y1),hl
+                ld      hl,(ft+8)               ; bt (bch)
+                jr      .emit
+.c4:            ld      a,(sg_flags)
+                and     SF_NEEDBT
+                jr      z,.c2
+                push    bc
+                call    .c3
+                pop     bc
+                jr      .c2
+                ENDM
+                VSPAN_ENTRY vspan_emit, sg_ft1, vsd1
+                VSPAN_ENTRY vspan_emit2, sg_ft2, vsd2
 ve_explicit:
+                ld      (vs_sx),de              ; (the explicit path projects)
+                ld      (vs_ms),bc
                 and     $7f
                 ld      (vs_i),a
 ve_el:
@@ -1183,7 +1613,7 @@ ve_el:
                 ld      a,c
                 jr      nc,ve_lo1
                 ld      a,e
-ve_lo1:         ld      (vs_lo),a
+ve_lo1:         ld      ixl,a                   ; c_lo rides IXL
                 inc     hl
                 ld      a,(vs_h+1)
                 ld      e,a                     ; E = ch
@@ -1196,10 +1626,12 @@ ve_lo1:         ld      (vs_lo),a
                 ld      a,c
                 jr      c,ve_hi1
                 ld      a,e
-ve_hi1:         ld      (vs_hi),a
+ve_hi1:         ld      b,a                     ; B = c_hi
                 inc     hl
                 ld      a,(hl)                  ; cont
                 push    af
+                ld      a,ixl
+                ld      c,a                     ; C = c_lo
                 call    ve_pair
                 pop     af
                 or      a
@@ -1208,25 +1640,24 @@ ve_hi1:         ld      (vs_hi),a
                 inc     (hl)
                 jr      ve_el
 
-; ve_pair : the vertical from height vs_hi down to vs_lo at vs_sx, when
-; hi > lo
+; ve_pair : the vertical from height B down to C at vs_sx, when hi > lo
 ve_pair:
-                ld      a,(vs_hi)
-                ld      hl,vs_lo
-                call    cmp_s8
-                ret     c
+                ld      a,b                     ; nothing when hi <= lo (signed
+                sub     c                       ; bytes: cmp_s8's rule, inline)
                 ret     z
+                jp      pe,vp_ovf
+                ret     m
+                jr      vp_go
+vp_ovf:         ret     p                       ; overflowed: the true sign is the other
+vp_go:
                 ld      de,(vs_ms)
-                ld      a,(vs_hi)
-                ld      hl,vs_vz
-                sub     (hl)
-                call    project_y
+                ld      a,b
+                push    bc
+                call    project_y_vz
+                pop     bc
                 ld      (lc_y1),hl
-                ld      de,(vs_ms)
-                ld      a,(vs_lo)
-                ld      hl,vs_vz
-                sub     (hl)
-                call    project_y
+                ld      a,c                     ; DE = vs_ms still (project_y keeps DE)
+                call    project_y_vz
                 ld      (lc_y2),hl
                 ld      a,(vs_sx)               ; the column (on the screen)
                 jp      dcl_vert_on

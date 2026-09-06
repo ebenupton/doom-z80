@@ -4,6 +4,6 @@ START_PXF       EQU     0
 START_PY        EQU     -46
 START_PYF       EQU     0
 START_ANG       EQU     64
-BSP_ROOT        EQU     194
+BSP_ROOT        EQU     193
 MAP_CENTER_X    EQU     1200
 MAP_CENTER_Y    EQU     -3248

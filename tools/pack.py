@@ -23,7 +23,7 @@ Layout (see src/spec.inc for the matching EQUs):
     $8B00  NODEBB    195 x 8 quarter-prescale s8 bounds
 
 Seg record:
-    +0  v1_lo      +1  v2_lo      +2  vhi (bit0 = v1>>8, bit1 = v2>>8)
+    +0  (v1*8)&255 +1  (v2*8)&255 +2  vhi (v1>>5 | (v2>>5)<<4): record addressing
     +3  flags      +4  fh (s8)    +5  ch (s8)
     +6  bfh (s8)   +7  bch (s8)
     +8  lx (s16)   +10 ly (s16)   back-face reference point, prescaled 8.8:
@@ -87,9 +87,12 @@ def build(md):
     # holding each axis's page (+2, so the map's -512..511 fits two bits)
     for i, (x, y) in enumerate(zip(md.vx, md.vy)):
         assert -512 <= x < 512 and -512 <= y < 512, (i, x, y)
-        b0[O_VERTS + i] = x & 0xff
-        b0[O_VERTS + 0x200 + i] = y & 0xff
-        b0[O_VERTS + 0x400 + i] = (((x >> 8) + 2) & 3) | ((((y >> 8) + 2) & 3) << 2)
+        # 7-bit offsets and 8 pages (of 128 units) per axis: the product
+        # tables are precomputed for every quadrant magnitude in bank 3, so
+        # they hold 128 entries each (spec.inc PROD_BASE)
+        b0[O_VERTS + i] = x & 0x7f
+        b0[O_VERTS + 0x200 + i] = y & 0x7f
+        b0[O_VERTS + 0x400 + i] = (((x >> 7) + 4) & 7) | ((((y >> 7) + 4) & 7) << 3)
 
     # --- sectors ----------------------------------------------------------
     assert len(md.sec_fh) <= 85
@@ -103,9 +106,11 @@ def build(md):
         o = O_SEGS + i * SEG_STRIDE
         v1, v2 = sg["v1"], sg["v2"]
         assert v1 < 512 and v2 < 512
-        b0[o] = v1 & 0xff
-        b0[o + 1] = v2 & 0xff
-        b0[o + 2] = ((v1 >> 8) & 1) | (((v2 >> 8) & 1) << 1)
+        # the vertex ids in their record form (8-byte records, spec.inc VXR):
+        # the low byte of v*8 and the page offset v>>5, a nibble each
+        b0[o] = (v1 * 8) & 0xff
+        b0[o + 1] = (v2 * 8) & 0xff
+        b0[o + 2] = (v1 >> 5) | ((v2 >> 5) << 4)
 
         back = sg["back"]
         fh, ch = sg["fh"], sg["ch"]
@@ -154,8 +159,9 @@ def build(md):
         o = O_SSEC + i * 3
         assert cnt < 256
         b0[o] = cnt
-        b0[o + 1] = first & 0xff
-        b0[o + 2] = (first >> 8) & 0xff
+        a = 0xC000 + O_SEGS + first * SEG_STRIDE     # the first seg's RECORD address
+        b0[o + 1] = a & 0xff
+        b0[o + 2] = (a >> 8) & 0xff
 
     # --- nodes ------------------------------------------------------------
     assert len(md.nodes) <= 195
@@ -282,7 +288,11 @@ def build_objects(md):
     for i, o in enumerate(objs):
         x, y = o["x"], o["y"]
         assert i == 0 or objs[i - 1]["ss"] <= o["ss"], "planes must be ss-sorted"
-        for pl, v in enumerate((x & 0xff, (x >> 8) & 0xff, y & 0xff, (y >> 8) & 0xff,
+        assert -512 <= x < 512 and -512 <= y < 512, (i, x, y)
+        # as the vertices: 7-bit offsets and the 6-bit page pair (obj_rot
+        # rides the product tables); the fourth plane is spare
+        pg = (((x >> 7) + 4) & 7) | ((((y >> 7) + 4) & 7) << 3)
+        for pl, v in enumerate((x & 0x7f, pg, y & 0x7f, 0,
                                 o["ss"], o["asp"], o["zt"] & 0xff, o["zb"] & 0xff)):
             od[pl * n + i] = v
         od[bits + (o["ss"] >> 3)] |= 1 << (o["ss"] & 7)
@@ -304,21 +314,26 @@ def build_walkdata(md):
     written) and the node policy plane."""
     import json as _json
     dw = md._dw
-    NODES4, BBP, VATOX, L8, AE_LO, AE_HI, CPM, ND_POL, BCA_WS, END = (
-        0xD800, 0xE000, 0xF000, 0xF500, 0xF600, 0xF700, 0xF800, 0xFB00, 0xFC00, 0xFC40)
+    NODES4, BBP, VATOX, L8, AE_LO, AE_HI, CPM, BCA_WS, END = (
+        0xD800, 0xE000, 0xF000, 0xF500, 0xF600, 0xF700, 0xF800, 0xFD00, 0xFD40)
+    # the node fields as node-id-indexed PLANES (the BBC port's NODE_* layout):
+    # nx lo/hi, ny lo/hi, child0 lo/hi, child1 lo/hi at $D800.., rdx/rdy at
+    # $FB00/$FC00 (spec.inc NP_*)
+    NP = dict(NXL=0xD800, NXH=0xD900, NYL=0xDA00, NYH=0xDB00, C0L=0xDC00, C0H=0xDD00,
+              C1L=0xDE00, C1H=0xDF00, RDX=0xFB00, RDY=0xFC00)
     w = bytearray(END - NODES4)
     def at(a): return a - NODES4
+    assert len(md.nodes) <= 256
     for i, nd in enumerate(md.nodes):
-        o = at(NODES4) + i * 10
-        w[o:o + 2] = s16b(nd["x"])
-        w[o + 2:o + 4] = s16b(nd["y"])
-        w[o + 4] = s8b(nd["rdx"])
-        w[o + 5] = s8b(nd["rdy"])
-        for k in (0, 1):
+        x = s16b(nd["x"]); y = s16b(nd["y"])
+        w[at(NP["NXL"]) + i] = x[0]; w[at(NP["NXH"]) + i] = x[1]
+        w[at(NP["NYL"]) + i] = y[0]; w[at(NP["NYH"]) + i] = y[1]
+        w[at(NP["RDX"]) + i] = s8b(nd["rdx"])
+        w[at(NP["RDY"]) + i] = s8b(nd["rdy"])
+        for k, (lo, hi) in enumerate((("C0L", "C0H"), ("C1L", "C1H"))):
             c = nd["child"][k]
-            w[o + 6 + k * 2] = c & 0xff
-            w[o + 7 + k * 2] = (c >> 8) & 0xff
-    assert len(md.nodes) * 10 <= BBP - NODES4
+            w[at(NP[lo]) + i] = c & 0xff
+            w[at(NP[hi]) + i] = (c >> 8) & 0xff
     bt = bytes(dw.packed_bbox_table)
     assert len(bt) == 4096
     w[at(BBP):at(BBP) + 4096] = bt
@@ -334,8 +349,8 @@ def build_walkdata(md):
         w[at(AE_LO) + i] = ft["ATANEXP"][i] & 0xff
         w[at(AE_HI) + i] = (ft["ATANEXP"][i] >> 8) & 0xff
     assert list(ft["L8"]) == list(ref._L8[:256])
-    w[at(CPM) + 0x80:at(CPM) + 0x100] = b"\x80" * 128
-    w[at(ND_POL):at(ND_POL) + 256] = _NODE_POL
+    # (the corner-phi memo is retired - BBC b872178; its first page now holds the
+    #  walk's dynamic always-descend bits, ND_POL, and must start clear)
     # the octant compose (view.s pa_base_hi / pa_sign): base hi | sign << 7
     w[at(BCA_WS) + 0x10:at(BCA_WS) + 0x18] = bytes([0x84, 0x00, 0x0C, 0x80, 0x04, 0x88, 0x8C, 0x08])
     print(f"  walkdata:    {len(md.nodes)} nodes, 4 KB bbox planes, VATOX, L8/AE, memo, policy ({len(w)} B)")
@@ -358,16 +373,16 @@ def build_collision(md):
     segs = m["colsegs"]
     ports = m["ports"]
     n = len(segs)                 # COL_N_SOLID: idx < n -> solid, else port
-    COL_SEG, COL_PORT, COL_IDX, COL_LIST = 0xC000, 0xC700, 0xCA00, 0xCA80
+    COL_SEG, COL_PORT, COL_IDX, COL_LIST = 0xEE00, 0xF500, 0xF800, 0xF880   # (spec.inc: above the rasteriser)
     assert n * 8 <= COL_PORT - COL_SEG, "COL_SEG overran COL_PORT"
     assert len(ports) * 11 <= COL_IDX - COL_PORT, "COL_PORT overran COL_IDX"
     buf = bytearray(0x3000)
     for i, (x1, y1, dx, dy) in enumerate(segs):
-        struct.pack_into("<hhhh", buf, (COL_SEG - 0xC000) + i * 8, x1, y1, dx, dy)
+        struct.pack_into("<hhhh", buf, (COL_SEG - COL_SEG) + i * 8, x1, y1, dx, dy)
     # ports: x1,y1,dx,dy (s16) + ob,ot,mv (u8) = 11 bytes; rest-baked heights
     for i, pt in enumerate(ports):
         x1, y1, dx, dy, ob, ot, mv = pt[0], pt[1], pt[2], pt[3], pt[4], pt[5], pt[6]
-        o = (COL_PORT - 0xC000) + i * 11
+        o = (COL_PORT - COL_SEG) + i * 11
         struct.pack_into("<hhhh", buf, o, x1, y1, dx, dy)
         buf[o + 8], buf[o + 9], buf[o + 10] = ob & 0xff, ot & 0xff, mv & 0xff
     # per-column lists over the UNIFIED universe (solids then ports), exactly
@@ -377,14 +392,14 @@ def build_collision(md):
     for c in range(colmap.COLS):
         off, cnt = m["colidx"][c]
         idxs = [m["collist"][off + k] for k in range(cnt)]
-        o = (COL_IDX - 0xC000) + c * 3
+        o = (COL_IDX - COL_SEG) + c * 3
         buf[o], buf[o + 1], buf[o + 2] = cur & 0xff, (cur >> 8) & 0xff, len(idxs)
         lst.extend(idxs)
         cur += len(idxs)
-    assert cur <= 0x10000, "COL_LIST overran the bank"
+    assert cur <= 0xFA40, "COL_LIST overran COL_CODE"
     for k, idx in enumerate(lst):
-        buf[(COL_LIST - 0xC000) + k] = idx
-    end = (COL_LIST - 0xC000) + len(lst)
+        buf[(COL_LIST - COL_SEG) + k] = idx
+    end = (COL_LIST - COL_SEG) + len(lst)
     print(f"  collision:   {n} solids, {len(ports)} ports, {len(lst)} column entries ({end} B)")
     return bytes(buf[:end])
 

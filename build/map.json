@@ -1,10 +1,10 @@
 {
  "n_verts": 455,
  "n_segs": 644,
- "n_ss": 196,
- "n_nodes": 195,
+ "n_ss": 195,
+ "n_nodes": 194,
  "n_sectors": 85,
- "root": 194,
+ "root": 193,
  "bank0_used": 16317,
  "start": {
   "x": 1056.0,

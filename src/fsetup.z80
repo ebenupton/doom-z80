@@ -12,6 +12,11 @@ vs_rebuild_b4:
                 ld      (vs_sneg),a
                 ld      a,e
                 ld      (vs_sunity),a
+                call    vs_prodpg               ; the |sin| table's page ->
+                ld      (vgx_ts+1),a            ;  vertex_get's two sin sites
+                ld      (vgy_ts+1),a
+                ld      (orx_ts+1),a            ;  and obj_rot's
+                ld      (ory_ts+1),a
                 ld      a,(pl_ang)
                 add     a,64
                 call    sincos_lookup
@@ -21,6 +26,11 @@ vs_rebuild_b4:
                 ld      (vs_cneg),a
                 ld      a,e
                 ld      (vs_cunity),a
+                call    vs_prodpg
+                ld      (vgx_tc+1),a
+                ld      (vgy_tc+1),a
+                ld      (orx_tc+1),a
+                ld      (ory_tc+1),a
 
                 ; product tables
                 ; patch the rotation dispatchers
@@ -66,9 +76,7 @@ vs_ms16:        ld      (vs_m16s),de
                 ld      e,a
                 ld      d,0
 vs_mc16:        ld      (vs_m16c),de
-                xor     a
-                ld      (vs_tab_valid),a        ; the product tables are built
-                call    vs_pbtab                ; lazily on the first cold vertex
+                call    vs_pbtab                ; the page terms
                                                 ; this angle (skipped when a frame
                                                 ; transforms none - sparse views)
                 ; x: 4 [+|-] ox*|s| [-|+] oy*|c|; y: 4 [+|-] ox*|c| [+|-] oy*|s|
@@ -89,195 +97,192 @@ vs_mc16:        ld      (vs_m16c),de
                 ld      hl,vgy2
                 ld      de,$1952
                 call    vs_patch5
-                ret
-
-; vs_build_tables : the two per-angle product tables (X*|sin|, X*|cos|),
-; deferred out of vs_rebuild_b4 to the first cold vertex (vg_build_tabs).
-vs_build_tables:
-                ld      de,(vs_m16s)
-                ld      ix,TS_TAB+512
-                call    vs_ptab
-                ld      de,(vs_m16c)
-                ld      ix,TC_TAB+512
-                call    vs_ptab
-                ld      a,1
-                ld      (vs_tab_valid),a
-                ret
-
-; vs_ptab : DE = a magnitude (1..256), IX -> the end of a 256-entry table
-; of (lo, hi) products X * DE, filled top down through the stack pointer
-; (interrupts are off throughout the frame).  255 * 256 wraps to $FF00,
-; which is the right low word.
-vs_ptab:
-                ld      (vs_spsave),sp
-                ld      sp,ix
-                ld      h,e
-                ld      l,0                     ; M << 8 (mod 2^16)
+                ; obj_rot's four sites, the same
+                ld      a,(vs_sneg)
+                ld      hl,orx1
+                ld      de,$0942
+                call    vs_patch5
+                ld      a,(vs_cneg)
+                xor     1
+                ld      hl,orx2
+                ld      de,$1952
+                call    vs_patch5
+                ld      a,(vs_cneg)
+                ld      hl,ory1
+                ld      de,$0942
+                call    vs_patch5
+                ld      a,(vs_sneg)
+                ld      hl,ory2
+                ld      de,$1952
+                call    vs_patch5
+                ; the cardinal twins (bsp.z80 vg_rot_su/cu): their sign sites,
+                ; then the two call sites pointed at the epoch's body
+                ld      a,(vs_sneg)
+                ld      hl,vsu_xs
+                call    vs_patchc
+                ld      a,(vs_sneg)
+                ld      hl,vsu_ys
+                call    vs_patchc
+                ld      a,(vs_cneg)
+                xor     1
+                ld      hl,vcu_xs
+                call    vs_patchc
+                ld      a,(vs_cneg)
+                ld      hl,vcu_ys
+                call    vs_patchc
+                ld      hl,vg_rotate_rel
+                ld      de,obj_rot
+                ld      a,(vs_sunity)
                 or      a
-                sbc     hl,de                   ; HL = 255 * M
-                ld      a,e
-                cpl
-                ld      e,a
-                ld      a,d
-                cpl
-                ld      d,a
-                inc     de                      ; DE = -M
-                ld      b,32
-vpt_l:          DUP     8
-                push    hl
-                add     hl,de
-                EDUP
-                djnz    vpt_l
-                ld      sp,(vs_spsave)
+                jr      z,vs_nosu
+                ld      a,(vs_cmag)
+                or      a
+                jr      nz,vs_rotsel            ; (unity with the other live: general)
+                ld      hl,vg_rot_su
+                ld      de,ob_rot_su
+                jr      vs_rotsel
+vs_nosu:        ld      a,(vs_cunity)
+                or      a
+                jr      z,vs_rotsel
+                ld      a,(vs_smag)
+                or      a
+                jr      nz,vs_rotsel
+                ld      hl,vg_rot_cu
+                ld      de,ob_rot_cu
+vs_rotsel:      ld      (vx_rot+1),hl
+                ld      (ob_rot+1),de
                 ret
 
-; vs_pbtab : the page terms.  kx = sS * 32 * |s|, ky = sC * 32 * |c|;
-; for the nibble pg = pgx | pgy << 2 with fx = pgx - 2, fy = pgy - 2:
+; vs_patchc : A = the negative flag, HL = a CARD_AXIS sign site: `jr .add`
+; (18 04) when positive, `xor a / sub l` (AF 95) when negative
+vs_patchc:      ld      de,$0418
+                or      a
+                jr      z,vpc_ok
+                ld      de,$95AF
+vpc_ok:         ld      (hl),e
+                inc     hl
+                ld      (hl),d
+                ret
+
+; vs_prodpg : D = a quadrant index (0..64) -> A = its product table's page:
+; the zero page for 0, else bank 3's table q at PROD_BASE + (q - 1) * 256
+vs_prodpg:
+                ld      a,d
+                or      a
+                ld      a,PROD_ZERO>>8
+                ret     z
+                ld      a,d
+                add     a,(PROD_BASE>>8)-1
+                ret
+
+; vs_pbtab : the page terms.  kx = sS * 16 * |s|, ky = sC * 16 * |c| (a page
+; is 128 units, floored by 8); for the page pair pg = pgx | pgy << 3 with
+; fx = pgx - 4, fy = pgy - 4:
 ;   PBX[pg] = fx * kx - fy * ky,   PBY[pg] = fx * ky + fy * kx
+; Built through the stack pointer, pg = 63 down to 0, as two running sums:
+; along a row (pgx down) X steps by -kx and Y by -ky; between rows (pgy
+; down) X0 gains ky and Y0 loses kx.  HL/BC = X and -kx, HL'/BC' = Y and
+; -ky, DE/DE' the row fixups (8kx + ky, 8ky - kx).
 vs_pbtab:
                 ld      hl,(vs_m16s)
                 ld      a,(vs_sneg)
-                call    vs_k32
+                call    vs_k16
                 ld      (vs_kx),hl
-                ld      ix,vs_fa
-                call    vs_fmul
                 ld      hl,(vs_m16c)
                 ld      a,(vs_cneg)
-                call    vs_k32
+                call    vs_k16
                 ld      (vs_ky),hl
-                ld      ix,vs_fb
-                call    vs_fmul
-                ; PBX[pgx | pgy<<2] = FA[pgx] - FB[pgy], PBY = FB[pgx] + FA[pgy]:
-                ; unrolled, DE = -FB[pgy], BC = FA[pgy] per row (was a 600 T/entry
-                ; loop through vs_word: 9.7k T -> 1.6k)
-                ld      hl,(vs_fb+0)
-                ex      de,hl
-                ld      hl,0
-                or      a
-                sbc     hl,de
-                ex      de,hl                   ; DE = -fy * ky
-                ld      bc,(vs_fa+0)              ; BC = fy * kx
-                ld      hl,(vs_fa+0)
-                add     hl,de
-                ld      (PBX+0),hl
-                ld      hl,(vs_fb+0)
-                add     hl,bc
-                ld      (PBY+0),hl
-                ld      hl,(vs_fa+2)
-                add     hl,de
-                ld      (PBX+2),hl
-                ld      hl,(vs_fb+2)
-                add     hl,bc
-                ld      (PBY+2),hl
-                ld      hl,(vs_fa+4)
-                add     hl,de
-                ld      (PBX+4),hl
-                ld      hl,(vs_fb+4)
-                add     hl,bc
-                ld      (PBY+4),hl
-                ld      hl,(vs_fa+6)
-                add     hl,de
-                ld      (PBX+6),hl
-                ld      hl,(vs_fb+6)
-                add     hl,bc
-                ld      (PBY+6),hl
-                ld      hl,(vs_fb+2)
-                ex      de,hl
-                ld      hl,0
-                or      a
-                sbc     hl,de
-                ex      de,hl                   ; DE = -fy * ky
-                ld      bc,(vs_fa+2)              ; BC = fy * kx
-                ld      hl,(vs_fa+0)
-                add     hl,de
-                ld      (PBX+8),hl
-                ld      hl,(vs_fb+0)
-                add     hl,bc
-                ld      (PBY+8),hl
-                ld      hl,(vs_fa+2)
-                add     hl,de
-                ld      (PBX+10),hl
-                ld      hl,(vs_fb+2)
-                add     hl,bc
-                ld      (PBY+10),hl
-                ld      hl,(vs_fa+4)
-                add     hl,de
-                ld      (PBX+12),hl
-                ld      hl,(vs_fb+4)
-                add     hl,bc
-                ld      (PBY+12),hl
-                ld      hl,(vs_fa+6)
-                add     hl,de
-                ld      (PBX+14),hl
-                ld      hl,(vs_fb+6)
-                add     hl,bc
-                ld      (PBY+14),hl
-                ld      hl,(vs_fb+4)
-                ex      de,hl
-                ld      hl,0
-                or      a
-                sbc     hl,de
-                ex      de,hl                   ; DE = -fy * ky
-                ld      bc,(vs_fa+4)              ; BC = fy * kx
-                ld      hl,(vs_fa+0)
-                add     hl,de
-                ld      (PBX+16),hl
-                ld      hl,(vs_fb+0)
-                add     hl,bc
-                ld      (PBY+16),hl
-                ld      hl,(vs_fa+2)
-                add     hl,de
-                ld      (PBX+18),hl
-                ld      hl,(vs_fb+2)
-                add     hl,bc
-                ld      (PBY+18),hl
-                ld      hl,(vs_fa+4)
-                add     hl,de
-                ld      (PBX+20),hl
-                ld      hl,(vs_fb+4)
-                add     hl,bc
-                ld      (PBY+20),hl
-                ld      hl,(vs_fa+6)
-                add     hl,de
-                ld      (PBX+22),hl
-                ld      hl,(vs_fb+6)
-                add     hl,bc
-                ld      (PBY+22),hl
-                ld      hl,(vs_fb+6)
-                ex      de,hl
-                ld      hl,0
-                or      a
-                sbc     hl,de
-                ex      de,hl                   ; DE = -fy * ky
-                ld      bc,(vs_fa+6)              ; BC = fy * kx
-                ld      hl,(vs_fa+0)
-                add     hl,de
-                ld      (PBX+24),hl
-                ld      hl,(vs_fb+0)
-                add     hl,bc
-                ld      (PBY+24),hl
-                ld      hl,(vs_fa+2)
-                add     hl,de
-                ld      (PBX+26),hl
-                ld      hl,(vs_fb+2)
-                add     hl,bc
-                ld      (PBY+26),hl
-                ld      hl,(vs_fa+4)
-                add     hl,de
-                ld      (PBX+28),hl
-                ld      hl,(vs_fb+4)
-                add     hl,bc
-                ld      (PBY+28),hl
-                ld      hl,(vs_fa+6)
-                add     hl,de
-                ld      (PBX+30),hl
-                ld      hl,(vs_fb+6)
-                add     hl,bc
-                ld      (PBY+30),hl
-                ret
-; vs_k32 : HL = a magnitude, A = its sign flag -> HL = +/- 32 * HL
-vs_k32:         add     hl,hl
+                ld      (vs_spsave),sp
+                ld      sp,PB+256
+                ; X0(7) = 3kx - 3ky, Y0(7) = 3ky + 3kx
+                ld      hl,(vs_kx)
+                ld      d,h
+                ld      e,l
                 add     hl,hl
+                add     hl,de                   ; HL = 3kx
+                push    hl
+                ld      hl,(vs_ky)
+                ld      d,h
+                ld      e,l
+                add     hl,hl
+                add     hl,de                   ; HL = 3ky
+                pop     de                      ; DE = 3kx
+                push    hl
+                add     hl,de                   ; Y0 = 3ky + 3kx
+                ex      de,hl                   ; DE = Y0
+                pop     hl                      ; HL = 3ky
+                ld      b,h
+                ld      c,l
+                ld      h,d
+                ld      l,e
+                or      a
+                sbc     hl,bc                   ; HL = Y0 - 3ky = 3kx
+                or      a
+                sbc     hl,bc                   ; X0 = 3kx - 3ky
+                push    hl                      ; X0
+                push    de                      ; Y0
+                ; the steps and fixups
+                ld      hl,(vs_kx)
+                ld      d,h
+                ld      e,l
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl                   ; 8kx
+                ld      bc,(vs_ky)
+                add     hl,bc
+                ld      (vs_fixx),hl            ; 8kx + ky
+                ld      hl,0
+                or      a
+                sbc     hl,de
+                ld      b,h
+                ld      c,l                     ; BC = -kx
+                ld      hl,(vs_ky)
+                ld      d,h
+                ld      e,l
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl                   ; 8ky
+                push    de
+                ld      de,(vs_kx)
+                or      a
+                sbc     hl,de
+                ld      (vs_fixy),hl            ; 8ky - kx
+                pop     de
+                ld      hl,0
+                or      a
+                sbc     hl,de                   ; HL = -ky
+                ; the stack holds X0 (deeper) and Y0: the alternate set takes
+                ; Y0, -ky and its fixup, the main set X0, -kx and its fixup
+                push    hl
+                exx
+                pop     bc                      ; BC' = -ky
+                pop     hl                      ; HL' = Y0
+                ld      de,(vs_fixy)            ; DE' = the Y row fixup
+                exx
+                pop     hl                      ; HL = X0
+                ld      de,(vs_fixx)            ; DE = the X row fixup
+                ld      a,8
+                ld      (vs_rows),a
+pb_row:         DUP     8
+                exx
+                push    hl                      ; Y
+                add     hl,bc
+                exx
+                push    hl                      ; X
+                add     hl,bc
+                EDUP
+                add     hl,de                   ; X0 += ky (undoing the 8 steps)
+                exx
+                add     hl,de                   ; Y0 -= kx
+                exx
+                ld      a,(vs_rows)
+                dec     a
+                ld      (vs_rows),a
+                jr      nz,pb_row
+                ld      sp,(vs_spsave)
+                ret
+; vs_k16 : HL = a magnitude, A = its sign flag -> HL = +/- 16 * HL
+vs_k16:         add     hl,hl
                 add     hl,hl
                 add     hl,hl
                 add     hl,hl
@@ -287,21 +292,6 @@ vs_k32:         add     hl,hl
                 ld      hl,0
                 or      a
                 sbc     hl,de
-                ret
-; vs_fmul : HL = k, IX -> four words: -2k, -k, 0, k
-vs_fmul:        ld      (ix+6),l
-                ld      (ix+7),h
-                ld      (ix+4),0
-                ld      (ix+5),0
-                ex      de,hl
-                ld      hl,0
-                or      a
-                sbc     hl,de                   ; -k
-                ld      (ix+2),l
-                ld      (ix+3),h
-                add     hl,hl                   ; -2k
-                ld      (ix+0),l
-                ld      (ix+1),h
                 ret
 
 ; vs_patch5 : HL -> a five-byte site, D = the add opcode, E = the second
@@ -329,3 +319,84 @@ vp5_sub:        ld      (hl),$b7
                 inc     hl
                 ld      (hl),0
                 ret
+
+; ---------------------------------------------------------------------------
+; (bank 4: render_frame calls it with this bank in, before the walk)
+; sp_reset : the screen span, the free chain behind it
+sp_reset:
+                ; The BBC port's span_init: the pool is a partition (live list
+                ; + free list = every slot), so after the first build a frame
+                ; pushes whatever is still live onto the free list and pops a
+                ; slot for the screen span.
+                ld      h,SPH>>8
+                ld      a,(sp_live)
+                or      a
+                jr      nz,sr_incr
+                inc     a
+                ld      (sp_live),a
+                ld      l,16                    ; the chain 16 -> 24 -> ... -> 248 -> 0
+sr_il:          ld      a,l
+                add     a,8
+                ld      (hl),a
+                ld      l,a
+                jr      nz,sr_il
+                ld      a,16
+                ld      (sp_free),a
+                ld      l,8                     ; the screen span: slot 1
+                jr      sr_setup
+sr_incr:        ld      a,(sp_head)
+                or      a
+                jr      z,sr_pop
+                ld      l,a
+                ld      a,(sp_free)
+sr_push:        ld      c,(hl)                  ; the chain onward
+                ld      (hl),a                  ; slot.next = free
+                ld      a,l                     ; free = slot
+                ld      l,c
+                inc     c
+                dec     c
+                jr      nz,sr_push
+                ld      (sp_free),a
+sr_pop:         ld      a,(sp_free)             ; the screen span: any slot
+                ld      l,a
+                ld      a,(hl)
+                ld      (sp_free),a
+sr_setup:       ld      a,l
+                ld      (sp_head),a
+                ld      (hl),0                  ; next
+                inc     l
+                ld      (hl),0                  ; [0, 255)
+                inc     l
+                ld      (hl),RENDER_W-1
+                inc     l
+                ld      (hl),Y_BIAS             ; ot, it
+                inc     l
+                ld      (hl),Y_BIAS
+                inc     l
+                ld      (hl),Y_BIAS+RENDER_H-1  ; ob, ib
+                inc     l
+                ld      (hl),Y_BIAS+RENDER_H-1
+                ld      a,l
+                and     $F8
+                ld      l,a
+                dec     h                       ; the lines
+                ld      (hl),0                  ; the top: 48 at 0 and 255
+                inc     l
+                ld      (hl),255
+                inc     l
+                ld      (hl),Y_BIAS
+                inc     l
+                ld      (hl),Y_BIAS
+                inc     l
+                ld      (hl),0                  ; the bottom: 207 at 0 and 255
+                inc     l
+                ld      (hl),255
+                inc     l
+                ld      (hl),Y_BIAS+RENDER_H-1
+                inc     l
+                ld      (hl),Y_BIAS+RENDER_H-1
+                xor     a
+                ld      (fw_mode),a
+                ld      (fw_touch),a
+                ret
+

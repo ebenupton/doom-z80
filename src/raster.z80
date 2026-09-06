@@ -71,6 +71,7 @@ rs_set:
                 ld      (rsel_s+1),a
                 ld      (rsel_h+1),a
                 ld      (rsel_v+1),a
+                ld      (rsel_m2+1),a
                 ret
 
 ; ---------------------------------------------------------------------------
@@ -192,12 +193,23 @@ pl_left:        ld      e,a                     ; E = dx, left-going
 pl_shallow:
                 ; A = the direction's table; C = x0, B = y0, D = dy, E = dx
                 ld      iyh,a
+                ; the BBC port's Hamiltonian bands: dx/2 < dy (the 1:2 band; dx >=
+                ; dy here) and 2dy < dx <= 3dy (the 2:3 band) have their own
+                ; cores (ham.inc), the generic NJ core takes the rest
                 ld      a,e
                 srl     a
-                ld      (ln_errs),a             ; err = errs = dx >> 1
-                ex      af,af'
-                ld      a,2
-                ld      (ln_ls),a
+                cp      d
+                jp      c,pl_ham12
+                ld      a,e
+                sub     d
+                sub     d                       ; dx - 2dy (2dy <= dx here)
+                jr      z,pl_nj                 ; dx = 2dy: generic
+                cp      d
+                jp      c,pl_ham23              ; dx < 3dy
+                jp      z,pl_ham23              ; dx = 3dy
+pl_nj:          ld      a,e
+                srl     a                       ; err = errs = dx >> 1 (errs is
+                ex      af,af'                  ;  recomputed from E in ys_phase)
                 ld      a,b
                 and     7
                 inc     a
@@ -220,6 +232,7 @@ rsel_s:         ld      h,ROWLO_A>>8            ; (patched by raster_select)
                 add     a,a
                 add     a,a                     ; (mask, -, entry) by x0 & 7
                 add     a,iyh
+                ld      iyh,2                   ; the e-phase count (was ln_ls)
                 push    hl
                 ld      l,a
                 ld      h,PLTAB_R >> 8
@@ -297,10 +310,8 @@ pl_steep:
                 jp      z,pl_vert
                 ld      a,d
                 srl     a
-                ld      (ln_errs),a
                 ld      (ln_err),a
-                ld      a,2
-                ld      (ln_ls),a
+                ld      iyh,2                   ; the e-phase count
                 ld      a,b                     ; rows left in the cell
                 and     7
                 inc     a
@@ -377,14 +388,12 @@ st_xstep:
                 add     a,e
                 dec     b
                 ret     nz
-                push    hl
-                ld      hl,ln_ls
-                dec     (hl)
-                pop     hl
+                dec     iyh
                 jr      z,st_done
                 push    hl
-                ld      hl,ln_errs
-                sub     (hl)
+                ld      l,e
+                srl     l                       ; errs = the major delta >> 1
+                sub     l
                 pop     hl
                 jr      c,st_done
                 ld      b,1
@@ -727,19 +736,18 @@ yl0_c:       call    row_cross
 ; ys_phase : the y-steps are spent (B = 0): the e-phase, and when the line
 ; is done, straight back to plot_line's caller.
 ys_phase:
-                push    hl
-                ld      hl,ln_ls
-                dec     (hl)
+                dec     iyh                     ; the e-phase count
                 jr      z,ysp_done
-                ld      hl,ln_errs
-                sub     (hl)                    ; the e-phase
-                jr      c,ysp_done
+                push    hl
+                ld      l,e
+                srl     l                       ; errs = dx >> 1
+                sub     l                       ; the e-phase
                 pop     hl
+                jr      c,ysp_done
                 ld      b,1
                 ret
-ysp_done:       pop     hl
-                pop     hl
-                ret
+ysp_done:       pop     hl                      ; drop the call's return: the
+                ret                             ;  line is done, back to the caller
 
 
 addr_of:
@@ -777,8 +785,30 @@ plot_vert:
                 ld      a,b
                 ld      b,d
                 ld      d,a                     ; B = the top row, D = the bottom
-pv_ord:         ld      l,b
-rsel_v:         ld      h,ROWLO_A>>8
+pv_ord:         ; The BBC port's vplot dispatch: un-arm the previous run's stop
+                ; (every row block opens with `ld a,(hl)`, so the byte to put
+                ; back is a constant), arm a RET over the first byte of the
+                ; block BELOW the bottom row (entry 160 is the column's own
+                ; ret), and enter at the top row's block: the run falls down
+                ; the column and the armed RET returns straight to the caller.
+                ld      a,$7E                   ; ld a,(hl)
+pv_una:         ld      (vpx159),a              ; SMC: the previous arm
+                inc     d
+                ld      l,d
+                ld      h,VPE_LO>>8
+                ld      a,(hl)
+                inc     h
+                ld      h,(hl)
+                ld      l,a                     ; HL = the stop
+                ld      (pv_una+1),hl
+                ld      (hl),$C9                ; ret
+                ld      l,b
+                ld      h,VPE_LO>>8
+                ld      e,(hl)
+                inc     h
+                ld      d,(hl)                  ; DE = the top row's plot
+                ld      l,b
+rsel_v:         ld      h,ROWLO_A>>8            ; (patched by raster_select)
                 ld      a,(hl)
                 inc     h
                 ld      h,(hl)
@@ -790,36 +820,12 @@ rsel_v:         ld      h,ROWLO_A>>8
                 and     $1f
                 add     a,l
                 ld      l,a                     ; HL = the top byte
-                push    hl
-                ld      l,c
-                ld      h,MASKTAB>>8
-                ld      c,(hl)                  ; C = the pixel's bit
-                ld      l,d
-                ld      h,VPE_LO>>8
-                ld      e,(hl)
-                inc     h
-                ld      d,(hl)                  ; the bottom row's plot,
-                inc     de                      ;   three bytes long
-                inc     de
-                inc     de                      ; DE -> the byte after it
-                ld      a,(de)
-                ld      (pv_saved),a
-                ld      (pv_wr+1),de
-                ld      a,$c9
-                ld      (de),a                  ; a RET ends the column there
-                ld      l,b
-                ld      h,VPE_LO>>8
-                ld      e,(hl)
-                inc     h
-                ld      d,(hl)                  ; DE = the top row's plot
-                ld      hl,pv_restore
-                ex      (sp),hl                 ; HL = the byte, the return below
+                ld      b,MASKTAB>>8
+                ld      a,(bc)
+                ld      c,a                     ; C = the pixel's bit
                 push    de
+                ld      de,$F920                ; the cell step (vcol.inc)
                 ret                             ; into the column
-pv_restore:     ld      a,(pv_saved)
-pv_wr:          ld      (0),a                   ; the patched byte back
-                ret
-pv_saved:       DB      0
 
                 include "vcol.inc"
 
@@ -847,22 +853,17 @@ rsel_h:         ld      h,ROWLO_A>>8
                 and     $1f
                 sub     b
                 ld      d,a                     ; D = bytes spanned - 1
-                ld      a,c
-                and     7
-                add     a,MASKR & 255
-                ld      c,a
-                ld      b,MASKR >> 8
-                ld      a,(bc)
-                ld      c,a                     ; C = mask from x1 rightwards
-                ld      a,e
-                and     7
-                add     a,MASKL & 255
-                push    hl
-                ld      l,a
-                ld      h,MASKL >> 8
-                ld      b,(hl)                  ; B = mask up to and incl. x2
-                pop     hl
                 ld      a,d
+                ex      af,af'                  ; A' = bytes spanned - 1
+                ld      d,MASKL256 >> 8
+                ld      a,(de)                  ; the mask up to and incl. x2
+                ld      b,MASKR256 >> 8
+                ld      d,a
+                ld      a,(bc)                  ; the mask from x1 rightwards
+                ld      c,a                     ; C = mask from x1 rightwards
+                ld      b,d                     ; B = mask up to and incl. x2
+                ex      af,af'
+                ld      d,a
                 or      a
                 jr      nz,ph_multi
                 ld      a,c
@@ -902,11 +903,224 @@ ph_last:
 ; for the steep path - and they are near-horizontal, so the scanline step the
 ; unrolling makes dearer is paid about one time in six.
 ; ---------------------------------------------------------------------------
+; ---------------------------------------------------------------------------
+; The BBC port's Hamiltonian band rasterisers (raster/shallow_12 and
+; shallow_23): a line whose slope lies in the 1:2 band (dx/2 < dy <= dx)
+; plots a run of 1 or 2 pixels a row, one in the 2:3 band (2dy < dx <= 3dy)
+; a run of 2 or 3, the run length chosen by the carry out of a biased error
+; update - no per-pixel error term, and the line's end is folded into the
+; cell crossing (hm_cross).  The cores are generated (tools/genham.py ->
+; ham.inc); the entries below stage them from pl_shallow's registers.
+;   HL = the byte, IYL = the rows left in the cell, B = the y-steps beyond
+;   it, E = e, D = delta1, C = delta2.
+; ---------------------------------------------------------------------------
+; h_byte : A = a row, C = a column -> HL = its screen byte
+h_byte:         ld      l,a
+rsel_m2:        ld      h,ROWLO_A>>8            ; (patched by raster_select)
+                ld      a,(hl)
+                inc     h
+                ld      h,(hl)
+                ld      l,a
+                ld      a,c
+                rrca
+                rrca
+                rrca
+                and     $1f
+                add     a,l
+                ld      l,a
+                ret
+; hm_cross : the cell's rows ran out (IYL = 0): the cell above, or the end.
+; Returns to the block's `dec h` with H pre-incremented, or drops the block
+; to end the line at the caller of plot_line.
+hm_cross:       ld      a,b
+                or      a
+                jr      z,hm_done
+                cp      8
+                jr      c,hm_part
+                sub     8
+                ld      b,a
+                call    row_cross               ; IYL = 8, HL a cell up (A kept)
+                inc     h
+                ret
+hm_part:        ld      b,0
+                call    row_cross
+                ld      iyl,a                   ; the last cell's rows
+                inc     h
+                ret
+hm_done:        pop     hl
+                ret
+; pl_ham12 : from pl_shallow: IYH = the direction table (PLTAB_L & 255 when
+; leftward), C = x0, B = y0, D = dy, E = dx.  e = (dx >> 1) - dy, delta1 =
+; dx - dy after a 1px run (carry: 2px next), delta2 = 2dy - dx after a 2px
+; run (no borrow: 2px next); dy rows above the first.
+pl_ham12:
+                ld      a,c
+                and     7
+                add     a,a
+                ld      l,a                     ; (x0 & 7) * 2
+                ld      a,iyh
+                cp      PLTAB_L & 255
+                ld      a,l
+                jr      nz,h12_d
+                inc     a                       ; + leftward
+h12_d:          add     a,a
+                ld      l,a
+                ld      h,HAM_TAB >> 8
+                ld      a,(hl)
+                inc     l
+                ld      h,(hl)
+                ld      l,a
+                push    hl                      ; the first block's plot
+                ld      a,b
+                call    h_byte                  ; HL = (x0, y0)'s byte
+                ld      a,b
+                and     7                       ; y0 & 7
+                cp      d
+                jr      nc,h12_one              ; >= dy: within one cell
+                inc     a
+                ld      iyl,a                   ; the cell's rows
+                dec     a
+                neg
+                add     a,d
+                ld      b,a                     ; dy - (y0 & 7) beyond it
+                jr      h12_del
+h12_one:        ld      a,d
+                inc     a
+                ld      iyl,a                   ; dy steps, then the crossing ends it
+                ld      b,0
+h12_del:        ld      a,d
+                add     a,d
+                sub     e
+                ld      c,a                     ; delta2 = 2dy - dx
+                ld      a,e
+                srl     a
+                sub     d
+                ex      af,af'                  ; e = (dx >> 1) - dy
+                ld      a,e
+                sub     d
+                ld      d,a                     ; delta1 = dx - dy
+                ex      af,af'
+                ld      e,a
+                ret                             ; into the core
+; pl_ham23 : the 2:3 band.  e = (dx >> 1) - 2dy, delta1 = dx - 2dy after a
+; 2px run (carry: 3px next), delta2 = dy - delta1 after a 3px run.  The last
+; run is always 2 and is drawn first at the far endpoint (x_end, y0 - dy);
+; the core then runs dy - 1 steps above the first row.
+pl_ham23:
+                push    bc                      ; (x0, y0)
+                push    de                      ; (dy, dx)
+                ld      a,iyh
+                cp      PLTAB_L & 255
+                jr      z,h23_left
+                ld      a,c
+                add     a,e
+                ld      c,a                     ; x_end = x0 + dx
+                ld      a,b
+                sub     d                       ; y_top
+                call    h_byte
+                ld      a,c
+                and     7
+                jr      z,h23r_split
+                add     a,P23R & 255
+                ld      e,a
+                ld      d,HAM_TAB >> 8
+                ld      a,(de)                  ; the pair at bits k-1..k
+                or      (hl)
+                ld      (hl),a
+                jr      h23_near
+h23r_split:     ld      a,(hl)                  ; x_end at bit 0: the pair splits
+                or      $80
+                ld      (hl),a
+                dec     l
+                ld      a,(hl)
+                or      $01
+                ld      (hl),a
+                jr      h23_near
+h23_left:       ld      a,c
+                sub     e
+                ld      c,a                     ; x_end = x0 - dx
+                ld      a,b
+                sub     d
+                call    h_byte
+                ld      a,c
+                and     7
+                cp      7
+                jr      z,h23l_split
+                add     a,P23L & 255
+                ld      e,a
+                ld      d,HAM_TAB >> 8
+                ld      a,(de)                  ; the pair at bits k..k+1
+                or      (hl)
+                ld      (hl),a
+                jr      h23_near
+h23l_split:     ld      a,(hl)                  ; x_end at bit 7
+                or      $01
+                ld      (hl),a
+                inc     l
+                ld      a,(hl)
+                or      $80
+                ld      (hl),a
+h23_near:       pop     de                      ; (dy, dx)
+                pop     bc                      ; (x0, y0)
+                ld      a,c
+                and     7
+                add     a,a
+                ld      l,a
+                ld      a,iyh
+                cp      PLTAB_L & 255
+                ld      a,l
+                jr      nz,h23_d
+                inc     a
+h23_d:          add     a,a
+                add     a,HAM23_TAB & 255
+                ld      l,a
+                ld      h,HAM_TAB >> 8
+                ld      a,(hl)
+                inc     l
+                ld      h,(hl)
+                ld      l,a
+                push    hl                      ; the first block's plot
+                ld      a,b
+                call    h_byte                  ; HL = the near byte
+                ld      a,b
+                and     7
+                inc     a                       ; (y0 & 7) + 1
+                cp      d                       ; >= dy: within one cell
+                jr      nc,h23_one
+                ld      iyl,a
+                ld      b,a
+                ld      a,d
+                sub     b
+                ld      b,a                     ; dy - 1 - (y0 & 7) beyond
+                jr      h23_del
+h23_one:        ld      iyl,d                   ; dy - 1 steps, then the crossing
+                ld      b,0
+h23_del:        ld      a,e
+                srl     a
+                sub     d
+                sub     d
+                ex      af,af'                  ; e = (dx >> 1) - 2dy
+                ld      a,e
+                sub     d
+                sub     d                       ; delta1 = dx - 2dy
+                ld      c,d
+                ld      d,a
+                ld      a,c
+                sub     d
+                ld      c,a                     ; delta2 = dy - delta1
+                ex      af,af'
+                ld      e,a
+                ret
+                include "ham.inc"
+
                 ALIGN   256
 MASKTAB:        DUP     32
                 DB      $80,$40,$20,$10,$08,$04,$02,$01
                 EDUP
-                ALIGN   8
-MASKR:          DB      $ff,$7f,$3f,$1f,$0f,$07,$03,$01   ; from x rightwards
-                ALIGN   8
-MASKL:          DB      $80,$c0,$e0,$f0,$f8,$fc,$fe,$ff   ; up to and incl. x
+                ALIGN   256
+MASKR256:       DUP     32                      ; by x: from x rightwards
+                DB      $ff,$7f,$3f,$1f,$0f,$07,$03,$01
+                EDUP
+MASKL256:       DUP     32                      ; by x: up to and incl. x
+                DB      $80,$c0,$e0,$f0,$f8,$fc,$fe,$ff
+                EDUP
