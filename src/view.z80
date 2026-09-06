@@ -577,9 +577,11 @@ pym_neg:        MUL_AE                          ; (h + 256) * M8: less M8 << 8
                 ld      a,h
                 ex      af,af'                  ; A' = hi
                 ld      a,l
+                or      a
+                jr      z,.lo0                  ; frac = 0 (BBC px_frac_z): no
                 MUL_AE                          ; HL = lo * M8
                 ld      a,h                     ; the low partial
-                ex      af,af'                  ; A = hi, A' = the partial
+.lojoin:        ex      af,af'                  ; A = hi, A' = the partial
                 or      a
                 jr      z,.hi0
                 inc     a
@@ -601,6 +603,8 @@ pym_neg:        MUL_AE                          ; (h + 256) * M8: less M8 << 8
                 sub     e
                 ld      h,a
                 jr      .join
+.lo0:           xor     a                       ;  product and no partial
+                jr      .lojoin
 .hi0:         ex      af,af'                  ; Q = tvx + the low partial
                 pop     hl
                 add     a,l

@@ -941,15 +941,24 @@ rs_nd:          ld      (sg_n1),bc              ; C = v1's verdict, B = v2's
                 jr      nz,rs_clipx             ; a near crossing (11%): the
                                                 ;  island below rs_havex
 rs_havex:
-                ; a reversed or tied projection covers no columns: dropped
-                ld      hl,(sg_sx2)
-                ld      de,(sg_sx1)
-                CMP16F
-                ret     c
-                ret     z
+                ; a reversed or tied projection covers no columns: dropped.
+                ; The pair is loaded ONCE and the order test leaves it alone
+                ; (the flag-flipped compare of CMP16F ate both registers, so
+                ; the old form reloaded them for sp_hasgap)
                 ld      hl,(sg_sx1)
                 ld      de,(sg_sx2)
-                call    sp_hasgap
+                ld      a,d
+                xor     $80
+                ld      c,a                     ; C = sx2 hi, offset-binned
+                ld      a,h
+                xor     $80
+                cp      c
+                jr      c,rs_hx                 ; sx1 hi < sx2 hi: forward
+                ret     nz                      ; sx1 > sx2: reversed, dropped
+                ld      a,l
+                cp      e
+                ret     nc                      ; sx1 >= sx2: reversed or tied
+rs_hx:          call    sp_hasgap
                 ret     nc
                 jp      render_seg_body
 
@@ -1102,9 +1111,10 @@ rsb_p2:
                 ; BBC port's ysb order: the project_y cache sees the same
                 ; sequence, so it holds the same entries)
                 ld      a,(sg_flags)
+                ld      c,a                     ; (C is free until PY_INLINE)
                 and     SF_SOLID
                 jr      nz,rsb_p2f
-                ld      a,(sg_flags)
+                ld      a,c
                 and     SF_NEEDBT
                 jr      z,rsb_p2bb
                 ld      de,(sg_m1)

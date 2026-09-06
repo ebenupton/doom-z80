@@ -959,12 +959,11 @@ dcl_fn:         dec     l
 ; seg's lines all run before any list change, so the seek resumes there.
 dcl_pair2:
                 ld      a,(lc_x2)
+                ld      b,a                     ; (B = xr: not reloaded below)
                 ld      hl,lc_x1
                 sub     (hl)
                 ld      (cd_dx),a
                 ld      c,(hl)
-                ld      a,(lc_x2)
-                ld      b,a
                 ld      a,(dcls_first)
                 or      a
                 ret     z                       ; every span left of the pair
@@ -981,9 +980,10 @@ dcl_general:
                 ld      a,(lc_y1)
                 ld      e,a
                 ld      a,(lc_y2)
+                ld      d,a                     ; (D = y2: not reloaded below)
                 sub     e
                 ld      (cd_dy),a
-                ld      a,(lc_y2)
+                ld      a,d
                 cp      e
                 jp      nc,dcl_bb1              ; yr >= yl
                 ld      d,a
@@ -2073,6 +2073,7 @@ fw_walk_staged:                                 ; (fwl_* alias the lc_* bytes; t
                                                 ;  open run rides IY: IYH = its x0,
                                                 ;  $FF none, IYL = its end column)
                 ld      a,(fwl_yr)
+                ld      d,a                     ; (D = yr: not reloaded below)
                 ld      hl,fwl_yl
                 sub     (hl)
                 ld      (fwl_dy),a
@@ -2082,7 +2083,7 @@ fw_walk_staged:                                 ; (fwl_* alias the lc_* bytes; t
                 ld      (fwl_dx),a
                 ld      a,(fwl_yl)
                 ld      b,a
-                ld      a,(fwl_yr)
+                ld      a,d
                 cp      b
                 jp      nc,wl_min
                 ld      c,a

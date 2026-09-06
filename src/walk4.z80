@@ -41,6 +41,8 @@ walk_frame:
                 and     $F0
                 or      EPSILON_F               ; the first corner's widening
                 ld      (bca_afn),a
+                ld      hl,(bca_afn)            ; the fine view angle as an
+                ld      (cp_havepsi+1),hl       ;  immediate in the corner tail
                 ld      (walk_sp),sp            ; the unwind's target
                 ld      hl,(pl_wx)              ; the viewer as immediates at
                 ld      (pos_wx1+1),hl          ;  point_on_side's sites
@@ -658,7 +660,7 @@ ns_khave:       ld      l,a
                 add     a,d
                 ld      d,a                     ; psi = base + ta
 mask_done:
-cp_havepsi:     ld      hl,(bca_afn)
+cp_havepsi:     ld      hl,0                    ; SMC: bca_afn (walk_frame)
                 or      a
                 sbc     hl,de
                 ld      a,h
