@@ -1359,7 +1359,9 @@ rsb_line:
                 ld      hl,lc_y2
                 cp      (hl)
                 ret     z                       ; a point
-                jp      draw_clipped_line       ; a vertical
+                jp      dcl_vertical            ; a vertical, at a column >= sx1:
+                                                ;  the scan starts at the span
+                                                ;  sp_hasgap memoed, not the head
 ; rsb_fused : the same line as an aperture edge, A = the side
 rsb_fused:
                 push    af

@@ -1473,13 +1473,15 @@ dvc_y2_done:    ld      a,(lc_y1)
                 ld      hl,lc_y2
                 cp      (hl)
                 ret     z                       ; a point
+dcl_vertical:   ; FALLEN INTO from dcl_vert_on: a seg's vertical, at a
+                ; column >= sx1 before any list change, so the scan starts at
+                ; the span sp_hasgap memoed (0 = none) instead of the head.
+                ; (It used to fall into dcl_vertical_h below - the head scan -
+                ; which walked 4.2 spans a call where the Beeb walks 1.3.)
+                ld      a,(dcls_first)
+                jp      dcl_vertical_go
 dcl_vertical_h: ; the general entry (draw_clipped_line): the scan from the head
                 ld      a,(sp_head)
-                jp      dcl_vertical_go
-dcl_vertical:   ; (fallen into from dcl_vert_on: a seg's vertical, at a column
-                ; >= sx1 before any list change - the scan starts at the span
-                ; sp_hasgap memoed, 0 = none)
-                ld      a,(dcls_first)
 dcl_vertical_go:
                 ld      l,a
                 ld      h,SPH>>8
