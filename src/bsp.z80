@@ -151,7 +151,7 @@ nc_norm:
                 srl     h
                 rr      l
                 ld      (nc_n),hl
-                jr      nc_norm
+                jp      nc_norm
 nc_small:
                 ld      a,l
                 or      a
@@ -223,7 +223,7 @@ d168_l:
                 rla
                 jr      c,d168_s
                 cp      c
-                jr      c,d168_n
+                jp      c,d168_n
 d168_s:
                 sub     c
                 inc     l
@@ -369,7 +369,7 @@ vg_miss:        ld      (hl),a                  ; the frame stamp
                 ld      h,a                     ; the VRR record
 vgm_vxs:        ld      a,0                     ; SMC: vx_stamp (vs_rebuild)
                 cp      (hl)
-                jr      nz,vx_miss
+                jp      nz,vx_miss
                 inc     l                       ; the rotated pair stands
                 ld      e,(hl)
                 inc     l
@@ -411,7 +411,7 @@ vg_project:
                 jr      nz,vg_behind
                 ld      a,h
                 or      a
-                jr      nz,vg_front
+                jp      nz,vg_front
                 ld      a,l
                 cp      NEAR_VERDICT
                 jr      nc,vg_front
@@ -821,7 +821,7 @@ bfx2:           ld      hl,0                    ; SMC: pl_x
                 ld      a,h
                 xor     (ix+SG_LDY)             ; sign of the product
                 ret     m
-                jr      rs_visible
+                jp      rs_visible
 bx_frac:        ld      a,(pl_xf)
                 sub     (ix+SG_LXF)
                 jr      z,bx_tie
@@ -845,7 +845,7 @@ bfy2:           ld      hl,0                    ; SMC: pl_y
                 ld      a,h
                 xor     (ix+SG_LDX)
                 ret     p                       ; product positive -> dot < 0
-                jr      rs_visible
+                jp      rs_visible
 by_frac:        ld      a,(pl_yf)
                 sub     (ix+SG_LYF)
                 jr      z,by_tie
@@ -903,7 +903,7 @@ rs_visible:
                 ldi
                 ldi
                 ldi
-                jr      rs_verdicts
+                jp      rs_verdicts
 rs_v1get:       VGETP   vcs2                    ; HL = v1's record
                 ex      (sp),hl                 ; v1's record down, v2's up
                 ld      (ch_v2),hl              ; v2's copy follows at once
@@ -938,7 +938,7 @@ rs_nd:          ld      (sg_n1),bc              ; C = v1's verdict, B = v2's
                 ret     nz                      ; both behind the near plane
                 ld      a,b
                 or      c
-                jr      z,rs_havex              ; both in front: the copies stand
+                jp      z,rs_havex              ; both in front: the copies stand
 rs_clipx:
                 ; a crossing needs the view coordinates: from the rotated
                 ; cache (both vertices were probed this frame)
@@ -1085,7 +1085,7 @@ rsb_body:
                 ld      (sg_fb1),hl
                 ld      a,1                     ; (and its vertical spans went
                 ld      (ch_hit),a              ;  out with that seg)
-                jr      rsb_p2
+                jp      rsb_p2
 rsb_p1:
                 ld      de,(sg_m1)
                 ld      a,(sg_ch)
@@ -1182,10 +1182,10 @@ rsb_nbb:
                 call    rsb_line
                 ld      hl,sg_fb1
                 call    rsb_line
-                jr      pc_verts
+                jp      pc_verts
 pc_singles:     ld      a,(sg_flags)
                 and     SF_NEEDBT
-                jr      z,pc_fb
+                jp      z,pc_fb
                 ld      a,(sg_eskip)
                 bit     7,a
                 jr      nz,pc_fb
@@ -1193,7 +1193,7 @@ pc_singles:     ld      a,(sg_flags)
                 call    rsb_line
 pc_fb:          ld      a,(sg_flags)
                 and     SF_NEEDBB
-                jr      z,pc_verts
+                jp      z,pc_verts
                 ld      a,(sg_eskip)
                 bit     6,a
                 jr      nz,pc_verts
@@ -1207,7 +1207,7 @@ pc_verts:       call    rsb_vspans
                 ld      hl,sg_bt1
                 xor     a
                 call    rsb_fused
-                jr      pc_bot
+                jp      pc_bot
 pc_top_up:      ld      a,(sg_flags)
                 and     SF_STEPUP_T
                 jr      z,pc_bot
@@ -1220,7 +1220,7 @@ pc_bot:         ld      a,(sg_flags)
                 ld      hl,sg_bb1
                 ld      a,$80
                 call    rsb_fused
-                jr      pc_walk
+                jp      pc_walk
 pc_bot_up:      ld      a,(sg_flags)
                 and     SF_STEPUP_B
                 jr      z,pc_walk
@@ -1471,7 +1471,7 @@ ve_el:
                 call    cmp_s8                  ; carry: h_lo < fh (A = the difference)
                 pop     hl
                 ld      a,c
-                jr      nc,ve_lo1
+                jp      nc,ve_lo1
                 ld      a,e
 ve_lo1:         ld      ixl,a                   ; c_lo rides IXL
                 inc     hl
@@ -1507,7 +1507,7 @@ ve_pair:
                 ret     z
                 jp      pe,vp_ovf
                 ret     m
-                jr      vp_go
+                jp      vp_go
 vp_ovf:         ret     p                       ; overflowed: the true sign is the other
 vp_go:
                 ld      de,(vs_ms)

@@ -114,7 +114,7 @@ mul_s16_u8:
                 or      a
                 jr      z,ms16_hi0              ; 0 <= DE < 256
                 inc     a
-                jr      z,ms16_him1             ; DE high byte = $FF
+                jp      z,ms16_him1             ; DE high byte = $FF
                 ; --- general case: the high and low partials, inline ---
                 push    bc                      ; C = the multiplier
                 push    de
@@ -364,7 +364,7 @@ div8b:
                 jr      c,db_s0
                 cp      c
                 ccf
-                jr      nc,db_n0
+                jp      nc,db_n0
 db_s0:         sub     c
                 scf
 db_n0:
@@ -373,7 +373,7 @@ db_n0:
                 jr      c,db_s1
                 cp      c
                 ccf
-                jr      nc,db_n1
+                jp      nc,db_n1
 db_s1:         sub     c
                 scf
 db_n1:
@@ -382,7 +382,7 @@ db_n1:
                 jr      c,db_s2
                 cp      c
                 ccf
-                jr      nc,db_n2
+                jp      nc,db_n2
 db_s2:         sub     c
                 scf
 db_n2:
@@ -391,7 +391,7 @@ db_n2:
                 jr      c,db_s3
                 cp      c
                 ccf
-                jr      nc,db_n3
+                jp      nc,db_n3
 db_s3:         sub     c
                 scf
 db_n3:

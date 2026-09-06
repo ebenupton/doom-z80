@@ -495,7 +495,7 @@ pym_add:        ex      af,af'
                 rla
                 ld      l,h
                 ld      h,a
-                jr      pyr_done
+                jp      pyr_done
 pyr_8:          ld      a,h
                 rla
                 sbc     a,a
@@ -508,7 +508,7 @@ pyr_8:          ld      a,h
                 ld      a,b
                 adc     a,0
                 ld      h,a
-                jr      pyr_done
+                jp      pyr_done
 pyr_7:          ld      a,h
                 rla
                 sbc     a,a
@@ -519,7 +519,7 @@ pyr_7:          ld      a,h
                 rla
                 ld      l,h
                 ld      h,a
-                jr      pyr_done
+                jp      pyr_done
 pyr_9:          ld      a,h
                 ld      l,a
                 rla
@@ -528,7 +528,7 @@ pyr_9:          ld      a,h
                 inc     hl
                 sra     h
                 rr      l
-                jr      pyr_done
+                jp      pyr_done
 pyr_gen:        ld      b,d
                 call    rns_hl                  ; leaves DE alone
 pyr_done:       ld      a,HALF_H+Y_BIAS         ; the row, in the clipper's

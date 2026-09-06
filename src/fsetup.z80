@@ -291,7 +291,7 @@ pb_row:         DUP     8
                 ld      a,(vs_rows)
                 dec     a
                 ld      (vs_rows),a
-                jr      nz,pb_row
+                jp      nz,pb_row
                 ld      sp,(vs_spsave)
                 ret
 ; vs_k16 : HL = a magnitude, A = its sign flag -> HL = +/- 16 * HL

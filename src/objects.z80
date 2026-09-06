@@ -65,14 +65,14 @@ obj_skip:
                 inc     c
                 ld      a,c
                 cp      N_OBJ
-                jr      c,obj_scan
+                jp      c,obj_scan
                 jr      obj_run_end
 obj_hit:
                 call    obj_project
                 ld      a,(obj_i)
                 ld      c,a
                 ld      d,0
-                jr      obj_skip
+                jp      obj_skip
 obj_run_end:
                 ld      a,(obj_n)
                 ld      (obj_left),a
@@ -112,7 +112,7 @@ obj_minloop:
                 ld      b,c
 obj_minnext:
                 inc     c
-                jr      obj_minloop
+                jp      obj_minloop
 obj_gotmin:
                 ld      a,b
                 ld      (obj_best),a
@@ -160,7 +160,7 @@ ob_rot:         call    obj_rot                 ; the vertex transform (bank 2;
                 jr      nz,obj_pj_drop          ; behind
                 ld      a,h
                 or      a
-                jr      nz,obj_pj_ok
+                jp      nz,obj_pj_ok
                 ld      a,l
                 cp      16
                 jr      c,obj_pj_drop           ; inside the near limit
@@ -270,7 +270,7 @@ obj_draw_slot:
                 sbc     hl,de                   ; yb - yt
                 ld      a,h
                 or      a
-                jr      z,obj_hok
+                jp      z,obj_hok
                 ret     m                       ; upside down: nothing
                 ld      l,255                   ; taller than the screen
 obj_hok:
@@ -460,7 +460,7 @@ obj_stamp:                                      ;  an entry), kept across the em
                 cp      d                       ; as the 6502's des_to_v orders it
                 jr      z,obj_sd_pt             ; a point: nothing
                 ld      a,c
-                jr      c,obj_sd_go
+                jp      c,obj_sd_go
                 ld      e,b
                 ld      b,d
                 ld      d,e
@@ -468,7 +468,7 @@ obj_sd_go:      ld      hl,adyn_ctr             ; (the BBC's direct stamps go
                 inc     (hl)                    ;  through dcl_emit_segment: counted)
                 call    dl_emit
 obj_sd_pt:      pop     hl
-                jr      obj_stamp
+                jp      obj_stamp
 obj_st_gen:     ; the clipped stamps: the s16 line staged in lc_x1..lc_y2
                 cp      3                       ; (A = the mode)
                 jr      z,obj_st_fl
@@ -490,10 +490,10 @@ obj_st_gen:     ; the clipped stamps: the s16 line staged in lc_x1..lc_y2
                 push    hl
                 ld      a,(obj_fused)
                 dec     a
-                jr      z,obj_slow              ; 1: the plain clip
+                jp      z,obj_slow              ; 1: the plain clip
                 ld      a,$80
                 call    fused_line              ; fused_below_raw
-                jr      obj_st_next
+                jp      obj_st_next
 obj_slow:
                 call    dcl_s16
 obj_st_next:    pop     hl
@@ -528,7 +528,7 @@ obj_st_fl:      ; a fused stamp of a fast object: every vertex is u8-clean, the
                 push    hl
                 ld      a,$80
                 call    fused_line              ; fused_below_raw
-                jr      obj_st_next
+                jp      obj_st_next
 obj_ctl:
                 cp      OBJ_ART_END
                 jr      z,obj_art_done
@@ -565,7 +565,7 @@ obj_art_done:
                 jr      nz,obj_ds_lo255
                 ld      a,(obj_X)
                 ld      c,a
-                jr      obj_ds_lo
+                jp      obj_ds_lo
 obj_ds_lo255:   ld      c,255
 obj_ds_lo:
                 ld      a,(obj_X+11)
@@ -577,7 +577,7 @@ obj_ds_lo:
                 ld      a,(obj_X+10)
                 inc     a
                 ld      b,a
-                jr      nz,obj_ds_hi
+                jp      nz,obj_ds_hi
 obj_ds_hz:      ld      b,0
 obj_ds_hi:
                 ld      a,b
@@ -755,7 +755,7 @@ op_loop:
                 ld      c,a
                 ld      a,(ix+SP_XE)
                 cp      c
-                jr      c,op_next               ; ends before the cursor
+                jp      c,op_next               ; ends before the cursor
                 jr      z,op_next
                 ld      a,(ix+SP_XS)
                 cp      c
@@ -779,7 +779,7 @@ op_next:
                 SP_NEXT_A
                 ret     z
                 IX_FROM_A
-                jr      op_loop
+                jp      op_loop
 op_yes:
                 ld      a,1
                 ld      (obj_fast),a
@@ -1173,7 +1173,7 @@ obj_grow:
                 ld      a,h
                 ld      hl,obj_h
                 adc     a,(hl)
-                jr      nc,og_st
+                jp      nc,og_st
                 ld      a,255                   ; very near: clamp
 og_st:
                 ld      (hl),a

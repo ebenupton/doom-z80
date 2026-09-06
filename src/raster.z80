@@ -185,7 +185,7 @@ pl_sorted:      ld      a,b
                 cp      d
                 jp      c,pl_steep_r
                 ld      a,PLTAB_R & 255
-                jr      pl_shallow
+                jp      pl_shallow
 pl_left:        ld      e,a                     ; E = dx, left-going
                 cp      d
                 jp      c,pl_steep_l
@@ -340,12 +340,12 @@ st_right:
 st_r1:          dec     iyl
                 jr      z,st_rc
                 dec     h
-                jr      st_right
+                jp      st_right
 st_rc:          call    row_cross
                 jr      st_right
 st_rx:          call    st_xstep
                 rrc     c
-                jr      nc,st_r1
+                jp      nc,st_r1
                 inc     l
                 jr      st_r1
 st_left:
@@ -359,12 +359,12 @@ st_left:
 st_l1:          dec     iyl
                 jr      z,st_lc
                 dec     h
-                jr      st_left
+                jp      st_left
 st_lc:          call    row_cross
                 jr      st_left
 st_lx:          call    st_xstep
                 rlc     c
-                jr      nc,st_l1
+                jp      nc,st_l1
                 dec     l
                 jr      st_l1
 
@@ -377,7 +377,7 @@ row_cross:
                 sub     32
                 ld      l,a
                 ld      a,h
-                jr      nc,rc_same
+                jp      nc,rc_same
                 sub     8
 rc_same:        or      7
                 ld      h,a
@@ -781,7 +781,7 @@ rsel1:          ld      h,ROWLO_A>>8
 plot_vert:
                 ld      a,b
                 cp      d
-                jr      c,pv_ord
+                jp      c,pv_ord
                 ld      a,b
                 ld      b,d
                 ld      d,a                     ; B = the top row, D = the bottom
@@ -882,7 +882,7 @@ ph_mid:
                 ld      (hl),$ff
                 inc     l
                 dec     d
-                jr      nz,ph_mid
+                jp      nz,ph_mid
 ph_last:
                 ld      a,(hl)
                 or      b
@@ -983,7 +983,7 @@ h12_d:          add     a,a
                 neg
                 add     a,d
                 ld      b,a                     ; dy - (y0 & 7) beyond it
-                jr      h12_del
+                jp      h12_del
 h12_one:        ld      a,d
                 inc     a
                 ld      iyl,a                   ; dy steps, then the crossing ends it
