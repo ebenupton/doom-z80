@@ -539,8 +539,9 @@ obj_st_fl:      ; a fused stamp of a fast object: every vertex is u8-clean, the
                 ld      (lc_y2),a
                 inc     hl
                 push    hl
-                ld      a,$80
-                call    fused_line              ; fused_below_raw
+                ld      a,$80                   ; (u8-clean by construction:
+                ld      (fw_side),a             ;  the senior bytes were zeroed
+                call    fl_u8                   ;  at the arm)
                 jp      obj_st_next
 obj_ctl:
                 cp      OBJ_ART_END

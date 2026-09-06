@@ -1327,10 +1327,16 @@ cs8_ge:         or      a
 ; rsb_line : HL -> a row pair (y at sx1; y at sx2 four bytes on), drawn from
 ; sx1 to sx2 through the clipper
 rsb_line:
-                ld      e,(hl)                  ; (RSB_STAGE: the rows are
-                inc     l                       ;  biased already, and
-                ld      d,(hl)                  ;  sg_ft1..sg_bb2 are one page)
+                ; the line is staged AND classified in one pass: the four
+                ; senior bytes are OR'd as they go by (u8-clean?) and the two
+                ; low-byte compares use the values still in registers, so
+                ; nothing is written and read back
+                ld      e,(hl)                  ; (the rows are biased already,
+                inc     l                       ;  and sg_ft1..sg_bb2 are one
+                ld      d,(hl)                  ;  page)
                 ld      (lc_y1),de
+                ld      b,e                     ; B = y1 lo
+                ld      a,d                     ; A = the senior-byte accumulator
                 inc     l
                 inc     l
                 inc     l
@@ -1338,37 +1344,35 @@ rsb_line:
                 inc     l
                 ld      d,(hl)
                 ld      (lc_y2),de
+                or      d
+                ld      c,e                     ; C = y2 lo
                 ld      hl,(sg_sx1)
                 ld      (lc_x1),hl
+                or      h
+                ld      e,l                     ; E = x1 lo
                 ld      hl,(sg_sx2)
                 ld      (lc_x2),hl
-                ; u8-clean and not a vertical: the seek is sp_hasgap's memo
-                ld      a,(lc_x1+1)
-                ld      hl,lc_y1+1
-                or      (hl)
-                ld      hl,lc_x2+1
-                or      (hl)
-                ld      hl,lc_y2+1
-                or      (hl)
-                jp      nz,dcl16_main
-                ld      a,(lc_x1)
-                ld      hl,lc_x2
-                cp      (hl)
-                jp      nz,dcl_pair2
-                ld      a,(lc_y1)
-                ld      hl,lc_y2
-                cp      (hl)
+                or      h
+                jp      nz,dcl16_main           ; a senior byte: the s16 clipper
+                ld      a,e
+                cp      l
+                jp      nz,dcl_pair2            ; x1 != x2: the seek is
+                                                ;  sp_hasgap's memo
+                ld      a,b
+                cp      c
                 ret     z                       ; a point
                 jp      dcl_vertical            ; a vertical, at a column >= sx1:
                                                 ;  the scan starts at the span
                                                 ;  sp_hasgap memoed, not the head
 ; rsb_fused : the same line as an aperture edge, A = the side
-rsb_fused:
-                push    af
-                ld      e,(hl)                  ; (RSB_STAGE: the rows are
-                inc     l                       ;  biased already, and
-                ld      d,(hl)                  ;  sg_ft1..sg_bb2 are one page)
+rsb_fused:                                      ; (staged and classified in one
+                ld      (fw_side),a             ;  pass, as rsb_line is)
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)
                 ld      (lc_y1),de
+                ld      b,e                     ; B = y1 lo
+                ld      a,d                     ; A = the senior-byte accumulator
                 inc     l
                 inc     l
                 inc     l
@@ -1376,12 +1380,23 @@ rsb_fused:
                 inc     l
                 ld      d,(hl)
                 ld      (lc_y2),de
+                or      d
+                ld      c,e                     ; C = y2 lo
                 ld      hl,(sg_sx1)
                 ld      (lc_x1),hl
+                or      h
+                ld      e,l                     ; E = x1 lo
                 ld      hl,(sg_sx2)
                 ld      (lc_x2),hl
-                pop     af
-                jp      fused_line
+                or      h
+                jp      nz,fh_slow              ; a senior byte: the s16 clipper
+                ld      a,e
+                cp      l
+                jp      nz,fw_walk_staged       ; not a vertical
+                ld      a,b
+                cp      c
+                ret     z                       ; a point
+                jp      dcl_vertical            ; a vertical at a column >= sx1
 
 
 ; ---------------------------------------------------------------------------

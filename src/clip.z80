@@ -2087,8 +2087,9 @@ fused_line:
                 ld      hl,lc_x2+1
                 or      (hl)
                 jr      nz,fh_slow
-                ld      a,(lc_x1)
-                ld      hl,lc_x2
+fl_u8:                                          ; (the line is known u8-clean:
+                ld      a,(lc_x1)               ;  obj_st_fl and rsb_fused
+                ld      hl,lc_x2                ;  classify while they stage)
                 cp      (hl)
                 jr      z,fh_vert
                 jp      fw_walk_staged          ; (fwl_* alias the lc_* bytes)
