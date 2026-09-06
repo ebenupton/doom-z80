@@ -637,7 +637,7 @@ sg_l:           or      a
                 ld      a,(hl)
                 cp      b
                 jr      c,sg_n                  ; xe <= lo: wholly left
-                dec     l
+sg_hit:         dec     l
                 dec     l
                 ld      a,l
                 ld      (dcls_first),a
@@ -651,6 +651,18 @@ sg_l:           or      a
 sg_n:           dec     l
                 dec     l
                 ld      e,l                     ; the predecessor
+                ld      a,(hl)
+                or      a                       ; (the second span of the pair,
+                jr      z,sg_none               ;  so only every other skip
+                ld      l,a                     ;  pays the back edge)
+                inc     l
+                inc     l
+                ld      a,(hl)
+                cp      b
+                jp      nc,sg_hit
+                dec     l
+                dec     l
+                ld      e,l
                 ld      a,(hl)
                 jp      sg_l
 sg_none:        dec     b                       ; (the bias back for the caller)
@@ -672,11 +684,22 @@ hg_l:           or      a
                 ld      a,(hl)
                 cp      b
                 jr      c,hg_n                  ; xe <= lo: wholly left
-                dec     l                       ; -> xs
+hg_hit:         dec     l                       ; -> xs
                 ld      a,(hl)
                 cp      c                       ; carry: xs < hi, a gap
                 ret
 hg_n:           dec     l
+                dec     l
+                ld      a,(hl)
+                or      a                       ; (two spans to a back edge)
+                ret     z
+                ld      l,a
+                inc     l
+                inc     l
+                ld      a,(hl)
+                cp      b
+                jp      nc,hg_hit
+                dec     l
                 dec     l
                 ld      a,(hl)
                 jp      hg_l
@@ -1503,12 +1526,23 @@ dv_bb1:         ld      e,a                     ; D = ylo, E = yhi
                 ld      c,a
                 inc     l
                 inc     l                       ; -> the span's xe
-dv_x:           ld      a,c
+dv_x:           ld      a,c                     ; (two spans to a back edge)
                 cp      (hl)
                 jr      c,dv_own                ; xl < xe: reaches past the column
                 dec     l
                 dec     l
                 ld      a,(hl)                  ; the successor
+                or      a
+                ret     z
+                ld      l,a
+                inc     l
+                inc     l
+                ld      a,c
+                cp      (hl)
+                jr      c,dv_own
+                dec     l
+                dec     l
+                ld      a,(hl)
                 or      a
                 ret     z
                 ld      l,a
@@ -2107,12 +2141,23 @@ wl_min:         ld      (fwl_hi),a
                 or      a
                 jr      z,wl_flush
                 ld      h,SPH>>8
-wl_sx:          ld      l,a                     ; the seek
-                inc     l
+wl_sx:          ld      l,a                     ; the seek, two spans to a
+                inc     l                       ;  back edge
                 inc     l                       ; -> xe
                 ld      a,c
                 cp      (hl)
                 jr      c,wl_found              ; xl < xe
+                dec     l
+                dec     l
+                ld      a,(hl)
+                or      a
+                jr      z,wl_flush
+                ld      l,a
+                inc     l
+                inc     l
+                ld      a,c
+                cp      (hl)
+                jr      c,wl_found
                 dec     l
                 dec     l
                 ld      a,(hl)
