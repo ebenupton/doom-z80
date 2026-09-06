@@ -1483,6 +1483,36 @@ dcl_cb_reject:
 ; the descriptors' entry, which clamps the rows into the band first.
 ; dcl_vertical : the u8 vertical at lc_x1 from lc_y1 to lc_y2.
 ; ===========================================================================
+; dcl_vert_reg : A = the column, DE = y1, HL = y2, both rows ALREADY stored
+; in lc_y1/lc_y2 by the caller (the vertex spans hand them over in registers
+; instead of writing them and reading them straight back)
+dcl_vert_reg:
+                ld      (lc_x1),a
+                ld      c,a                     ; C = the column
+                ld      a,d
+                or      a
+                jp      nz,dvr_slow             ; a senior byte: the clamp arms
+                ld      a,h
+                or      a
+                jp      nz,dvr_slow
+                ld      a,e
+                cp      l
+                ret     z                       ; a point
+                jp      c,dvr_up                ; y1 < y2
+                ld      d,l                     ; D = ylo, E = yhi
+                ld      e,a
+                jp      dvr_go
+dvr_up:         ld      d,e
+                ld      e,l
+dvr_go:         ld      a,(dcls_first)          ; the scan starts at the span
+                or      a                       ;  sp_hasgap memoed
+                ret     z
+                ld      l,a
+                ld      h,SPH>>8
+                inc     l
+                inc     l                       ; -> the span's xe
+                jp      dv_x
+dvr_slow:       ld      a,c                     ; (rare: the u8 clamp ladder)
 dcl_vert_on:
                 ld      (lc_x1),a
                 ld      a,(lc_y1+1)

@@ -1465,15 +1465,17 @@ name:                                           ; (HL at the stamp byte, the
                 jr      z,.c2
                 ld      hl,(ft)                 ; ft (ch)
                 ld      (lc_y1),hl
-                ld      hl,(ft+2)               ; fb (fh)
+                ex      de,hl                   ; (DE = y1, HL = y2: the clipper
+                ld      hl,(ft+2)               ;  takes them in registers)
 .emit:          ld      (lc_y2),hl
                 ld      a,c
-                jp      dcl_vert_on
+                jp      dcl_vert_reg
 .c2:            ld      a,(sg_flags)
                 and     SF_NEEDBB
                 ret     z
                 ld      hl,(ft+10)              ; bb (bfh)
                 ld      (lc_y1),hl
+                ex      de,hl
                 ld      hl,(ft+2)               ; fb (fh)
                 jr      .emit
 .c3:            ld      a,(sg_flags)
@@ -1481,6 +1483,7 @@ name:                                           ; (HL at the stamp byte, the
                 ret     z
                 ld      hl,(ft)                 ; ft (ch)
                 ld      (lc_y1),hl
+                ex      de,hl
                 ld      hl,(ft+8)               ; bt (bch)
                 jr      .emit
 .c4:            ld      a,(sg_flags)
