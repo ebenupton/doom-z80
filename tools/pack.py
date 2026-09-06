@@ -356,27 +356,36 @@ def build_collision(md):
     import colmap
     m = colmap.build()
     segs = m["colsegs"]
-    n = len(segs)
-    COL_SEG, COL_IDX, COL_LIST = 0xC000, 0xC700, 0xC780
-    assert n * 8 <= COL_IDX - COL_SEG, "COL_SEG overran COL_IDX"
-    buf = bytearray(0x2000)
+    ports = m["ports"]
+    n = len(segs)                 # COL_N_SOLID: idx < n -> solid, else port
+    COL_SEG, COL_PORT, COL_IDX, COL_LIST = 0xC000, 0xC700, 0xCA00, 0xCA80
+    assert n * 8 <= COL_PORT - COL_SEG, "COL_SEG overran COL_PORT"
+    assert len(ports) * 11 <= COL_IDX - COL_PORT, "COL_PORT overran COL_IDX"
+    buf = bytearray(0x3000)
     for i, (x1, y1, dx, dy) in enumerate(segs):
         struct.pack_into("<hhhh", buf, (COL_SEG - 0xC000) + i * 8, x1, y1, dx, dy)
+    # ports: x1,y1,dx,dy (s16) + ob,ot,mv (u8) = 11 bytes; rest-baked heights
+    for i, pt in enumerate(ports):
+        x1, y1, dx, dy, ob, ot, mv = pt[0], pt[1], pt[2], pt[3], pt[4], pt[5], pt[6]
+        o = (COL_PORT - 0xC000) + i * 11
+        struct.pack_into("<hhhh", buf, o, x1, y1, dx, dy)
+        buf[o + 8], buf[o + 9], buf[o + 10] = ob & 0xff, ot & 0xff, mv & 0xff
+    # per-column lists over the UNIFIED universe (solids then ports), exactly
+    # as colmap.collist (idx >= n = port)
     lst = []
     cur = COL_LIST
     for c in range(colmap.COLS):
         off, cnt = m["colidx"][c]
-        idxs = [m["collist"][off + k] for k in range(cnt) if m["collist"][off + k] < n]
+        idxs = [m["collist"][off + k] for k in range(cnt)]
         o = (COL_IDX - 0xC000) + c * 3
         buf[o], buf[o + 1], buf[o + 2] = cur & 0xff, (cur >> 8) & 0xff, len(idxs)
-        for idx in idxs:
-            lst.append(idx)
+        lst.extend(idxs)
         cur += len(idxs)
     assert cur <= 0x10000, "COL_LIST overran the bank"
     for k, idx in enumerate(lst):
         buf[(COL_LIST - 0xC000) + k] = idx
     end = (COL_LIST - 0xC000) + len(lst)
-    print(f"  collision:   {n} solid lines, {len(lst)} column entries ({end} B)")
+    print(f"  collision:   {n} solids, {len(ports)} ports, {len(lst)} column entries ({end} B)")
     return bytes(buf[:end])
 
 

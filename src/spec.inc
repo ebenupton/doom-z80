@@ -441,7 +441,9 @@ cm_prod         EQU     VARS_BASE+493   ; a 16x16 product (s32)
 cm_acc          EQU     VARS_BASE+497   ; the shift-add multiplicand (u32)
 cm_sign         EQU     VARS_BASE+501   ; product sign
 pm_count        EQU     VARS_BASE+502   ; move chunks remaining
-VARS_END        EQU     VARS_BASE+503
+cm_vz           EQU     VARS_BASE+503   ; candidate floor vz from dest_check
+cm_tmob         EQU     VARS_BASE+504   ; box_scan crossed-port floor aggregate (s8)
+VARS_END        EQU     VARS_BASE+505
 ; --- batched sloped-edge drawing ------------------------------------------
 ; --- fused draw + tighten ---------------------------------------------------
 ; the seg chain: a subsector's segs share endpoints, so the pair projected for
@@ -537,9 +539,14 @@ NEAR_CROSS      EQU     32
 BANK_OBJ        EQU     4
 BANK_COL        EQU     1               ; player-collision tables (coldata.bin)
 COL_SEG         EQU     $C000           ; N x 8: blocking lines (x1,y1,dx,dy s16, centre-rel)
-COL_IDX         EQU     $C700           ; 36 x 3: per X column (list ptr lo, hi, count)
-COL_LIST        EQU     $C780           ; u8 solid seg indices, per-column runs
+COL_PORT        EQU     $C700           ; ports: x1,y1,dx,dy s16 + ob,ot,mv (11 bytes)
+COL_IDX         EQU     $CA00           ; 36 x 3: per X column (list ptr lo, hi, count)
+COL_LIST        EQU     $CA80           ; u8 unified indices (idx < COL_N_SOLID = solid)
+COL_N_SOLID     EQU     204             ; colmap len(colsegs); idx >= this is a port
+DOOR_MIN_OPEN   EQU     7               ; colmap DOOR_MIN_OPEN_PS (56 world)
+EYE_PS          EQU     5               ; colmap EYE_PS (+41 world eye offset)
 PL_RADIUS       EQU     16              ; the player's collision box half-width (world)
+PM_STEP_PS      EQU     4               ; max step up (prescaled); DOOM's 24 world units
 MM_HALF         EQU     724             ; max move chunk (8.8 prescaled); a chunk's
                                         ; diagonal stays under 2*RADIUS so a move
                                         ; cannot tunnel a thin wall (BBC colmap)

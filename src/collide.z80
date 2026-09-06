@@ -96,6 +96,7 @@ pm_step:
                 ld      (cm_qyf),a
                 call    box_clear
                 jr      c,pm_commit_xy
+pm_try_x:
                 ; x only (candidate x, current y)
                 ld      hl,(cand_x)
                 ld      (cm_qx),hl
@@ -107,6 +108,7 @@ pm_step:
                 ld      (cm_qyf),a
                 call    box_clear
                 jr      c,pm_commit_x
+pm_try_y:
                 ; y only (current x, candidate y)
                 ld      hl,(pl_x)
                 ld      (cm_qx),hl
@@ -119,6 +121,8 @@ pm_step:
                 call    box_clear
                 ret     nc                      ; fully blocked: stay put
                 ; commit y
+                ld      a,(cm_vz)
+                ld      (vs_vz),a
                 ld      hl,(cand_y)
                 ld      (pl_y),hl
                 ld      a,(cand_yf)
@@ -183,6 +187,8 @@ cand_py:
 ; Build the radius-16 box in raw centre-relative world coords and scan the
 ; column(s) it spans.  Carry SET = clear (no solid line hit), clear = blocked.
 box_clear:
+                ld      a,-40                   ; tm_ob sentinel (colmap)
+                ld      (cm_tmob),a
                 ; nx = (q << 3) + (qf >> 5); box[axis] = nx -/+ 16.  The
                 ; fraction (0.8 of a prescaled = 8-world unit) contributes the
                 ; low 3 world bits, so the box tracks the true position.
@@ -252,6 +258,75 @@ mk_axis:
                 ld      (ix+1),h
                 ret
 
+; dest_ok (GATED 2026-09-06: reuses fe_descend, whose render-walk descent
+; diverges from colmap.find_ss in ~13% of the map -> over-blocks. Re-enable in
+; pm_step once an exact colmap find_ss is ported. Kept here, verified logic.)
+; dest_ok : cm_qx/cm_qy = a candidate (prescaled pl_x/pl_y).  Descends the
+; BSP to the subsector there and takes its floor vz (EYEZ[SSSEC[ss]], the
+; same value find_eye_height uses); the step is legal iff vz - vs_vz <=
+; PM_STEP_PS (a drop is always legal).  Carry SET = OK, and cm_vz = the new
+; floor.  Mirrors colmap.dest_check for static (non-mover) subsectors.
+; Pages bank 4 (NODES4/fe_descend) then bank 0 (SSSEC/EYEZ), then bank 1 back.
+dest_ok:
+                ld      hl,(pl_wx)
+                push    hl
+                ld      hl,(pl_wy)
+                push    hl
+                ; candidate world = cm_q*8 + MAP_CENTER
+                ld      hl,(cm_qx)
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                ld      de,MAP_CENTER_X
+                add     hl,de
+                ld      (pl_wx),hl
+                ld      hl,(cm_qy)
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl
+                ld      de,MAP_CENTER_Y
+                add     hl,de
+                ld      (pl_wy),hl
+                ld      a,BANK_OBJ
+                call    set_page
+                ld      hl,(bsp_root)
+                call    fe_descend              ; HL = subsector, bit 15 set
+                ld      a,BANK_GEOM
+                call    set_page
+                res     7,h
+                ld      de,SSSEC
+                add     hl,de
+                ld      l,(hl)
+                ld      h,0
+                ld      de,EYEZ
+                add     hl,de
+                ld      a,(hl)                  ; destination subsector floor vz
+                ld      b,a                     ; eff = max(destfloor, tm_ob), signed
+                ld      a,(cm_tmob)
+                sub     b
+                jp      p,do_vz                 ; tm_ob >= destfloor: use tm_ob
+                ld      a,b                     ; else destfloor
+                jr      do_vst
+do_vz:          ld      a,(cm_tmob)
+do_vst:         ld      (cm_vz),a               ; effective candidate floor
+                ld      a,BANK_COL
+                call    set_page
+                pop     hl
+                ld      (pl_wy),hl
+                pop     hl
+                ld      (pl_wx),hl
+                ; step test: cm_vz - vs_vz > PM_STEP_PS  ->  blocked
+                ld      a,(cm_vz)
+                ld      hl,vs_vz
+                sub     (hl)                    ; s8 floor difference
+                jp      m,do_ok                 ; a drop (or level) is fine
+                cp      PM_STEP_PS+1
+                jr      c,do_ok                 ; <= PM_STEP_PS: legal step
+                or      a                       ; too high: blocked (carry clear)
+                ret
+do_ok:          scf
+                ret
+
 ; col_of : HL = a centre-relative raw x -> A = clamp((x - RAWX_MIN) >> 7, 0, 35)
 col_of:
                 ld      de,-COL_RAWX_MIN        ; + 1936
@@ -294,9 +369,11 @@ scan_col:
                 scf
                 ret     z                       ; empty column: clear
 sc_loop:
-                ld      a,(de)                  ; seg index
+                ld      a,(de)                  ; unified index
                 push    de
                 push    bc
+                cp      COL_N_SOLID
+                jr      nc,sc_port              ; idx >= N_SOLID: a port
                 ; IX = COL_SEG + idx * 8
                 ld      l,a
                 ld      h,0
@@ -310,11 +387,65 @@ sc_loop:
                 call    box_hits_seg            ; carry = hit
                 pop     bc
                 pop     de
-                jr      c,sc_hit
+                jr      c,sc_hit                ; a solid line: hard block
                 inc     de
                 djnz    sc_loop
-                scf                             ; scanned all, no hit: clear
+                scf                             ; scanned all, no hard hit: clear
                 ret
+sc_port:
+                ; IX = COL_PORT + (idx - N_SOLID) * 11
+                sub     COL_N_SOLID
+                ld      l,a
+                ld      h,0
+                ld      d,h
+                ld      e,l
+                add     hl,hl
+                add     hl,hl
+                add     hl,hl                   ; *8
+                add     hl,de
+                add     hl,de
+                add     hl,de                   ; *11
+                ld      de,COL_PORT
+                add     hl,de
+                push    hl
+                pop     ix
+                call    box_hits_seg            ; does the box cross this port?
+                jr      nc,sc_port_miss
+                ; opening = ot - (ob - EYE_PS) ; < DOOR_MIN -> hard block
+                ld      a,(ix+9)                ; ot
+                ld      c,a
+                ld      a,(ix+8)                ; ob
+                sub     EYE_PS
+                ld      b,a
+                ld      a,c
+                sub     b                       ; ot - (ob - EYE_PS)  (s8)
+                sub     DOOR_MIN_OPEN
+                jp      m,sc_hit_pop            ; opening < DOOR_MIN: blocked
+                ; head bump: ot - (vs_vz - EYE_PS) < DOOR_MIN -> block
+                ld      a,(vs_vz)
+                sub     EYE_PS
+                ld      b,a
+                ld      a,(ix+9)
+                sub     b                       ; ot - (z - EYE_PS)  (s8)
+                sub     DOOR_MIN_OPEN
+                jp      m,sc_hit_pop            ; head bump: blocked
+                ; passable: tm_ob = max(tm_ob, ob)
+                ld      a,(ix+8)                ; ob (s8)
+                ld      hl,cm_tmob
+                sub     (hl)                    ; ob - tm_ob (s8)
+                jp      m,sc_port_miss          ; ob < tm_ob: keep
+                jr      z,sc_port_miss
+                ld      a,(ix+8)
+                ld      (cm_tmob),a             ; raise tm_ob to ob
+sc_port_miss:
+                pop     bc
+                pop     de
+                inc     de
+                djnz    sc_loop
+                scf
+                ret
+sc_hit_pop:     pop     bc
+                pop     de
 sc_hit:         or      a                       ; blocked
                 ret
 

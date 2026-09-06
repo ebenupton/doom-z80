@@ -1,6 +1,7 @@
                 DEVICE  ZXSPECTRUM128
                 DEFINE  BANK4_FILE "build/t_view_b4.bin"
                 include "spec.inc"
+                include "start.inc"
                 ORG     ROWLO_A
                 DS      160, 0
                 include "spill1.z80"
