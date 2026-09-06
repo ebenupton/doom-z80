@@ -230,7 +230,7 @@ obj_pj_z:
 obj_stage16:
                 add     hl,bc
                 ld      (hl),e
-                inc     hl
+                inc     l                       ; (the slot arrays are one page)
                 ld      (hl),d
                 ret
 

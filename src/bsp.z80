@@ -1352,16 +1352,16 @@ rsb_fused:
                 call    rsb_stage
                 pop     af
                 jp      fused_line
-rsb_stage:                                      ; (the rows are biased already)
-                ld      e,(hl)
-                inc     hl
+rsb_stage:                                      ; (the rows are biased already;
+                ld      e,(hl)                  ;  sg_ft1..sg_bb2 are one page)
+                inc     l
                 ld      d,(hl)
                 ld      (lc_y1),de
-                inc     hl
-                inc     hl
-                inc     hl
+                inc     l
+                inc     l
+                inc     l
                 ld      e,(hl)
-                inc     hl
+                inc     l
                 ld      d,(hl)
                 ld      (lc_y2),de
                 ld      hl,(sg_sx1)

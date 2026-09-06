@@ -626,14 +626,16 @@ shg_go:
                 ld      a,(sp_head)
                 ld      h,SPH>>8
                 ld      e,0                     ; the predecessor
+                inc     b                       ; (ilo < ihi <= 255, so lo + 1
+                                                ;  never wraps: `xe <= lo` is
+                                                ;  ONE compare against it)
 sg_l:           or      a
-                ret     z                       ; (carry clear)
+                jr      z,sg_none               ; (carry clear)
                 ld      l,a
                 inc     l
                 inc     l                       ; -> xe
                 ld      a,(hl)
                 cp      b
-                jr      z,sg_n
                 jr      c,sg_n                  ; xe <= lo: wholly left
                 dec     l
                 dec     l
@@ -642,6 +644,7 @@ sg_l:           or      a
                 ld      a,e
                 ld      (dcls_prev),a
                 inc     l                       ; -> xs
+                dec     b                       ; (the bias back for the caller)
                 ld      a,(hl)
                 cp      c                       ; carry: xs < hi, a gap
                 ret
@@ -650,10 +653,14 @@ sg_n:           dec     l
                 ld      e,l                     ; the predecessor
                 ld      a,(hl)
                 jp      sg_l
+sg_none:        dec     b                       ; (the bias back for the caller)
+                ret
 ; hg_u8 : B = ilo, C = ihi already bytes with ilo < ihi (the box checks)
 hg_u8:                                          ; the walk in HL (free here);
                 ld      a,(sp_head)             ; B = ilo, C = ihi ride
                 ld      h,SPH>>8
+                inc     b                       ; (ilo < ihi <= 255: `xe <= lo`
+                                                ;  is ONE compare against lo + 1)
                 ; BBC 62a60e7: the has_gap candidate cache is retired - a miss
                 ; walks only ~1.8 spans, so the probe cost about what it saved
                 ; and the store ran every call (costlier still on the Z80)
@@ -664,7 +671,6 @@ hg_l:           or      a
                 inc     l                       ; -> xe
                 ld      a,(hl)
                 cp      b
-                jr      z,hg_n
                 jr      c,hg_n                  ; xe <= lo: wholly left
                 dec     l                       ; -> xs
                 ld      a,(hl)
