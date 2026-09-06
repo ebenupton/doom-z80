@@ -59,7 +59,7 @@ walk:
                 or      a
                 ret     z                       ; screen fully occluded
                 bit     7,h
-                jp      nz,walk_ss
+                jr      nz,walk_ss
                 ; L = the node id: the fields are planes, no record address
                 push    hl
                 call    point_on_side           ; A = the side

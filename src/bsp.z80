@@ -938,7 +938,21 @@ rs_nd:          ld      (sg_n1),bc              ; C = v1's verdict, B = v2's
                 ret     nz                      ; both behind the near plane
                 ld      a,b
                 or      c
-                jp      z,rs_havex              ; both in front: the copies stand
+                jr      nz,rs_clipx             ; a near crossing (11%): the
+                                                ;  island below rs_havex
+rs_havex:
+                ; a reversed or tied projection covers no columns: dropped
+                ld      hl,(sg_sx2)
+                ld      de,(sg_sx1)
+                CMP16F
+                ret     c
+                ret     z
+                ld      hl,(sg_sx1)
+                ld      de,(sg_sx2)
+                call    sp_hasgap
+                ret     nc
+                jp      render_seg_body
+
 rs_clipx:
                 ; a crossing needs the view coordinates: from the rotated
                 ; cache (both vertices were probed this frame)
@@ -971,7 +985,7 @@ rs_clip1:
                 ld      hl,(bb_cx)
                 call    project_x
                 ld      (sg_sx1),hl
-                jr      rs_havex
+                jp      rs_havex
 rs_clip2:
                 ; v2 is behind: cross toward v1
                 call    near_cross_seg2
@@ -984,18 +998,7 @@ rs_clip2:
                 ld      (sg_sx2),hl
                 ld      hl,$ffff                ; not the vertex's own: no chain
                 ld      (ch_v2),hl
-rs_havex:
-                ; a reversed or tied projection covers no columns: dropped
-                ld      hl,(sg_sx2)
-                ld      de,(sg_sx1)
-                CMP16F
-                ret     c
-                ret     z
-                ld      hl,(sg_sx1)
-                ld      de,(sg_sx2)
-                call    sp_hasgap
-                ret     nc
-                jp      render_seg_body
+                jp      rs_havex
 
 ; rs_near : HL = tvy -> A = 1 when it is short of the near plane.
 rs_near:

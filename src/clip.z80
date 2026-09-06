@@ -335,7 +335,7 @@ interp_s16:
                 sbc     hl,bc                   ; x1 - x0
                 ld      a,h
                 or      l
-                jp      z,is16_y0
+                jr      z,is16_y0
                 bit     7,h
                 jp      z,is16_dp
                 call    neg_hl                  ; (DE kept)
@@ -344,11 +344,11 @@ interp_s16:
                 ex      de,hl
 is16_dp:        ld      a,d
                 or      e
-                jp      z,is16_y0               ; at the first anchor
+                jr      z,is16_y0               ; at the first anchor
                 push    hl
                 sbc     hl,de                   ; (carry clear: or)
                 pop     hl
-                jp      z,is16_y1               ; at the second
+                jr      z,is16_y1               ; at the second
                 exx
                 ld      l,(ix+6)
                 ld      h,(ix+7)
@@ -501,7 +501,7 @@ udiv32_16:                                      ; DE:HL / BC -> HL = q
                 jp      nc,ud_zero
 ud_ok:          ld      a,d
                 or      a
-                jp      nz,ud_16
+                jr      nz,ud_16
                 ld      a,e
                 cp      b
                 jr      c,ud_8
@@ -1757,7 +1757,7 @@ not_both_y:
                 ld      a,(lc_x1+1)
                 ld      hl,lc_x2+1
                 or      (hl)
-                jp      z,skip_xclip
+                jr      z,skip_xclip
                 ; --- the x clip: each end outside [0, 255] moves to the edge,
                 ; its y the s16 interpolation there (unclamped) ---
                 call    stage_lc_xy
@@ -2162,7 +2162,7 @@ cs_ent_top:
                 ld      (fwl_zx0),bc            ; the overlap, for the clip
                 ld      a,(fwl_hi)
                 cp      (ix+SP_OT)
-                jp      nc,fw_cb
+                jr      nc,fw_cb
 cs_rej_above:                                   ; 'above': kills on the bottom side
                 call    fw_touch_close
                 ld      a,(fw_side)
@@ -2603,7 +2603,7 @@ ar_walk:        or      a
                 inc     l                       ; -> xe
                 ld      a,e
                 cp      (hl)
-                jp      nc,ar_next              ; ax0 >= xe: wholly left
+                jr      nc,ar_next              ; ax0 >= xe: wholly left
                 dec     l
                 ld      b,(hl)                  ; xs
                 ld      a,d
@@ -2833,7 +2833,7 @@ fm_pair:        ; HL = P.xe, DE = Q.xs.  P absorbs Q when they abut and the
                 ; at BXLO)
                 ld      a,(de)                  ; Q.xs
                 cp      (hl)                    ; P.xe
-                jp      nz,fm_stepq
+                jr      nz,fm_stepq
                 ld      a,l
                 and     $F8
                 or      SL_BXLO
@@ -2858,7 +2858,7 @@ fm_pair:        ; HL = P.xe, DE = Q.xs.  P absorbs Q when they abut and the
                 EDUP
                 ld      a,(de)
                 cp      (hl)                    ; BR
-                jp      nz,fm_stepq_l
+                jr      nz,fm_stepq_l
                 ld      a,l
                 and     $F8
                 ld      l,a
@@ -2874,7 +2874,7 @@ fm_pair:        ; HL = P.xe, DE = Q.xs.  P absorbs Q when they abut and the
                 EDUP
                 ld      a,(de)
                 cp      (hl)                    ; TR
-                jp      nz,fm_stepq_l
+                jr      nz,fm_stepq_l
                 inc     h
                 inc     d
                 ld      a,e

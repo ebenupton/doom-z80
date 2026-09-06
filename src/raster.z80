@@ -183,12 +183,12 @@ pl_sorted:      ld      a,b
                 neg
                 ld      e,a                     ; E = dx, right-going
                 cp      d
-                jp      c,pl_steep_r
+                jr      c,pl_steep_r
                 ld      a,PLTAB_R & 255
                 jp      pl_shallow
 pl_left:        ld      e,a                     ; E = dx, left-going
                 cp      d
-                jp      c,pl_steep_l
+                jr      c,pl_steep_l
                 ld      a,PLTAB_L & 255
 pl_shallow:
                 ; A = the direction's table; C = x0, B = y0, D = dy, E = dx
@@ -307,7 +307,7 @@ PLTAB_L:        DB      $80,0
 pl_steep:
                 ld      a,e
                 or      a
-                jp      z,pl_vert
+                jr      z,pl_vert
                 ld      a,d
                 srl     a
                 ld      (ln_err),a
@@ -328,7 +328,7 @@ pl_steep:
                 ld      a,(ln_left)
                 or      a
                 ld      a,(ln_err)
-                jp      nz,st_left
+                jr      nz,st_left
 st_right:
                 ex      af,af'
                 ld      a,(hl)
