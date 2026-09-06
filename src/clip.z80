@@ -2601,14 +2601,13 @@ rv_degen:                                       ; a contiguous point closes the
                 ld      a,iyl
                 cp      c
                 jr      nz,fw_close_run
-                ld      a,e
-                ld      (fwl_rendv),a
-                ; fall into fw_close_run
+                ld      a,e                     ; (the end value is in hand:
+                jr      cr_have                 ;  no store and no read back)
 
 ; --- fw_close_run : plot the run, then apply it ----------------------------
 fw_close_run:
                 ld      a,(fwl_rendv)
-                cp      $80
+cr_have:        cp      $80
                 jr      nz,cr_store
                 ld      a,iyl
                 ld      hl,fwl_xr
