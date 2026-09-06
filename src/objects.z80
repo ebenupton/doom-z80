@@ -157,16 +157,16 @@ obj_project:
 ob_rot:         call    obj_rot                 ; the vertex transform (bank 2;
                 push    de                      ;  DE = tvx, HL = tvy
                 bit     7,h
-                jr      nz,obj_pj_drop          ; behind
+                jp      nz,obj_pj_drop          ; behind
                 ld      a,h
                 or      a
                 jp      nz,obj_pj_ok
                 ld      a,l
                 cp      16
-                jr      c,obj_pj_drop           ; inside the near limit
+                jp      c,obj_pj_drop           ; inside the near limit
 obj_pj_ok:
                 ld      (obj_vy),hl
-                call    recip                   ; D = S, E = M8
+                RECIP_BODY                      ; D = S, E = M8
                 pop     hl                      ; tvx
                 push    de
                 call    project_x
@@ -194,18 +194,30 @@ obj_pj_ok:
                 ld      a,(obj_n)
                 add     a,a
                 ld      c,a                     ; BC = 2n
-                ld      hl,obj_sd
-                ld      de,(obj_vy)
-                call    obj_stage16
+                ld      hl,obj_sd               ; (the four slot stores inline:
+                add     hl,bc                   ;  obj_stage16's call and return
+                ld      de,(obj_vy)             ;  cost more than its body)
+                ld      (hl),e
+                inc     l
+                ld      (hl),d
                 ld      hl,obj_scx
+                add     hl,bc
                 ld      de,(obj_cx)
-                call    obj_stage16
+                ld      (hl),e
+                inc     l
+                ld      (hl),d
                 ld      hl,obj_syt
+                add     hl,bc
                 ld      de,(obj_yt)
-                call    obj_stage16
+                ld      (hl),e
+                inc     l
+                ld      (hl),d
                 ld      hl,obj_syb
+                add     hl,bc
                 ld      de,(obj_yb)
-                call    obj_stage16
+                ld      (hl),e
+                inc     l
+                ld      (hl),d
                 ld      hl,obj_n
                 inc     (hl)
                 ret
@@ -223,8 +235,9 @@ obj_pj_z:
                 ld      a,(hl)
                 push    de
                 call    project_y_vz            ; subtracts vs_vz (SMC) itself
-                pop     de
-                ret
+                pop     de                      ; (NOT PY_INLINE: its SMC eye
+                ret                             ;  height sits in bank 4, which
+                                                ;  view_setup cannot reach)
 
 ; obj_stage16 : (HL + BC) <- DE
 obj_stage16:
@@ -286,7 +299,7 @@ obj_hok:
                 ld      l,(hl)
                 ld      a,(obj_h)
                 ld      h,a
-                call    mul_u8
+                MUL_U8_BODY 
                 add     hl,hl
                 add     hl,hl
                 ld      a,l
@@ -806,7 +819,8 @@ obj_rmul:
                 ld      h,a
                 ld      a,(obj_mulb)
                 ld      l,a
-                call    mul_u8
+                MUL_U8_BODY                     ; (inline: the call was a fifth
+                                                ;  of this routine)
                 ld      a,l
                 add     a,a
                 ld      a,h
@@ -1167,7 +1181,7 @@ obj_grow:
                 ld      l,a
                 ld      a,(obj_h)
                 ld      h,a
-                call    mul_u8
+                MUL_U8_BODY 
                 ld      a,l
                 add     a,a                     ; carry = the rounding bit
                 ld      a,h

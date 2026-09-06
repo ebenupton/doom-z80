@@ -1327,7 +1327,21 @@ cs8_ge:         or      a
 ; rsb_line : HL -> a row pair (y at sx1; y at sx2 four bytes on), drawn from
 ; sx1 to sx2 through the clipper
 rsb_line:
-                call    rsb_stage
+                ld      e,(hl)                  ; (RSB_STAGE: the rows are
+                inc     l                       ;  biased already, and
+                ld      d,(hl)                  ;  sg_ft1..sg_bb2 are one page)
+                ld      (lc_y1),de
+                inc     l
+                inc     l
+                inc     l
+                ld      e,(hl)
+                inc     l
+                ld      d,(hl)
+                ld      (lc_y2),de
+                ld      hl,(sg_sx1)
+                ld      (lc_x1),hl
+                ld      hl,(sg_sx2)
+                ld      (lc_x2),hl
                 ; u8-clean and not a vertical: the seek is sp_hasgap's memo
                 ld      a,(lc_x1+1)
                 ld      hl,lc_y1+1
@@ -1349,13 +1363,9 @@ rsb_line:
 ; rsb_fused : the same line as an aperture edge, A = the side
 rsb_fused:
                 push    af
-                call    rsb_stage
-                pop     af
-                jp      fused_line
-rsb_stage:                                      ; (the rows are biased already;
-                ld      e,(hl)                  ;  sg_ft1..sg_bb2 are one page)
-                inc     l
-                ld      d,(hl)
+                ld      e,(hl)                  ; (RSB_STAGE: the rows are
+                inc     l                       ;  biased already, and
+                ld      d,(hl)                  ;  sg_ft1..sg_bb2 are one page)
                 ld      (lc_y1),de
                 inc     l
                 inc     l
@@ -1368,7 +1378,8 @@ rsb_stage:                                      ; (the rows are biased already;
                 ld      (lc_x1),hl
                 ld      hl,(sg_sx2)
                 ld      (lc_x2),hl
-                ret
+                pop     af
+                jp      fused_line
 
 
 ; ---------------------------------------------------------------------------
