@@ -170,7 +170,7 @@ vs_rotsel:      ld      (vx_rot+1),hl
 ; (18 04) when positive, `xor a / sub l` (AF 95) when negative
 vs_patchc:      ld      de,$0418
                 or      a
-                jr      z,vpc_ok
+                jp      z,vpc_ok
                 ld      de,$95AF
 vpc_ok:         ld      (hl),e
                 inc     hl
@@ -352,7 +352,7 @@ sr_il:          ld      a,l
                 add     a,8
                 ld      (hl),a
                 ld      l,a
-                jr      nz,sr_il
+                jp      nz,sr_il
                 ld      a,16
                 ld      (sp_free),a
                 ld      l,8                     ; the screen span: slot 1

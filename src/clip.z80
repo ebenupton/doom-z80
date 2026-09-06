@@ -1047,7 +1047,7 @@ dcl_acc_open:
                 pop     bc
                 pop     de
                 pop     hl
-                jr      dcl_acc_sy
+                jp      dcl_acc_sy
 dcl_accept_yl:  ld      a,(lc_y1)
 dcl_acc_sy:     ld      iyl,a
 dcl_acc_extend:
@@ -1192,7 +1192,7 @@ dcb_cy_slow:
                 cp      b                       ; at x1: y1
                 jr      z,dcb_cy1_yl
                 call    interp_store
-                jr      dcb_cy1_have
+                jp      dcb_cy1_have
 dcb_cy1_yl:     ld      a,(lc_y1)
 dcb_cy1_have:   ld      (cb_cy1),a
                 ld      a,(cb_cx2)
@@ -1202,7 +1202,7 @@ dcb_cy1_have:   ld      (cb_cy1),a
                 IW_LINE
                 ld      a,(cb_cx2)
                 call    interp_store
-                jr      dcb_cy2_have
+                jp      dcb_cy2_have
 dcb_cy2_yr:     ld      a,(lc_y2)
 dcb_cy2_have:   ld      (cb_cy2),a
 dcb_cy_done:
@@ -1346,7 +1346,7 @@ dcb_bot_c2only:
                 jp      dcb_bot_p2clip
 dcb_bot_eval:
                 LP_BLBR
-                jr      nz,dcb_bot_interp
+                jp      nz,dcb_bot_interp
                 ld      (cb_bot1),a
                 ld      (cb_bot2),a
                 jr      dcb_bot_evaled
@@ -1581,7 +1581,7 @@ dv_cy2_ok:      ld      a,(cb_cy1)
                 ld      a,e
                 cp      b
                 ret     c                       ; cy2 < cy1: clipped away
-                jr      dv_emit
+                jp      dv_emit
 dv_bot_skip:
                 ld      a,(cb_cy1)
                 ld      b,a
@@ -2213,7 +2213,7 @@ fw_cb:
                 ld      (cb_cx2),a
                 ld      a,(fwl_dy)
                 or      a
-                jr      nz,fcb_cy_slow
+                jp      nz,fcb_cy_slow
                 ld      a,(fwl_yl)
                 ld      (cb_cy1),a
                 ld      (cb_cy2),a

@@ -108,7 +108,7 @@ obj_minloop:
                 sbc     a,(hl)                  ; carry: depth[y] < depth[best]
                 pop     de
                 pop     bc
-                jr      nc,obj_minnext
+                jp      nc,obj_minnext
                 ld      b,c
 obj_minnext:
                 inc     c
@@ -396,7 +396,7 @@ obj_sel_potion:
                 jr      obj_art_go
 obj_sel_helmet:
                 call    obj_helmet_xy
-                jr      obj_art_go
+                jp      obj_art_go
 obj_sel_box:
                 call    obj_box_y
                 jr      obj_art_go

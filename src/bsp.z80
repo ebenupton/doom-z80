@@ -187,7 +187,7 @@ nc_small:
                 call    rns8_ahl
                 ld      de,(cr_vx1)
                 add     hl,de
-                jr      nc_done
+                jp      nc_done
 nc_negdvx:
                 ex      de,hl
                 ld      hl,0

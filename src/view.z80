@@ -257,7 +257,7 @@ fterm_sin:
                 ld      l,h
                 ld      h,0                     ; HL = (lo*mag + 128) >> 8
                 ld      a,(vs_sneg)
-                jr      ft_sign
+                jp      ft_sign
 ft_unity_s:
                 ld      h,0
                 ld      l,e
@@ -277,7 +277,7 @@ fterm_cos:
                 ld      l,h
                 ld      h,0
                 ld      a,(vs_cneg)
-                jr      ft_sign
+                jp      ft_sign
 ft_unity_c:
                 ld      h,0
                 ld      l,e
