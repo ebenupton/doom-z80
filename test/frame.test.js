@@ -12,6 +12,7 @@ z.m.ram[5].set(fs.readFileSync(R + 'build/nodebb.bin'), 0x6580 - 0x4000);
 z.m.ram[5].set(fs.readFileSync(R + 'build/l8.bin'), 0x6200 - 0x4000);
 z.m.ram[5].set(fs.readFileSync(R + 'build/atan.bin'), 0x5B00 - 0x4000);
 z.call('sq_init');
+z.poke(z.sym_('VARS_BASE') + 10, 0);   // back_buf: cpm_init derives page_base from it
 z.call('cpm_init');              // pages the objects' bank and leaves the geometry's
 z.m.applyPaging(6);              // the rasteriser's bank for its init
 z.call('raster_init');

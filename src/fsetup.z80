@@ -130,6 +130,19 @@ vs_mc16:        ld      (vs_m16c),de
                 ld      a,(vs_cneg)
                 ld      hl,vcu_ys
                 call    vs_patchc
+                ld      a,(vs_sneg)             ; the objects' copies
+                ld      hl,osu_xs
+                call    vs_patchc
+                ld      a,(vs_sneg)
+                ld      hl,osu_ys
+                call    vs_patchc
+                ld      a,(vs_cneg)
+                xor     1
+                ld      hl,ocu_xs
+                call    vs_patchc
+                ld      a,(vs_cneg)
+                ld      hl,ocu_ys
+                call    vs_patchc
                 ld      hl,vg_rotate_rel
                 ld      de,obj_rot
                 ld      a,(vs_sunity)

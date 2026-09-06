@@ -21,8 +21,13 @@
                 include "view.z80"
                 include "clip.z80"
                 include "bsp.z80"
-                include "collide.z80"
-                ; the rasteriser, in bank 7 as in the engine
+T_CODE_END:
+                ASSERT  T_CODE_END <= OBJ_ANYB  ; the harness must not run over the pool/vars either
+                ; the rasteriser, in bank 7 as in the engine, the collision
+                ; code above it at COL_CODE (it used to follow bsp.z80 and
+                ; grew over the span pool and VARS: back_buf read as code)
                 DS      RASTER_BASE-$,0
                 include "raster.z80"
+                DS      COL_CODE-$,0
+                include "collide.z80"
                 include "bank4.inc"

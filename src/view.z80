@@ -174,7 +174,8 @@ vs_origin:
                 ld      de,(vs_t1)
                 add     hl,de
                 ld      (vs_rx),hl
-                ld      (vxh_rx+1),hl           ; vx_have's immediate
+                ld      (vxh_rx+1),hl           ; vg_have's and vx_have's immediates
+                ld      (vxh_rx2+1),hl
 
                 ; ref_vy = rot_cos(nx) + rot_sin(ny)
                 ld      de,(vs_nx)
@@ -188,6 +189,7 @@ vs_origin:
                 add     hl,de
                 ld      (vs_ry),hl
                 ld      (vxh_ry+1),hl
+                ld      (vxh_ry2+1),hl
 
                 ; advance the vertex-cache generation
                 ld      a,(vc_stamp)
@@ -561,10 +563,12 @@ pym_neg:        MUL_AE                          ; (h + 256) * M8: less M8 << 8
 ; S = 3 and kept three more bits for S < 3, which put a vertex one column
 ; off in 5 of 1000 frames.)  Eats A, BC, DE.
 ; ---------------------------------------------------------------------------
-project_x:
+; PROJECT_X : project_x's body as a macro, so vg_front (the hot caller) runs
+; it in line; project_x is the routine form for the objects
+                MACRO   PROJECT_X
                 ld      a,e
                 or      a
-                jp      z,px_q                  ; m9 = 256: Q = tvx
+                jp      z,.q                  ; m9 = 256: Q = tvx
                 ; floor(tvx * M8 / 256) = hi * M8 + floor(lo * M8 / 256) for
                 ; tvx = 256 * hi + lo (hi signed, lo unsigned): two 8x8s
                 ; (MUL_AE keeps M8 and S in DE), and none at all for the high
@@ -577,13 +581,13 @@ project_x:
                 ld      a,h                     ; the low partial
                 ex      af,af'                  ; A = hi, A' = the partial
                 or      a
-                jr      z,px_hi0
+                jr      z,.hi0
                 inc     a
-                jr      z,px_him1
+                jr      z,.him1
                 dec     a
-                jp      m,px_neg
+                jp      m,.neg
                 MUL_AE                          ; HL = hi * M8
-px_join:        ex      af,af'
+.join:        ex      af,af'
                 add     a,l                     ; + the low partial
                 ld      l,a
                 ld      a,0
@@ -591,61 +595,61 @@ px_join:        ex      af,af'
                 ld      h,a
                 pop     bc                      ; tvx
                 add     hl,bc                   ; Q
-                jr      px_q
-px_neg:         MUL_AE                          ; HL = hi_u * M8: the two's
+                jr      .q
+.neg:         MUL_AE                          ; HL = hi_u * M8: the two's
                 ld      a,h                     ;  complement's 256 * M8 off
                 sub     e
                 ld      h,a
-                jr      px_join
-px_hi0:         ex      af,af'                  ; Q = tvx + the low partial
+                jr      .join
+.hi0:         ex      af,af'                  ; Q = tvx + the low partial
                 pop     hl
                 add     a,l
                 ld      l,a
-                jr      nc,px_q
+                jr      nc,.q
                 inc     h
-                jr      px_q
-px_him1:        ex      af,af'                  ; Q = tvx + the partial - M8,
+                jr      .q
+.him1:        ex      af,af'                  ; Q = tvx + the partial - M8,
                 sub     e                       ;   the difference in [-M8, -1]
                 ld      c,a
                 ld      b,$ff
                 pop     hl
                 add     hl,bc
-px_q:           ld      a,d
+.q:           ld      a,d
                 sub     3
-                jr      z,px_done
-                jr      c,px_left
+                jr      z,.done
+                jr      c,.left
                 ; round half up by S - 3, the common counts inline in order
                 ; of frequency (S = 8 is the mode): 5 and 6 as rh_5/rh_6
                 ; ((V + 2^(B-1)) as s24 shifted LEFT by 8 - B, the top two
                 ; bytes taken), 1..4 as the chain (B - 1 plain shifts, + 1,
                 ; one more); the rest through rns_hl
                 cp      5
-                jr      z,pxr_5
+                jr      z,.r5
                 cp      4
-                jr      z,pxr_4
+                jr      z,.r4
                 cp      6
-                jr      z,pxr_6
+                jr      z,.r6
                 cp      3
-                jr      z,pxr_3
+                jr      z,.r3
                 cp      2
-                jr      z,pxr_2
+                jr      z,.r2
                 dec     a
-                jr      nz,pxr_gen
-pxr_1:          inc     hl
+                jr      nz,.rgen
+.r1:          inc     hl
                 sra     h
                 rr      l
-                jr      px_done
-pxr_4:          sra     h
+                jr      .done
+.r4:          sra     h
                 rr      l
-pxr_3:          sra     h
+.r3:          sra     h
                 rr      l
-pxr_2:          sra     h
+.r2:          sra     h
                 rr      l
                 inc     hl
                 sra     h
                 rr      l
-                jr      px_done
-pxr_5:          ld      a,h
+                jr      .done
+.r5:          ld      a,h
                 rla
                 sbc     a,a
                 ld      bc,16
@@ -659,8 +663,8 @@ pxr_5:          ld      a,h
                 rla
                 ld      l,h
                 ld      h,a
-                jr      px_done
-pxr_6:          ld      a,h
+                jr      .done
+.r6:          ld      a,h
                 rla
                 sbc     a,a
                 ld      bc,32
@@ -672,19 +676,22 @@ pxr_6:          ld      a,h
                 rla
                 ld      l,h
                 ld      h,a
-                jr      px_done
-pxr_gen:        ld      b,d
+                jr      .done
+.rgen:        ld      b,d
                 dec     b
                 dec     b
                 dec     b
                 call    rns_hl
-                jr      px_done
-px_left:        add     hl,hl                   ; S = 2: one doubling,
+                jr      .done
+.left:        add     hl,hl                   ; S = 2: one doubling,
                 inc     a
-                jr      z,px_done
+                jr      z,.done
                 add     hl,hl                   ; S = 1: two
-px_done:        ld      de,HALF_W
+.done:        ld      de,HALF_W
                 add     hl,de
+                ENDM
+project_x:
+                PROJECT_X
                 ret
 
 ; ---------------------------------------------------------------------------
